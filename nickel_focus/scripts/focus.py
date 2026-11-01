@@ -144,7 +144,12 @@ class NickelFocus(scriptbase.ScriptBase):
         if len(args.focus) == 3 or args.nstep is not None:
             # Perform a grid or archive sequence
             end = None if len(args.focus) == 2 else args.focus[2]
-            seq = focus.GridFocusSequence(args.focus[0], args.focus[1], end=end, nstep=args.nstep)
+            # Archive mode (obsnum given) only uses the grid for its focus
+            # values, so it shouldn't connect to the hardware.
+            seq = focus.GridFocusSequence(
+                args.focus[0], args.focus[1], end=end, nstep=args.nstep,
+                connect=args.obsnum is None
+            )
 
             if args.obsnum is not None:
                 # Construct the expected exposure filenames directly, instead of

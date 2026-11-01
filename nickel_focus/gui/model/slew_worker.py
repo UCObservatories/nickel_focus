@@ -39,13 +39,14 @@ class SlewWorker(QtCore.QThread):
     slewFinished : :class:`PySide6.QtCore.Signal`
         Emitted once the telescope has reached its target successfully.
     slewFailed : :class:`PySide6.QtCore.Signal`
-        Emitted once, with a human-readable message, if
+        Emitted once, with ``(message, exc)``, if
         :meth:`~nickel_focus.slew.NickelTelescopePointing.slew_to` raises --
-        movement disabled, tracking disabled, not ready to move, or a timeout
-        waiting to reach the target.
+        movement disabled, tracking disabled, not ready to move, a timeout
+        waiting to reach the target, or any unexpected error.  ``message`` is human-readable; ``exc`` is
+        the raised :obj:`Exception`, so its traceback can be logged.
     """
     slewFinished = QtCore.Signal()
-    slewFailed = QtCore.Signal(str)
+    slewFailed = QtCore.Signal(str, object)
 
     def __init__(self, telescope, ra, dec, parent=None):
         super().__init__(parent)
@@ -61,9 +62,12 @@ class SlewWorker(QtCore.QThread):
         :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker.run` for why
         emitting signals from here is still safe to connect to GUI-thread slots.
         """
+        # Catch everything, not just the ValueErrors `slew_to` raises
+        # itself (e.g., a ktl read/write failure), so that every failure is
+        # reported via `slewFailed` rather than escaping the thread.
         try:
             self.telescope.slew_to(self.ra, self.dec)
-        except ValueError as e:
-            self.slewFailed.emit(f'Could not move to target: {e}')
+        except Exception as e:
+            self.slewFailed.emit(f'Could not move to target: {e}', e)
             return
         self.slewFinished.emit()

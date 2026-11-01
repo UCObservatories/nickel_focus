@@ -137,7 +137,7 @@ class ExposurePath:
 class ExposureConfig:
     def __init__(self):
         self.exprec = ktl.cache('nscicam', 'RECORD')
-        self.exptime = ktl.cache('nscicam', 'EXPOSURE')
+        self._exptime = ktl.cache('nscicam', 'EXPOSURE')
         # NOTE: AMPCONFLIST gives the options
         self.expspeed  = ktl.cache('nscicam', 'AMPCONF')
         self.expspeed_options = ktl.cache('nscicam', 'AMPCONFLIST').read().split(',')
@@ -161,17 +161,17 @@ class ExposureConfig:
                 )
             self.expbin.write(binning)
         if exptime is not None:
-            self.exptime.write(exptime)
+            self._exptime.write(exptime)
 
     @property
     def exptime(self):
-        return self.exptime.read()
+        return self._exptime.read()
 
     def __repr__(self):
         return (
             'Exposure settings:\n'
             f'    Record: {self.exprec.read()}\n'
-            f'    Time: {self.exptime.read()}\n'
+            f'    Time: {self.exptime}\n'
             f'    Speed: {self.expspeed.read()}\n'
             f'    Binning: {self.expbin.read()}\n'
         )
@@ -386,14 +386,24 @@ class FocusSequence:
 
     This is the base class for other derived classes that specify how the focus
     sequence proceeds.
+
+    Parameters
+    ----------
+    connect : :obj:`bool`, optional
+        Construct the telescope/camera hardware handles (``_focus`` and
+        ``_exposure``).  Even when True, they are only constructed if ``ktl``
+        is available; otherwise both are None.  Set to False for sequences
+        that never touch hardware (e.g., replaying exposures already on disk),
+        so that they don't connect to it even when ``ktl`` is available.
     """
-    def __init__(self):
+    def __init__(self, connect=True):
         # `_focus` and `_exposure` control the telescope and camera hardware.
         # They require a live ktl connection, which is not needed by
         # sequences (e.g., ArchiveFocusSequence) that only reprocess
         # exposures that already exist on disk.
-        self._focus = Focus() if ktl is not None else None
-        self._exposure = Exposure() if ktl is not None else None
+        connect = connect and ktl is not None
+        self._focus = Focus() if connect else None
+        self._exposure = Exposure() if connect else None
         self.method = None
         self.reset()
 
@@ -618,9 +628,9 @@ class FocusSequence:
 
 
 class GridFocusSequence(FocusSequence):
-    def __init__(self, start, step, end=None, nstep=None):
+    def __init__(self, start, step, end=None, nstep=None, connect=True):
 
-        super().__init__()
+        super().__init__(connect=connect)
 
         if end is None and nstep is None:
             raise ValueError('Must provide either the ending value or the number of steps.')
@@ -706,7 +716,8 @@ class AutomatedFocusSequence(FocusSequence):
 
 class ArchiveFocusSequence(FocusSequence):
     def __init__(self, observed_focus, exposures):
-        super().__init__()
+        # Only replays exposures already on disk, so never needs hardware.
+        super().__init__(connect=False)
 
         self._observed_focus = observed_focus
         self._exposures = exposures

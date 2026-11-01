@@ -70,11 +70,14 @@ class FocusWorker(QtCore.QThread):
         generator is exhausted (or stopped) and a quadratic fit to the results
         collected so far succeeds.  Not emitted for ``mode='single'``.
     focusSequenceFailed : :class:`PySide6.QtCore.Signal`
-        Emitted once, with a human-readable message, if the sequence raises
-        while stepping/reanalyzing/exposing, or if too few points remain for
+        Emitted once, with ``(message, exc)``, if the sequence raises while
+        stepping/reanalyzing/exposing, or if too few points remain for
         :meth:`~nickel_focus.focus.FocusSequence.fit_best_focus` to fit (e.g.,
         after an early
         :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker.request_stop`).
+        ``message`` is human-readable; ``exc`` is the unexpected
+        :obj:`Exception` that caused the failure (so its traceback can be
+        logged), or ``None`` for the expected too-few-points case.
         Mutually exclusive with
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.focusSequenceFinished`/
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.singleExposureFinished`:
@@ -86,7 +89,7 @@ class FocusWorker(QtCore.QThread):
     """
     stepComplete = QtCore.Signal(object)
     focusSequenceFinished = QtCore.Signal(float, float)
-    focusSequenceFailed = QtCore.Signal(str)
+    focusSequenceFailed = QtCore.Signal(str, object)
     singleExposureFinished = QtCore.Signal(object)
 
     def __init__(
@@ -135,7 +138,7 @@ class FocusWorker(QtCore.QThread):
                     self.focus_value, method=self.method, **self.exp_kwargs
                 )
             except Exception as e:
-                self.focusSequenceFailed.emit(f'Could not move to best focus: {e}')
+                self.focusSequenceFailed.emit(f'Could not move to best focus: {e}', e)
                 return
             self.singleExposureFinished.emit(result)
             return
@@ -153,7 +156,7 @@ class FocusWorker(QtCore.QThread):
                 if self.stop_requested:
                     break
         except Exception as e:
-            self.focusSequenceFailed.emit(f'Sequence failed: {e}')
+            self.focusSequenceFailed.emit(f'Sequence failed: {e}', e)
             return
 
         try:
@@ -162,7 +165,7 @@ class FocusWorker(QtCore.QThread):
             )
         except ValueError as e:
             self.focusSequenceFailed.emit(
-                f'Stopped early -- not enough points for a focus fit: {e}'
+                f'Stopped early -- not enough points for a focus fit: {e}', None
             )
             return
 

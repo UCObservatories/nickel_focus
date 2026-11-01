@@ -27,7 +27,7 @@ def _run_and_collect(worker, timeout_ms=5000):
     direct = QtCore.Qt.ConnectionType.DirectConnection
     worker.stepComplete.connect(steps.append, direct)
     worker.focusSequenceFinished.connect(lambda *args: finished.append(args), direct)
-    worker.focusSequenceFailed.connect(failed.append, direct)
+    worker.focusSequenceFailed.connect(lambda msg, exc: failed.append(msg), direct)
     worker.singleExposureFinished.connect(single.append, direct)
 
     loop = QtCore.QEventLoop()
@@ -74,7 +74,7 @@ def test_request_stop_halts_between_steps(focus_sweep, qapp):
     direct = QtCore.Qt.ConnectionType.DirectConnection
     worker.stepComplete.connect(on_step, direct)
     worker.focusSequenceFinished.connect(lambda *args: finished.append(args), direct)
-    worker.focusSequenceFailed.connect(failed.append, direct)
+    worker.focusSequenceFailed.connect(lambda msg, exc: failed.append(msg), direct)
 
     loop = QtCore.QEventLoop()
     worker.finished.connect(loop.quit)
