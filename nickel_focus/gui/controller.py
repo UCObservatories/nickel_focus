@@ -143,6 +143,7 @@ class Controller(QtCore.QObject):
         # Reading `telescope.current` is one quick ktl-cache read, not a
         # move -- safe (and useful) to keep polling no matter what else,
         # if anything, is running.
+        self._position_read_failed = False
         self._position_timer = QtCore.QTimer(self)
         self._position_timer.timeout.connect(self._update_current_position)
         if self.telescope is None:
@@ -177,7 +178,7 @@ class Controller(QtCore.QObject):
                     config['start'], config['step'], maxsteps=config['maxsteps']
                 )
         except Exception as e:
-            self._fail(f'Could not start sequence: {e}')
+            self._fail(f'Could not start sequence: {e}', e)
             return
 
         if (
@@ -207,10 +208,12 @@ class Controller(QtCore.QObject):
         Replay tab's ``config``, or raise.
         """
         # GridFocusSequence is only used here for its focus-value
-        # arithmetic (matches focus.py's own CLI archive-mode path); it
-        # never touches hardware since ktl isn't connected for an archive
-        # run.
-        grid = focus.GridFocusSequence(config['start'], config['step'], nstep=config['nstep'])
+        # arithmetic (matches focus.py's own CLI archive-mode path), so
+        # it's built with connect=False to keep it from touching hardware
+        # even when ktl is available.
+        grid = focus.GridFocusSequence(
+            config['start'], config['step'], nstep=config['nstep'], connect=False
+        )
         expected_files = [
             config['datadir'] / f"{config['prefix']}{config['obsnum'] + i}{config['suffix']}"
             for i in range(grid.nstep)
@@ -315,7 +318,7 @@ class Controller(QtCore.QObject):
         try:
             target = SkyCoord(ra=ra_text, dec=dec_text, unit=('hourangle', 'deg'))
         except ValueError as e:
-            self._fail(f'Could not parse target coordinates: {e}')
+            self._fail(f'Could not parse target coordinates: {e}', e)
             return
 
         self.slew_worker = SlewWorker(self.telescope, target.ra, target.dec)
@@ -343,14 +346,10 @@ class Controller(QtCore.QObject):
         search_text : :obj:`str`
             Object-name search string entered in the Slew tab's search field, or
             an empty string to consider every target in the file.
-
-        Raises
-        ------
-        ValueError
-            Raised if ``file_text`` is empty.
         """
         if file_text == '':
-            raise ValueError('A starlist file must be provided to find the nearest object.')
+            self._fail('A starlist file must be provided to find the nearest object.')
+            return
         search = None if search_text == '' else search_text
         self._find_nearest(search, file=file_text)
 
@@ -375,11 +374,13 @@ class Controller(QtCore.QObject):
 
     # -- internals ------------------------------------------------------------
 
-    def _fail(self, message):
+    def _fail(self, message, exc=None):
         """
         Log ``message`` as an error and report it as a failure on the Log tab.
+        If ``exc`` (the :obj:`Exception` that caused the failure) is provided,
+        its full traceback is logged along with ``message``.
         """
-        log.error(message)
+        log.error(message, exc_info=exc)
         self.window.control_panel.show_failure(message)
 
     def _find_nearest(self, obj_search_str, file=None):
@@ -406,8 +407,10 @@ class Controller(QtCore.QObject):
             name, ra, dec = slew.find_nearest_target(
                 self.telescope.current, obj_search_str=obj_search_str, file=file
             )
-        except (ValueError, FileNotFoundError) as e:
-            self._fail(f'Could not find nearest target: {e}')
+        except Exception as e:
+            # Not just bad starlists (ValueError/FileNotFoundError): reading
+            # the telescope's current position can also fail.
+            self._fail(f'Could not find nearest target: {e}', e)
             return
         ra_text = ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
         dec_text = dec.to_string(unit='deg', sep=':', pad=True, alwayssign=True, precision=2)
@@ -569,7 +572,17 @@ class Controller(QtCore.QObject):
         """
         if self.telescope is None:
             return
-        current = self.telescope.current
+        try:
+            current = self.telescope.current
+        except Exception as e:
+            # This is polled every second, so only log the first failure in
+            # a row instead of flooding the log.
+            if not self._position_read_failed:
+                log.warning(f'Could not read the current telescope position: {e}', exc_info=e)
+            self._position_read_failed = True
+            self.window.control_panel.set_current_position('—', '—')
+            return
+        self._position_read_failed = False
         ra_text = current.ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
         dec_text = current.dec.to_string(
             unit='deg', sep=':', pad=True, alwayssign=True, precision=2

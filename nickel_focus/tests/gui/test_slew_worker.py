@@ -17,7 +17,7 @@ def _run_and_collect(worker, timeout_ms=5000):
     finished, failed = [], []
     direct = QtCore.Qt.ConnectionType.DirectConnection
     worker.slewFinished.connect(lambda: finished.append(True), direct)
-    worker.slewFailed.connect(failed.append, direct)
+    worker.slewFailed.connect(lambda msg, exc: failed.append(msg), direct)
 
     loop = QtCore.QEventLoop()
     worker.finished.connect(loop.quit)
@@ -49,3 +49,17 @@ def test_slew_failed_is_emitted_when_movement_is_disabled(qapp):
     assert finished == [], 'a failed slew should never emit slewFinished'
     assert len(failed) == 1, 'a failed slew should emit slewFailed exactly once'
     assert 'disabled' in failed[0], 'the failure message should explain why the slew failed'
+
+
+def test_slew_failed_is_emitted_for_an_unexpected_error(qapp):
+    class BrokenTelescope(FakeTelescopePointing):
+        def slew_to(self, ra, dec):
+            raise RuntimeError('keyword write failed')
+
+    worker = SlewWorker(BrokenTelescope(), Angle(30., unit='deg'), Angle(10., unit='deg'))
+
+    finished, failed = _run_and_collect(worker)
+
+    assert finished == [], 'a failed slew should never emit slewFinished'
+    assert len(failed) == 1, 'any error, not just a ValueError, should emit slewFailed'
+    assert 'keyword write failed' in failed[0], 'the failure message should include the error'

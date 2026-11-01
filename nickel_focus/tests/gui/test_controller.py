@@ -8,10 +8,12 @@ import pytest
 
 from nickel_focus import focus
 from nickel_focus import log
+from nickel_focus import slew
 from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.qt import QtCore
 from nickel_focus.gui.views.main_window import MainWindow
 from nickel_focus.gui.controller import Controller
+from nickel_focus.tests.fake_hardware import FakeTelescopePointing
 
 
 def _configure_replay_tab(panel, focus_sweep):
@@ -82,6 +84,26 @@ def test_start_focus_sequence_runs_to_completion_for_archive(qapp, focus_sweep):
     best_focus = round(focus_sweep['best_focus'])
     assert window.control_panel.single_focus_spin.value() == pytest.approx(best_focus, abs=5), \
         'the Single tab should default to the fitted best focus'
+
+
+def test_archive_sequence_never_constructs_hardware(qapp, focus_sweep, monkeypatch):
+    # Pretend ktl is available, as it is at the telescope: a Replay run
+    # must still never construct hardware handles.
+    def no_hardware():
+        raise AssertionError('Replay should never construct hardware handles')
+
+    monkeypatch.setattr(focus, 'ktl', object())
+    monkeypatch.setattr(focus, 'Focus', no_hardware)
+    monkeypatch.setattr(focus, 'Exposure', no_hardware)
+    window, controller = _make_controller(focus_sweep)
+
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+
+    assert 'Could not start sequence' not in window.control_panel.status_label.text(), \
+        'Replay should start even when ktl is available'
+    assert len(window.curve_panel._results) == len(focus_sweep['files']), \
+        'Replay should run to completion'
 
 
 def test_running_state_is_set_synchronously_before_focus_worker_runs(qapp, focus_sweep):
@@ -395,6 +417,27 @@ def test_controller_polls_current_position_from_fake_telescope(qapp, fake_telesc
     assert window.control_panel.slew_current_dec_label.text() == '+30:15:00.00'
 
 
+def test_current_position_read_failure_is_logged_once(qapp, caplog, monkeypatch):
+    class UnreadableTelescope(FakeTelescopePointing):
+        @property
+        def current(self):
+            raise RuntimeError('keyword read failed')
+
+    monkeypatch.setattr(slew, 'NickelTelescopePointing', UnreadableTelescope)
+    window = MainWindow()
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller = Controller(window)
+        controller._update_current_position()
+        controller._update_current_position()
+
+    warnings = [r for r in caplog.records if 'current telescope position' in r.getMessage()]
+    assert len(warnings) == 1, 'repeated poll failures should be logged only once'
+    assert warnings[0].exc_info is not None, 'the traceback should be logged'
+    assert window.control_panel.slew_current_ra_label.text() == '—', \
+        'an unreadable position should show the placeholder'
+
+
 def test_move_to_target_runs_against_fake_telescope(qapp, fake_telescope):
     window = MainWindow()
     controller = Controller(window)
@@ -501,8 +544,10 @@ def test_find_nearest_object_requires_a_file(qapp, fake_telescope):
     window = MainWindow()
     controller = Controller(window)
 
-    with pytest.raises(ValueError, match='starlist file must be provided'):
-        controller.find_nearest_object('', '')
+    controller.find_nearest_object('', '')
+
+    assert 'starlist file must be provided' in window.control_panel.status_label.text(), \
+        'a missing starlist file should be reported, not raised'
 
 
 def test_find_nearest_object_searches_the_given_file(qapp, fake_telescope, tmp_path):
