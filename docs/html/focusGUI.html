@@ -1,0 +1,240 @@
+<html>
+<head>
+<title>Nickel Direct Imaging Camera User's Manual: Focus GUI</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<link rel="stylesheet" type="text/css" media="screen" href="../../../styleSheets/manuals.master.css" />
+</head>
+
+<!--#include virtual="../TOC.html" -->
+
+<div id="content">
+<a name="intro"></a>
+
+<p> The Nickel Focus GUI automates focusing the telescope.  The GUI allows you
+to slew the telescope to a nearby focus star and take a sequence of exposures at
+different focus values.  The images are automatically analyzed to measure the
+FWHM of the brightest star in the field and build up the focus curve.  Once the
+sequence is finished, a quadratic function is fit to the curve to find the best
+focus.  </p>
+
+<a name="starting">
+<h2>Starting the Focus GUI</h2>
+<p />
+
+<!-- TODO: edit this once the procedure is actually known -->
+To start the software from the observing computer, select it from the observer
+dropdown menu, or type the command <b>nickelfocus</b> in a terminal on
+nandor.
+
+
+<figure><a href="../images/focusGUI_window.png"><img
+src="../images/focusGUI_window.png" width="720" alt="Nickel Focus
+GUI"></a><figcaption>Figure 1: Nickel Focus GUI when first opened</figcaption></figure>
+
+<p> The window has three panels.  The current exposure is displayed on the left;
+the focus curve (FWHM versus focus value) is at the upper right; and the
+controls, organized in tabs, are at the lower right.  The dividers between the
+panels can be dragged to resize them.  The <b>Log</b> tab shows the current
+status, the most recent step, and a running history of everything the GUI has
+done.  </p>
+
+<p> Only a single command that moves the telescope, adjusts the focus, or
+uses the camera can run at a time.  When a slew or a focus sequence is in
+progress, the buttons that would start another are disabled.  </p>
+
+<p> The GUI talks to the telescope and camera through KTL.  If it cannot connect
+to the KTL package (either there is an access error or the GUI is being run on a
+machine without KTL installed), the tabs that would normally control the
+telescope or the camera (<b>Slew</b>, <b>Single</b>, <b>Grid</b>, and
+<b>Auto</b>) will all be grayed out and inaccessible.  The <b>Help</b> tab has a
+short summary of the purpose of each tab.  </p>
+
+<p />
+<hr>
+<p />
+<a name="slew">
+<h2>Slewing to a focus star: The Slew Tab</h2>
+
+<p>The left side of the <b>Slew</b> tab shows the telescope's <b>Current
+coordinates</b>; these are updated once a second.  To acquire a target with
+known coordinates, enter a sexagesimal RA and Dec under <b>Target
+coordinates</b> (e.g., 05:30:00 and +20:15:00) and press <b>Move to Target</b>.
+The status line on the <b>Log</b> tab reports when the telescope arrives or why
+the move could not be made.  You must enable movement and tracking (using POCO)
+to control the telescope via the GUI.</p>
+
+<p> The right side allows you to quickly find a target near the telescope's
+current position, and the target coordinates will be updated for you.
+Typically, you will use the <b>Focusing *</b> button, which finds the nearest
+focus star.  You can also use <b>Pointing *</b> to find the nearest pointing
+star.  These stars are selected from a catalog of stars that comes with the
+software.  You can also search your own starlist instead: Enter the file
+location under <b>Starlist</b> (or use <b>Browse…</b>), optionally enter part of
+an object name under <b>Target pattern</b>, and press <b>Object</b>.  The name
+and coordinates of the target found are shown in the status line; check them,
+then press <b>Move to Target</b>.  </p>
+
+<figure><a href="../images/focusGUI_slew.png"><img
+src="../images/focusGUI_slew.png" width="600" alt="Slew tab"></a><figcaption>Figure
+2: Slew Tab</figcaption></figure>
+
+<p />
+<hr>
+<p />
+<a name="focusing">
+<h2>Focusing: The Grid, Auto, and Single Tabs</h2>
+
+<p> The <b>Grid</b>, <b>Auto</b>, and <b>Single</b> tabs all take new exposures.
+Each one provides the same exposure settings on its left side: <b>Exposure time
+(s)</b>, readout <b>Speed</b> (<b>Slow</b> or <b>Fast</b>), and <b>Binning</b>
+(<b>1,1</b>, <b>2,2</b>, or <b>4,4</b>).  We recommend you <b>always</b> use the
+Fast mode for focusing.  </p>
+
+<p>
+There are two ways to take a focus sequence:
+<ul>
+<li><b>Grid</b> takes exposures at evenly spaced focus values: a
+<b>Start focus</b>, a <b>Step size</b>, and a <b>Number of steps</b>
+(at least 3).</li>
+<li><b>Auto</b> searches for the best focus.  It starts at <b>Start focus</b>,
+moves by <b>Step size</b>, decides from the first few exposures which direction
+improves the image, and keeps stepping until it has passed through the best
+focus.  It stops after taking 3 exposures beyond the exposure that yielded the
+minimum FWHM, or when it hits the maximum number of focus steps (set by <b>Max
+steps</b>), whichever comes first.  Because it follows the curve, the focus
+values may not be taken in order.</li>
+</ul>
+Press <b>Acquire</b> to start the sequence.  If you need to stop a sequence
+early, press <b>Interrupt</b>: the sequence stops after the current exposure
+finishes (the exposure in progress is not aborted).  A best focus is still fit
+if at least three exposures were taken.
+</p>
+
+<figure><a href="../images/focusGUI_grid.png"><img
+src="../images/focusGUI_grid.png" width="600" alt="Grid tab"></a><figcaption>Figure
+3: Grid Tab</figcaption></figure>
+
+<p> When each exposure is written to disk, it is shown in the image panel with a
+red box around the star being measured, the measured FWHM is added to the focus
+curve, and the <b>Log</b> tab reports the step number, focus value, FWHM, and
+star position.  Once there are three or more points, a quadratic fit and its
+minimum are drawn on the curve.  When the sequence finishes, the status line
+reports the best focus and the expected FWHM there (Figure 4).  If the star's
+position in one exposure is inconsistent with the others, its box is yellow and
+labeled "Outlier centroid," and its point is drawn differently on the curve.
+You should check the exposure that yielded the outlier before trusting the
+fit.</p>
+
+<figure><a href="../images/focusGUI_curve.png"><img
+src="../images/focusGUI_curve.png" width="720" alt="Finished focus
+sequence"></a>
+<figcaption>Figure 4: A Finished Focus Sequence.  Note this is using the
+"Replay" tab to show a previous sequence, just for the purposes of writing this
+documentation.</figcaption></figure>
+
+<p> By default, the brightest star in each exposure is measured.  To measure a
+different star, hover the mouse over it in the image panel (left) and press the
+<b>m</b> key.  The FWHM is remeasured using that star for each exposure in the
+sequence; the FWHM values and best-fitting curve are updated based on the new
+measurements.  The image panel also has an <b>Exposure</b> drop-down menu (top
+left) which can be used to step through every exposure in the sequence (listed
+in order of focus value).  You can also change the image stretch using the
+<b>Stretch</b> dropdown menu (<b>ZScale</b>, <b>Min/Max</b>, <b>Sqrt</b>,
+<b>Log</b>, <b>Asinh</b>), zoom the image using the mouse wheel, and refit the
+image to the window using <b>Recenter</b>.  </p>
+
+<p> The <b>Single</b> tab takes one exposure at the given <b>Focus value</b>.
+After a sequence finishes, the focus value is set to the fitted best focus, so
+pressing <b>Acquire</b> without changing it moves the telescope to best focus
+and takes an image that can be used to confirm the best focus.  Of course, you
+can enter a different value to test any other focus.  </p>
+
+<p />
+<hr>
+<p />
+<a name="replay">
+<h2>Re-analyzing a sequence using on-disk images: The Replay Tab</h2>
+
+<p> The <b>Replay</b> tab analyzes a focus sequence that is already on disk,
+without using the telescope or camera.  Assuming you save the focus images (they
+are saved by default), you can use this tab to reanalyze the focus sequence.
+Enter the <b>Data directory</b> (or use <b>Browse…</b>), the file name
+<b>Prefix</b> and <b>Suffix</b> (by default <b>n</b> and <b>.fits</b>; you will
+likely not need to change these), and <b>Obsnum</b>, the observation number of
+the <i>first</i> exposure in the sequence.  Then enter the <b>Start focus</b>,
+<b>Step size</b>, and <b>Number of steps</b> the sequence was taken with (you
+will need to note these in the observing log; they are <i>not</i> kept in the
+file headers), and press <b>Load</b>.  The exposures are expected to be numbered
+consecutively, starting at <b>Obsnum</b>; this "Replay" option may fail when
+reanalyzing data taken with the "Auto" sequence.  The results are displayed
+exactly as for a live sequence, and the <b>m</b> key can be used to measure a
+different star. (The "Replay" tab was used to construct Figure 4.)  </p>
+
+<p> The <b>Options</b> tab has one setting, <b>Remember settings between
+sessions</b>; this will likely be removed in future versions such that settings will
+<i>always</i> be saved.  When it is checked, the <b>Slew</b> tab's starlist and
+target pattern, the settings on the <b>Single</b>, <b>Grid</b>, <b>Auto</b>, and
+<b>Replay</b> tabs (except the <b>Single</b> tab's focus value), and the image
+stretch are saved when the GUI is closed and restored the next time it starts.
+Unchecking it erases any saved settings when the GUI is closed.  </p>
+
+<p />
+<hr>
+<p />
+<a name="troubleshooting">
+<h2>Troubleshooting</h2>
+
+<p> Every error is reported in the status line on the <b>Log</b> tab and added
+to the log history below it; unexpected errors also include the full Python
+traceback.  <b>When you encounter a problem, please provide the full Python
+traceback to help developers determine the issue.</b> </p>
+
+<table border=1>
+<tr><th>Symptom or message</th><th>Likely cause</th><th>What to do</th></tr>
+<tr><td>Slew, Single, Grid, and Auto tabs are grayed out, or "no ktl
+connection is available"</td>
+<td>The GUI could not connect to the telescope and camera.</td>
+<td>Close the GUI and restart it, making sure you followed the start-up
+instructions above; otherwise contact a Support Astronomer.</td></tr>
+<tr><td>"Could not move to target: Telescope movement is disabled!" or
+"Tracking is disabled!"</td>
+<td>The telescope is not set up to accept a slew.</td>
+<td>Check that telescope movement and tracking are enabled, then try
+again.</td></tr>
+<tr><td>"Telescope is not ready to move to a new target!" or "Telescope
+failed to make it to target within 5 min."</td>
+<td>The telescope is busy, or the slew did not complete.</td>
+<td>Check the telescope status, then try again.</td></tr>
+<tr><td>"Stopped early -- not enough points for a focus fit"</td>
+<td>Fewer than three exposures were measured, e.g., after
+<b>Interrupt</b>.</td>
+<td>Run the sequence again with more steps (and possibly a different starting
+focus).</td></tr>
+<tr><td>The fit or curve looks wrong or a box is yellow ("Outlier
+centroid")</td>
+<td>The wrong star, or different stars in different exposures, were
+measured.</td>
+<td>Hover over the correct star and press <b>m</b>.</td></tr>
+<tr><td>"Expected to find the following files, but they are not
+available"</td>
+<td>The expected file names (constructed using the provided directory, file
+prefix/suffix, <b>Obsnum</b>, and the number of steps) do not match the files on
+disk.</td>
+<td>Correct the entries on the <b>Replay</b> tab.</td></tr>
+</table>
+
+<p> If a problem persists and you need immediate support, contact a <a
+href="../../../staff/on_call.html">Support Astronomer or Telescope
+Technician</a>.  To report problems that you can work around for the time being
+or to request specific features, please
+<a href="https://github.com/UCObservatories/nickel_focus/issues">submit an
+issue</a> on GitHub.</p>
+
+<p />
+    <hr>
+    <address>Support Astronomers (<a href="mailto:sa@ucolick.org">sa@ucolick.org</a>)</address>
+<!-- hhmts start -->
+Last modified: Sun Nov  1 2026
+<!-- hhmts end -->
+  </body>
+</html>
