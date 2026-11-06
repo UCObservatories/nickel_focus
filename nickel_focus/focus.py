@@ -135,6 +135,14 @@ class ExposurePath:
     
 
 class ExposureConfig:
+    # Map user-facing speed names (e.g., from the GUI or CLI) to the AMPCONF
+    # values accepted by the camera.  Names not in this map are passed through
+    # unchanged and validated against AMPCONFLIST.
+    speed_aliases = {
+        'Fast': '1.0MHz',
+        'Slow': '0.05MHz',
+        }
+
     def __init__(self):
         self.exprec = ktl.cache('nscicam', 'RECORD')
         self._exptime = ktl.cache('nscicam', 'EXPOSURE')
@@ -149,6 +157,7 @@ class ExposureConfig:
         if record is not None:
             self.exprec.write(record)
         if speed is not None:
+            speed = self.speed_aliases.get(speed, speed)
             if speed not in self.expspeed_options:
                 raise ValueError(
                     f'{speed} is not a valid read speed.  Must be one of {self.expspeed_options}.'
