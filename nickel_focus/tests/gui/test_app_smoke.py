@@ -1,12 +1,12 @@
 """
 End-to-end smoke test for the GUI entry point
-(`nickel_focus.gui.launcher`), plus a GUI/Model equivalence check: the
-whole point of the `step()` generator refactor (GUI_DESIGN.md §2) is that
-the CLI and the GUI drive the same underlying `focus.FocusSequence` code,
-so this confirms the GUI's `Controller` produces the identical fit as
-calling `FocusSequence.execute()` directly -- the same call the CLI's
-`main()` ultimately makes -- rather than re-testing `focus.main()` itself
-(already covered by `test_focus_cli.py`).
+(`nickel_focus.gui.launcher`), plus a GUI/Model equivalence check: the CLI
+and the GUI drive the same underlying `focus.FocusSequence.step()`
+generator, so this confirms the GUI's `Controller` produces the identical
+fit as calling `FocusSequence.execute()` directly -- the same call the
+CLI's `NickelFocus.main()` (`scripts/focus.py`) ultimately makes --
+rather than re-testing the CLI itself (already covered by
+`test_focus_cli.py`).
 """
 import pytest
 

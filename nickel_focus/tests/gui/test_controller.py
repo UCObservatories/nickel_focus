@@ -191,7 +191,7 @@ def test_source_selection_updates_measurements_in_place(qapp, focus_sweep):
     controller._on_source_selected(50., 50.)
     _wait_for_focus_worker(controller)
 
-    assert controller.method == (50., 50.), 'clicking a source should update the active method'
+    assert controller.method == (50., 50.), 'selecting a source should update the active method'
     assert len(window.image_panel._results) == n_before, \
         'reanalysis should update existing entries, not add duplicates'
     assert len(window.curve_panel._results) == n_before, \
@@ -325,7 +325,7 @@ def test_source_selection_reanalyzes_a_standalone_exposure(qapp, fake_hardware):
     controller._on_source_selected(50., 50.)
     _wait_for_focus_worker(controller)
 
-    assert controller.method == (50., 50.), 'clicking a source should update the active method'
+    assert controller.method == (50., 50.), 'selecting a source should update the active method'
     assert len(window.image_panel._results) == 1, \
         'reanalysis should update the exposure in place, not add a duplicate'
     assert window.image_panel._current.exposure == original_exposure, \
@@ -632,19 +632,26 @@ def test_slew_finished_logs_info(qapp, caplog):
     ), 'a completed slew should be logged at info level'
 
 
-def test_focus_sequence_finished_logs_info(qapp, caplog):
+def test_focus_sequence_finished_logs_info_and_updates_status(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
         controller._on_focus_sequence_finished(356.6, 3.3)
 
-    assert any(
-        r.levelname == 'INFO' and '356.6' in r.getMessage() for r in caplog.records
-    ), 'a finished sequence should log its best-focus result at info level'
+    messages = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == 'INFO' and r.getMessage().startswith('Sequence finished')
+    ]
+    assert len(messages) == 1, 'a finished sequence should be logged once at info level'
+    text = messages[0]
+    assert 'best focus 356.6' in text, 'result text should show the best focus'
+    assert 'expected FWHM 3.30' in text, 'result text should show the expected FWHM'
+    assert window.control_panel.status_label.text() == text, \
+        'the status label should show exactly the logged text'
 
 
-def test_single_exposure_finished_logs_info(qapp, caplog):
+def test_single_exposure_finished_logs_info_and_updates_status(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
     controller._standalone_focus_sequence = types.SimpleNamespace(
@@ -655,9 +662,17 @@ def test_single_exposure_finished_logs_info(qapp, caplog):
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
         controller._on_single_exposure_finished(result)
 
-    assert any(
-        r.levelname == 'INFO' and '356' in r.getMessage() for r in caplog.records
-    ), 'a completed single exposure should be logged at info level'
+    messages = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == 'INFO' and r.getMessage().startswith('Took exposure')
+    ]
+    assert len(messages) == 1, 'a completed single exposure should be logged once at info level'
+    text = messages[0]
+    assert 'focus 356' in text, 'result text should show the focus value'
+    assert 'FWHM 3.20' in text, 'result text should show the measured FWHM'
+    assert 'source (12.3, 45.6)' in text, 'result text should show the measured source coordinates'
+    assert window.control_panel.status_label.text() == text, \
+        'the status label should show exactly the logged text'
 
 
 def test_find_nearest_target_logs_info(qapp, caplog, fake_telescope):
@@ -668,22 +683,34 @@ def test_find_nearest_target_logs_info(qapp, caplog, fake_telescope):
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
         controller.find_nearest_pointing()
 
-    assert any(
-        r.levelname == 'INFO' and 'Pointing' in r.getMessage() for r in caplog.records
-    ), 'a found target should be logged at info level'
+    messages = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == 'INFO' and r.getMessage().startswith('Nearest target')
+    ]
+    assert len(messages) == 1, 'a found target should be logged once at info level'
+    assert 'Pointing' in messages[0], 'the logged text should name the found target'
+    assert window.control_panel.status_label.text() == messages[0], \
+        'the status label should show exactly the logged text'
 
 
-def test_step_complete_logs_info(qapp, caplog):
+def test_step_complete_logs_info_and_updates_step_label(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
-    result = _make_step_result(index=1, focus_value=356.)
+    result = _make_step_result(index=1, focus_value=356., is_outlier=True)
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
         controller._on_step_complete(result)
 
-    assert any(
-        r.levelname == 'INFO' and 'Step 2' in r.getMessage() for r in caplog.records
-    ), 'each completed step should be logged at info level'
+    messages = [r.getMessage() for r in caplog.records if r.levelname == 'INFO']
+    step_messages = [m for m in messages if m.startswith('Step 2')]
+    assert len(step_messages) == 1, 'each completed step should be logged once at info level'
+    text = step_messages[0]
+    assert 'Focus 356' in text, 'step text should show the focus value'
+    assert 'FWHM 3.20' in text, 'step text should show the measured FWHM'
+    assert 'Source (12.3, 45.6)' in text, 'step text should show the measured source coordinates'
+    assert '[outlier]' in text, 'step text should flag outliers'
+    assert window.control_panel.step_label.text() == text, \
+        'the step label should show exactly the logged text'
 
 
 def test_log_tab_reflects_worker_signal_end_to_end(qapp):

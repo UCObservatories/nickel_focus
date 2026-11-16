@@ -4,15 +4,14 @@ Lightweight stand-ins for :class:`focus.Focus`/:class:`focus.Exposure` and
 built on top of them without any real ``ktl`` connection or
 telescope/camera hardware.
 
-See ``claude/GUI_IMPLEMENTATION.md``, Phase 3 sub-phase 1, for why this
-exists: without it, live sequences can't be run or tested at all on a
-machine with no hardware access, since ``self._focus``/``self._exposure``
-would just be ``None``. These fakes are injected by monkeypatching
+Without these, live sequences can't be run or tested at all on a machine
+with no hardware access, since ``self._focus``/``self._exposure`` would
+just be ``None``. These fakes are injected by monkeypatching
 ``focus.Focus``/``focus.Exposure``/``focus.ktl``/``slew.NickelTelescopePointing``
 directly (see the ``fake_hardware``/``fake_telescope`` fixtures in
-``conftest.py``), not through new constructor parameters on
-:class:`focus.FocusSequence` -- keeping faith with the earlier decision
-that it shouldn't need injection hooks for this.
+``conftest.py``), not through constructor parameters on
+:class:`focus.FocusSequence` -- deliberately, so that it needs no
+test-only injection hooks.
 
 They validate the *software logic* (stepping, focus-range checks,
 exposure configuration, target selection) -- they cannot validate the

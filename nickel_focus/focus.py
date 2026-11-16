@@ -213,7 +213,21 @@ class Exposure:
 
         # Start the exposure
         # TODO: This needs to be confirmed once Will settles on the naming
-        self.expstart.write('StartX')
+        # Changed this to "Go" instead of startX because of the mode difference between Start and StartX
+        self.expstart.write('Go')
+
+        # RA:  "POCGDIX in rad"
+        # DEC: "POCGDIY in rad"
+        #   POCGDFIN = 1, write offsets, wait for GDFIN to be 0 or -1
+        # POCMVFIN = 1 , wait for MVFIN to be 0 or -1
+        # ghow -s poco c:w -fh
+        # ghow -h
+        # 
+        # either a new target 
+
+        # Daytime testing
+
+        # Check that telescope is settled
 
         # Wait for it to start
         if not self.expstate.waitFor('== Start', timeout=30):
@@ -543,10 +557,9 @@ class FocusSequence:
         sequence bookkeeping (``step_iter``, ``observed_focus``,
         ``img_quality``, etc.  are left untouched).
 
-        This is the shared primitive behind both "move to best focus" (moving to
-        a fitted focus value and confirming it with one exposure *is* taking a
-        single exposure at that value) and the standalone single-exposure
-        workflow (GUI_DESIGN.md §5.5).
+        This backs the GUI's Single tab, which takes one exposure at any focus
+        value; moving to a fitted best focus (the tab's default value) is just
+        one use of it.
 
         Parameters
         ----------

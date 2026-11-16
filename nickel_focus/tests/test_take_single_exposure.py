@@ -1,9 +1,6 @@
 """
-Tests for :func:`focus.FocusSequence.take_single_exposure`, and the fix
-it enables to :func:`focus.FocusSequence.execute`'s previously-broken
-``goto=True`` path.
-
-See claude/GUI_IMPLEMENTATION.md, Phase 3 sub-phase 2.
+Tests for :func:`focus.FocusSequence.take_single_exposure`, and for
+:func:`focus.FocusSequence.execute`'s ``goto=True`` path, which is built on it.
 """
 import pytest
 
@@ -40,10 +37,9 @@ def test_take_single_exposure_out_of_range_raises(fake_hardware):
 
 
 def test_execute_with_goto_now_works_against_fake_hardware(fake_hardware):
-    # Before this sub-phase, execute(goto=True) called the nonexistent
+    # Regression test: execute(goto=True) once called a nonexistent
     # measure_fwhm() and never appended its verification exposure to
-    # self.exposures before trying to read it back -- this is the
-    # regression test proving that path is fixed.
+    # self.exposures before trying to read it back.
     seq = focus.GridFocusSequence(340., 5., nstep=5)
 
     best_focus, best_fwhm = seq.execute(goto=True, plot=False, method='brightest')

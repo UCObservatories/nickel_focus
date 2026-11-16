@@ -1,7 +1,6 @@
 """
-Top-level window laying out the three panels.
-
-See GUI_DESIGN.md §5.1.
+Top-level window laying out the three panels: the exposure display on the left,
+and the focus curve above the control tabs on the right.
 """
 from nickel_focus.gui.qt import QtCore, QtWidgets
 from nickel_focus.gui.views.image_panel import ImagePanel
@@ -15,11 +14,11 @@ class MainWindow(QtWidgets.QMainWindow):
     :class:`~nickel_focus.gui.views.focus_curve_panel.FocusCurvePanel` (top
     right), and
     :class:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel`
-    (bottom right) per §5.1's sketch.  Purely structural -- wiring the panels
-    together is :class:`~nickel_focus.gui.controller.Controller`'s job, not this
-    class's.
+    (bottom right), separated by user-draggable splitters.  Purely structural --
+    wiring the panels together is :class:`~nickel_focus.gui.controller.Controller`'s
+    job, not this class's.
 
-    Also owns settings persistence (GUI_DESIGN.md §9 phase 5): each panel's
+    Also owns settings persistence: each panel's
     last-used configuration is restored on construction and saved on close, via
     :class:`PySide6.QtCore.QSettings`. Deliberately not saved on every change --
     these are convenience defaults for next time, not data that needs
@@ -40,7 +39,7 @@ class MainWindow(QtWidgets.QMainWindow):
     """
 
     #: Organization/application name identifying this app's `QSettings`
-    #: store (an macOS plist, a Windows registry key, or a Linux ini
+    #: store (a macOS plist, a Windows registry key, or a Linux ini
     #: file, depending on platform).
     _SETTINGS_ORG = 'LickObservatory'
     _SETTINGS_APP = 'NickelFocusGUI'

@@ -25,8 +25,8 @@ all without using the `focus.py`/`slew_to_nearest.py` CLIs directly.
 The GUI is strictly a View+Controller layer on top of the existing Model
 code in `nickel_focus/` (`focus.py`, `slew.py`, `starlist.py`,
 `photometry.py`, `quadratic.py`). It adds no new domain logic of its own;
-every hardware call, exposure, slew, fit, and sequence rule still lives in
-that Model code, unchanged and still independently usable from the CLI
+every hardware call, exposure, slew, fit, and sequence rule lives in that
+Model code, which is independently usable from the CLI
 (`nickel_focus/scripts/`) with no Qt installed at all.
 
 Without a live `ktl` connection, the Slew/Single/Grid/Auto tabs can only
@@ -133,10 +133,13 @@ appending text directly: `Controller.__init__` attaches a `QtLogHandler`
 via a Qt signal -- safe even when the record is logged from a background
 thread (e.g. inside a `FocusWorker`/`SlewWorker`, or from `focus.py`/
 `photometry.py` while one is running). The Controller's own `log.info(...)`/
-`log.error(...)` calls (including its `_fail(message)` helper, used
-everywhere a failure needs to be both logged and shown) are what actually
-drive the Log tab's content; the `show_*` view methods only update the
-status/step labels. Because `log` is a module-level singleton rather than
+`log.error(...)` calls (including its `_fail(message, exc=None)` helper,
+used everywhere a failure needs to be both logged -- with the exception's
+traceback, if given -- and shown) are what actually drive the Log tab's
+content. For each message, the Controller builds the text once, logs it,
+and passes the same string to the view (`FocusControlPanel.show_status`/
+`update_step`, or `show_best_focus`/`show_nearest_target`, which also fill
+in fields), which only updates the status/step labels. Because `log` is a module-level singleton rather than
 one per `Controller`, `Controller.__init__` calls
 `log.remove_handlers_of_type(QtLogHandler)` before attaching its own, so a
 handler pointing at a since-destroyed window never lingers. See
@@ -154,7 +157,7 @@ implementation history.
 | `gui/model/focus_worker.py` | `QThread` subclass that runs one `FocusSequence` operation (step/reanalyze/single exposure) off the GUI thread, reporting progress via signals. |
 | `gui/model/slew_worker.py` | `QThread` subclass that runs one `NickelTelescopePointing.slew_to` call off the GUI thread, since a slew can block for up to five minutes. |
 | `gui/views/main_window.py` | Top-level `QMainWindow`; lays out the three panels in splitters; persists/restores settings via `QSettings`. |
-| `gui/views/image_panel.py` | Displays collected exposures one at a time: pan, zoom, stretch selection, and click-to-select-source ('m' key) for reanalysis. |
+| `gui/views/image_panel.py` | Displays collected exposures one at a time: pan, zoom, stretch selection, and source selection (hover and press 'm') for reanalysis. |
 | `gui/views/focus_curve_panel.py` | Live scatter plot of FWHM vs. focus value, with the fitted quadratic and its vertex once enough points exist. |
 | `gui/views/focus_control_panel.py` | Tabbed sequence configuration -- Slew (target entry, "Move to Target", "Find nearest object/pointing/focus star") plus Single/Grid/Auto/Replay -- and Log/Options/Help tabs; emits the signals that request an action. `set_hardware_tabs_enabled` grays out the four ktl-driven tabs (and switches to Replay) on the Controller's say-so. |
 
@@ -172,7 +175,7 @@ implementation history.
    (exposure display)       (FWHM vs focus)      (Slew/Single/Grid/Auto/
               │                     ▲              Replay tabs, log, options)
     sourceSelected            add_result /                │
-    (Signal)                  update_result      startRequested / stopRequested /
+    (Signal)                  reset              startRequested / stopRequested /
               │                     ▲            takeSingleExposureRequested /
               ▼                     │           moveToTargetRequested / findNearest*Requested
               └─────────────► Controller ◄──────────────────┘
@@ -187,7 +190,7 @@ implementation history.
                     │                                  │
                     ▼                                  ▼
          focus.py (FocusSequence and            slew.py (NickelTelescopePointing/
-         subclasses, unmodified Model code)     find_nearest_target, unmodified Model code)
+         subclasses; Model code)                find_nearest_target; Model code)
 ```
 
 - **Views → Controller**: exclusively via Qt signals
@@ -199,7 +202,7 @@ implementation history.
   directly.
 - **Controller → Views**: exclusively via direct method calls (e.g.
   `self.window.image_panel.add_result(result)`,
-  `self.window.control_panel.show_failure(message)`) -- views expose a
+  `self.window.control_panel.show_status(message)`) -- views expose a
   small "public API used by the Controller" for this, documented at the
   top of each view's method list.
 - **Controller → FocusWorker**: the Controller constructs a new
@@ -251,8 +254,8 @@ connection can pass the undocumented `nickel_focus_gui --test` flag to
 leave those tabs enabled anyway -- every action on them still fails the
 same way; only the graying is skipped.
 
-Installation and testing instructions will be added here once the repo is
-restructured into an installable Python package.
+For installation (including the `gui` extra) and running the test suite,
+see the top-level `README.md`.
 
 ## 5. Testing
 
@@ -300,3 +303,4 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `c702eb1` | 2026-09-01 | Documented the `nickel_focus/pkg/ktl.py` single entry point (mirroring `gui/qt.py`) and added the "Testing" section covering the autouse `no_ktl` fixture, which together let the test suite pass regardless of whether `ktl` is installed while never touching real hardware. |
 | `1e47148` | 2026-09-01 | Documented that the Slew/Single/Grid/Auto tabs gray out (and the window opens on Replay) with no live `ktl` connection, and the suppressed `nickel_focus_gui --test` flag that overrides it for development. |
 | `73141ca` | 2026-09-01 | Documented that the Log tab is now driven by real `nickel_focus.log` output via `gui/log_handler.py`'s `QtLogHandler`, rather than by view methods appending text directly; see `claude/GUI_LOGGING_PLAN.md` for the full logging-integration design and phased implementation history. |
+| *pending* | 2026-11-16 | Status text built once in the Controller (`show_status`); 'm'-key selection and curve-panel API corrected; install/testing now point to `README.md`. |

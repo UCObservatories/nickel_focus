@@ -9,6 +9,24 @@ changed and why.
 
 Each phase gets its own section below, added as it's completed.
 
+**Reading note (added 2026-11-16).** Entries are a chronological record and
+use the names and paths current *when they were written*. Three later
+changes affect how earlier entries read:
+
+- **Package relocation (2026-08-24/25)** -- top-level `gui/`, `scripts/`,
+  and `tests/` moved into the `nickel_focus` package, the Model code split
+  out of `scripts/focus.py` into `nickel_focus/focus.py` (plus
+  `photometry.py`/`quadratic.py`), and `gui/main.py` was replaced by
+  `gui/launcher.py` and the `nickel_focus_gui` console script. See
+  "Package relocation" below.
+- **Worker/sequence naming disambiguation (2026-09-01)** -- `SequenceWorker`
+  became `FocusWorker`, `start_sequence` became `start_focus_sequence`,
+  and so on. See "Worker/sequence naming disambiguation" below for the
+  full mapping.
+- **`GUI_DESIGN.md` was not revised** as planned above. It was left as the
+  original design record, and `GUI_REFERENCE.md` (planned under the name
+  `GUI_SUMMARY.md`; see "Code-quality pass") documents the GUI as built.
+
 ## Phase 1: Model refactor
 
 **Design doc reference:** §9 Phased plan, item 1 ("Model refactor"); test
@@ -2111,6 +2129,8 @@ skipped) is complete.
 
 ## Code-quality pass (pre-GUI_SUMMARY.md)
 
+*(The planned `GUI_SUMMARY.md` was written as `claude/GUI_REFERENCE.md`.)*
+
 Per request, ahead of writing a `GUI_SUMMARY.md` (replacing the earlier
 plan to reconcile `GUI_DESIGN.md` itself, which is being left as-is): a
 pass over every file in `gui/` for conciseness/modularity, complete
@@ -2173,6 +2193,31 @@ turning on HTML interpretation.
 No behavior changes anywhere in this pass -- confirmed by running the
 full suite (unchanged at 120 tests) and the Qt-free boundary check
 (unchanged at 26 pass) after every file, not just once at the end.
+
+## Package relocation (2026-08-24/25)
+
+*(Entry added 2026-11-16, reconstructed from git history: `220fc1b`,
+`5b85e4a`, `09764c6`, `817a84e`.)*
+
+The flat repo layout assumed by every entry above (top-level `gui/`,
+`scripts/`, `tests/`) was restructured into an installable `nickel_focus`
+package -- the restructuring `GUI_DESIGN.md` §8 flagged as future,
+out-of-scope work:
+
+- `gui/` → `nickel_focus/gui/`, `scripts/` → `nickel_focus/scripts/`,
+  `tests/` → `nickel_focus/tests/` (`220fc1b`).
+- The Model code moved out of the CLI script: `scripts/focus.py`'s
+  `Focus`/`Exposure`/`FocusSequence` family became `nickel_focus/focus.py`,
+  and `photometry.py`/`quadratic.py` moved to `nickel_focus/` alongside it;
+  `nickel_focus/scripts/focus.py` kept only the CLI (`NickelFocus`)
+  (`5b85e4a`).
+- `gui/main.py` was replaced by `gui/launcher.py` (`build_app()`/
+  `build_window()`) plus `nickel_focus/scripts/focus_gui.py`, the
+  `nickel_focus_gui` console script that wires up the `Controller` and runs
+  the event loop (`09764c6`, `817a84e`).
+
+Paths in earlier entries (e.g. `scripts/focus.py` for the sequence classes,
+`gui/main.py`, `tests/gui/...`) refer to the pre-relocation layout.
 
 ## Phase 6: Slew tab (pointing workflow)
 
@@ -2270,3 +2315,151 @@ relying on pytest's implicit rootdir-based `sys.path` insertion), so
 `from nickel_focus.tests.fake_hardware import ...` -- consistent with
 this codebase's no-bare-imports convention and needed for the new
 `test_slew_worker.py`'s equivalent import to resolve the same way.
+
+## Layout tightening (2026-08-27 to 2026-09-01)
+
+*(Entry added 2026-11-16, reconstructed from git history: `36e92c7`,
+`be39732`.)*
+
+Two rounds of layout work after Phase 6 that change several things
+described in earlier entries:
+
+- **Untitled group boxes on every action tab.** Single/Grid/Auto/Replay
+  now lay their fields out as two side-by-side, untitled `QGroupBox`
+  sub-panels (new `_group_box()` helper) instead of the bare two-column
+  `QFormLayout` row from "Two-column tab layout to compress height
+  further"; `_two_column_row()` survives only for the Slew tab's paired
+  RA/Dec rows. The Slew tab itself was regrouped into two untitled
+  panels (position/target plus "Move to Target" on the left; starlist,
+  search pattern, and a single row of "Find nearest" buttons labeled
+  "Object"/"Pointing *"/"Focusing *" on the right), with short centered
+  section labels (`_add_centered_label()`) instead of per-field
+  prefixes. A new `_tighten_margins()` shrinks the style's default
+  11px/6px margins/spacing to 6px/2px on every box and page.
+- **Per-tab scrolling replaces the whole-panel scroll area.** The
+  `QScrollArea` that `MainWindow` wrapped around the entire control
+  panel (with its explicit minimum width/height floor, from "Window
+  opens larger than the screen"/"Control panel width balloons") is gone.
+  Instead `_tab_widget()` makes each tab page its own frameless
+  `QScrollArea`, so the tab bar never scrolls out of view and the panel
+  needs no minimum-size floor of its own.
+- **Initial sizing.** `FocusControlPanel.minimum_height_excluding_help()`
+  (`36e92c7`) became `preferred_height_excluding_help()` (`be39732`), used
+  only for the vertical splitter's *initial* split -- the curve panel
+  gets everything else -- rather than as a hard minimum. `MainWindow`
+  gained a one-time `showEvent()` that gives the image panel a square
+  initial share of the window width (the geometry isn't valid any
+  earlier).
+
+## Worker/sequence naming disambiguation (2026-09-01)
+
+*(Entry added 2026-11-16, reconstructed from git history: `5339548`.)*
+
+Once Phase 6 added `SlewWorker`, the generic "worker"/"sequence" names
+became ambiguous, so the focus-sequence side was renamed throughout
+`gui/`, its tests, and `GUI_REFERENCE.md`. Earlier entries use the old
+names:
+
+| Old | New |
+| --- | --- |
+| `gui/model/sequence_worker.py`, `SequenceWorker` | `gui/model/focus_worker.py`, `FocusWorker` |
+| `tests/gui/test_sequence_worker.py` | `tests/gui/test_focus_worker.py` |
+| `sequenceFinished` / `sequenceFailed` signals | `focusSequenceFinished` / `focusSequenceFailed` |
+| `SequenceWorker.sequence` (constructor arg and attribute) | `FocusWorker.focus_sequence` |
+| `Controller.sequence` / `Controller.worker` | `Controller.focus_sequence` / `Controller.focus_worker` |
+| `Controller._standalone_sequence` | `Controller._standalone_focus_sequence` |
+| `Controller.start_sequence()` | `Controller.start_focus_sequence()` |
+| `Controller._build_archive_sequence()` | `Controller._build_archive_focus_sequence()` |
+| `Controller._start_worker()` | `Controller._start_focus_worker()` |
+| `Controller._on_sequence_finished()` / `_on_worker_finished()` | `_on_focus_sequence_finished()` / `_on_focus_worker_finished()` |
+| `FocusControlPanel.get_sequence_type()` / `get_sequence_config()` | `get_focus_sequence_type()` / `get_focus_sequence_config()` |
+
+`Controller._on_sequence_failed()` was renamed `_on_focus_sequence_failed()`
+here, then removed entirely during the logging work the same day (failure
+signals now connect straight to `Controller._fail()`; see
+`GUI_LOGGING_PLAN.md`'s post-Phase-4 cleanup).
+
+## ktl-free testing and hardware-tab graying (2026-09-01)
+
+*(Entry added 2026-11-16, reconstructed from git history: `c702eb1`,
+`1e47148`. Both are documented in `GUI_REFERENCE.md` §§1-2, 4-5.)*
+
+- `nickel_focus/pkg/ktl.py` became the single, soft-failing import point
+  for `ktl`, and `tests/conftest.py` gained an autouse `no_ktl` fixture
+  forcing `focus.ktl`/`slew.ktl` to `None`, so the suite passes -- and
+  never touches hardware -- whether or not `ktl` is installed.
+- With no live `ktl`, `Controller` (`ktl_available`) has
+  `FocusControlPanel.set_hardware_tabs_enabled(False)` gray out the
+  Slew/Single/Grid/Auto tabs and open on Replay. The suppressed
+  `nickel_focus_gui --test` flag (`force_enable_hardware_tabs`) skips only
+  the graying, for layout work without `ktl`.
+
+## Logging integration (2026-09-01)
+
+The Log tab was rewired to show real `nickel_focus.log` records via
+`gui/log_handler.py`'s `QtLogHandler`, and the `FocusControlPanel.show_*`
+methods stopped appending to the log themselves (the Controller logs
+instead, with failures going through `Controller._fail()`). The full
+plan and change log are in `GUI_LOGGING_PLAN.md`.
+
+## Replay disconnected from hardware; failure tracebacks (2026-10-31)
+
+*(Entry added 2026-11-16, reconstructed from git history: `79545f7`.)*
+
+- `Controller._build_archive_focus_sequence()` builds its helper
+  `GridFocusSequence` with `connect=False`, so loading a Replay never
+  touches hardware even when `ktl` *is* available.
+- `FocusWorker.focusSequenceFailed` and `SlewWorker.slewFailed` now carry
+  `(message, exc)`, and `Controller._fail(message, exc=None)` logs the
+  exception's traceback (`exc_info`) along with the message.
+- `find_nearest_object()` with no starlist file reports a failure via
+  `_fail()` instead of raising; `_find_nearest()` catches any exception
+  (reading the telescope position can fail too, not just bad starlists).
+- `_update_current_position()` survives a failed position read: it shows
+  "—" and logs a warning only on the first failure in a row, since it's
+  polled every second.
+
+## Status-text consolidation and docstring cleanup (2026-11-16)
+
+**Status/step text built once, in the Controller.** Each Log-tab message
+was being built twice: once for the Controller's `log.info(...)`/
+`log.error(...)` call and again inside the matching `FocusControlPanel`
+method (left over from the logging work, which added the log calls
+alongside the existing view formatting). Now the Controller builds the
+text once, logs it, and passes the same string to the view:
+
+- `update_step(result, total_expected=None)` → `update_step(text)`.
+- `show_failure(message)`, `show_slew_result(message)`, and
+  `show_single_exposure_result(result)` → one `show_status(text)`, since
+  all three just set `status_label`.
+- `show_best_focus(best_focus, best_fwhm)` → `show_best_focus(best_focus,
+  text)` (still needs the number, to set the Single tab's default).
+- `show_nearest_target(name, ra_text, dec_text)` →
+  `show_nearest_target(ra_text, dec_text, text)`.
+
+View tests now pass plain strings; the content checks moved to the
+Controller tests, which also assert the label shows exactly the logged
+text.
+
+**Single-exposure failure message.** `FocusWorker`'s `mode='single'`
+failure said "Could not move to best focus: ..." for *any* failure (move,
+exposure, or photometry) at *any* focus value -- a leftover from before
+Phase 4 folded "Move to Best Focus" into the Single tab. Now: "Single
+exposure at focus N failed: ...". The `FocusWorker`/
+`FocusSequence.take_single_exposure` docstrings were updated to match.
+
+**Docstrings made current and self-contained.** Per a standing
+preference, code docstrings/comments must describe the current code and
+must not reference the development docs in `claude/`. Removed every
+`GUI_DESIGN.md` §-reference and `GUI_IMPLEMENTATION.md` phase reference
+from `gui/` and the tests (inlining the rationale where one was needed),
+and fixed stale descriptions: click-based source selection (now the 'm'
+key), "right-click panning" (never existed), the Slew tab as the only
+grouped tab, the removed scroll-area floor, tab counts/lists that
+predated Slew/Options, and `FocusWorker`'s description of what it calls.
+`tests/gui/test_phase3_smoke.py` was renamed
+`tests/gui/test_live_workflow_smoke.py` (and its test
+`test_full_live_workflow`), since its name pointed at a development phase.
+
+Full suite: `224 passed` (two fewer than before, from merging the
+redundant `show_*` view tests).

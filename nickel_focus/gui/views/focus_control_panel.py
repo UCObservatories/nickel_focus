@@ -1,8 +1,8 @@
 """
-Focus-sequence configuration and controls.
+Tabbed telescope/focus-sequence configuration and controls.
 
-See GUI_DESIGN.md §5.4 and claude/GUI_IMPLEMENTATION.md's Phase 4 for the tabbed
-redesign.  This view only exposes configuration and emits signals for requested
+One tab per action (Slew, Single, Grid, Auto, Replay), plus Log, Options, and
+Help.  This view only exposes configuration and emits signals for requested
 actions; it never constructs a :class:`~nickel_focus.focus.FocusSequence` or
 talks to :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` itself --
 that's the Controller's job.
@@ -63,10 +63,9 @@ def _exposure_field_rows():
 def _two_column_row(left_rows, right_rows):
     r"""
     Lay ``left_rows``/``right_rows`` (each a list of ``(label, widget)`` pairs)
-    out as two side-by-side :class:`PySide6.QtWidgets.QFormLayout` objects, so a
-    tab's fields use horizontal space instead of stacking everything in one tall
-    column -- exposure parameters on the left, the focus value(s) that define
-    the sequence on the right.
+    out as two side-by-side :class:`PySide6.QtWidgets.QFormLayout` objects, so
+    related fields share one row instead of stacking -- e.g. the Slew tab's RA
+    and Dec fields.
 
     Returns
     -------
@@ -96,9 +95,9 @@ def _tighten_margins(widget):
     defaults (11px margins, 6px spacing -- sized to comfortably fit a titled
     group box's title, and to keep rows from ever looking crowded even when a
     form has just one or two of them) down to a tighter 6px/2px -- used
-    throughout this tab's group boxes and tab pages to cut down on unused white
-    space, most of which was that default padding repeated on every box and
-    between every row rather than anything the content itself needed.
+    throughout this panel's group boxes and tab pages to cut down on unused
+    white space, since otherwise that default padding is repeated on every box
+    and between every row.
 
     Parameters
     ----------
@@ -115,10 +114,10 @@ def _group_box(rows):
     """
     A titleless :class:`PySide6.QtWidgets.QGroupBox` containing ``rows`` laid
     out as a :class:`PySide6.QtWidgets.QFormLayout` -- the border alone groups
-    the fields, the same untitled convention used by the Slew tab's sub-panels
-    (see
-    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel._build_slew_tab`'s
-    docstring for why no title is needed there).
+    the fields.  Every action tab splits its fields into side-by-side, untitled
+    group boxes like this; no title is needed, since each box's own fields
+    already identify its purpose and the tab title says what the whole page is
+    for.
 
     Parameters
     ----------
@@ -176,10 +175,9 @@ def _tab_widget(layout):
     Scrollable (rather than a bare :class:`PySide6.QtWidgets.QWidget`) so a tab
     whose content doesn't fit the available height scrolls internally, keeping
     the tab bar itself fixed in place instead of scrolling out of view along
-    with everything else --
-    :class:`~nickel_focus.gui.views.main_window.MainWindow` no longer needs to
-    size its own control-panel area around the tallest page (Help) for exactly
-    this reason.  The frame is turned off since the surrounding
+    with everything else; this is also why
+    :class:`~nickel_focus.gui.views.main_window.MainWindow` doesn't need to size
+    the control panel around its tallest page (Help).  The frame is turned off since the surrounding
     :class:`PySide6.QtWidgets.QTabWidget` already visually frames each page;
     without this, a page would show two nested borders.
     """
@@ -208,7 +206,8 @@ class FocusControlPanel(QtWidgets.QWidget):
     value(s) that define the sequence on the right -- with its own acquisition
     button(s) below both, spanning the full tab width rather than belonging to
     either sub-panel: Single has "Acquire"; Grid and Auto have "Acquire" and
-    "Interrupt"; Replay has "Load". Log and Help have no buttons at all.
+    "Interrupt"; Replay has "Load". Log, Options, and Help have no action
+    buttons.
     Because a :class:`PySide6.QtWidgets.QTabWidget` only lets the user interact
     with the currently visible page, each button unambiguously means "do this
     tab's action" -- there's no need to track which tab is active to decide what
@@ -240,14 +239,13 @@ class FocusControlPanel(QtWidgets.QWidget):
     is no separate confirmation step -- reviewing/editing the value before
     pressing Acquire is the confirmation.
 
-    There is no photometry-method selector: every measurement uses the brightest
-    detected source by default, and the coordinates actually used (whether the
-    automatic brightest source or one picked by clicking the image and pressing
-    'm' -- see :class:`~nickel_focus.gui.views.image_panel.ImagePanel`) are
-    reported on the Log tab via
+    Every measurement uses the brightest detected source by default; hovering
+    over a different source in the image and pressing 'm' measures that one
+    instead (see :class:`~nickel_focus.gui.views.image_panel.ImagePanel`).
+    Either way, the coordinates actually measured are reported on the Log tab
+    via
     :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.update_step`/
-    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_single_exposure_result`
-    rather than shown as a persistent "current method" state.
+    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_status`.
 
     The Options tab holds app-wide preferences -- currently just "Remember
     settings between sessions," which opts into (and, when unchecked,
@@ -326,7 +324,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.tabs.addTab(self.options_tab, 'Options')
         self.tabs.addTab(self.help_tab, 'Help')
 
-        # Every input widget across the four actionable tabs, locked
+        # Every input widget across the five actionable tabs, locked
         # uniformly while anything is running (hardware exclusivity:
         # only one operation at a time, so there's no reason to allow
         # editing a different tab's configuration meanwhile). The tab
@@ -399,21 +397,17 @@ class FocusControlPanel(QtWidgets.QWidget):
         sub-panels: current/target RA-Dec and "Move to Target" on the left,
         starlist file/browse, a target-name search pattern, and a single row of
         three "Find nearest ..." buttons ("Object", "Pointing *", "Focusing *"
-        -- ``*`` standing in for "star") on the right.  Unlike every other tab
-        here (deliberately flat since the tab title alone says what its fields
-        are for -- see claude/GUI_IMPLEMENTATION.md's Phase 4), Slew covers two
-        distinct sub-workflows that its one tab title can't itself disambiguate,
-        which is what makes the extra grouping worth its cost here specifically;
-        each panel's own content (a coordinate pair vs.  a search field and
-        buttons) already identifies its purpose, so neither needs its own title
-        on top of that border.
+        -- ``*`` standing in for "star") on the right.  Unlike the other action
+        tabs, the two panels here are separate sub-workflows (move to a known
+        position vs. find a target), and each ends in its own button(s) rather
+        than sharing one row below both.
         """
         # Short "RA:"/"Dec:" field labels, not "Current RA:"/"Target RA:"
         # etc. -- those are wide enough (with two side-by-side columns
-        # per row) to noticeably widen this tab beyond every other one;
-        # a short section header above each row disambiguates instead,
-        # at a fraction of the width cost (GUI_DESIGN.md's §9-phase-5
-        # scroll-area floor otherwise has to grow to match).
+        # per row) to noticeably widen this tab beyond every other one,
+        # and with it the whole window's minimum width; a short section
+        # header above each row disambiguates instead, at a fraction of
+        # the width cost.
         self.slew_current_ra_label = QtWidgets.QLabel('—')
         self.slew_current_dec_label = QtWidgets.QLabel('—')
         self.slew_target_ra_edit = QtWidgets.QLineEdit()
@@ -760,8 +754,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         that scrolling) stays put either way.  Help is excluded because it's a
         large block of static reference text that's taller than every other tab
         combined with the tab bar; sizing the *initial* height around it too
-        would waste space under the six shorter, interactive tabs every time the
-        window opens, for the sake of a tab that's fine to need a scrollbar
+        would waste space under the seven shorter tabs every time the window
+        opens, for the sake of a tab that's fine to need a scrollbar
         immediately.
 
         Each candidate tab's *content widget*
@@ -771,8 +765,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         "comfortable" size that can run well past what its content actually
         needs -- e.g.  the Log tab's :class:`PySide6.QtWidgets.QPlainTextEdit`,
         which is happy to be much shorter than its
-        :meth:`PySide6.QtWidgets.QWidget.sizeHint` and was otherwise the tallest
-        tab here, ahead of Replay).
+        :meth:`PySide6.QtWidgets.QWidget.sizeHint`, and would otherwise count
+        as the tallest tab here).
 
         Returns
         -------
@@ -796,8 +790,8 @@ class FocusControlPanel(QtWidgets.QWidget):
     def get_focus_sequence_type(self):
         """
         The sequence type for the currently active tab, as ``'grid'``,
-        ``'automated'``, or ``'archive'`` -- or ``None`` if Single, Log, or Help
-        is active (in which case no button can have triggered
+        ``'automated'``, or ``'archive'`` -- or ``None`` for any other tab
+        (Slew, Single, Log, Options, Help; none of which can have triggered
         :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.startRequested`
         in the first place).
         """
@@ -816,8 +810,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         includes keys relevant to that tab -- e.g.  a Grid config has no
         ``datadir``, an Auto config has ``maxsteps`` instead of ``nstep`` --
         matching the CLI arguments of
-        :class:`~nickel_focus.scripts.focus.NickelFocus`. Empty for
-        Single/Log/Help.
+        :class:`~nickel_focus.scripts.focus.NickelFocus`. Empty for any other
+        tab (Slew, Single, Log, Options, Help).
         """
         tab = self.tabs.currentWidget()
         if tab is self.grid_tab:
@@ -849,7 +843,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         Return the currently active tab's exposure settings as a :obj:`dict`
         with keys ``exptime`` (:obj:`float`), ``speed``, ``binning``
         (:obj:`str`) -- passed to `ExposureConfig.configure` before a live
-        exposure.  Empty for Replay/Log/Help, which take no new exposures.
+        exposure.  Empty for any tab other than Single, Grid, or Auto, since
+        those are the only ones that take new exposures.
         """
         tab = self.tabs.currentWidget()
         if tab is self.single_tab:
@@ -988,23 +983,26 @@ class FocusControlPanel(QtWidgets.QWidget):
             self.status_label.setText('')
 
     def set_stopping(self):
-        """Reflect an Interrupt request that hasn't taken effect yet (§4.3)."""
+        """
+        Reflect an Interrupt request that hasn't taken effect yet: the running
+        sequence only stops once the current exposure finishes, which can take
+        a while, so make that wait visible.
+        """
         for button in self._interrupt_buttons:
             button.setEnabled(False)
         self.status_label.setText('Stopping — waiting for current exposure to finish...')
 
-    def update_step(self, result, total_expected=None):
-        """Update the live step/status display for one new
-        :class:`~nickel_focus.focus.StepResult`."""
-        text = f'Step {result.index + 1}'
-        if total_expected:
-            text += f'/{total_expected}'
-        text += (
-            f' — Focus {result.focus_value:.0f}, FWHM {result.fwhm:.2f}, '
-            f'Source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
-        )
-        if result.is_outlier:
-            text += '  [outlier]'
+    def update_step(self, text):
+        """
+        Update the Log tab's live step display.
+
+        Parameters
+        ----------
+        text : :obj:`str`
+            The step summary, already formatted for display -- formatting a
+            :class:`~nickel_focus.focus.StepResult` is the Controller's job (it
+            logs the same text), not this passive view's.
+        """
         self.step_label.setText(text)
 
     def set_current_position(self, ra_text, dec_text):
@@ -1023,57 +1021,55 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.slew_current_ra_label.setText(ra_text)
         self.slew_current_dec_label.setText(dec_text)
 
-    def show_nearest_target(self, name, ra_text, dec_text):
+    def show_nearest_target(self, ra_text, dec_text, text):
         """
         Populate the Slew tab's target RA/Dec fields with a found nearest
-        target, and report it (mirrors ``scripts/slew_to_nearest.py``'s printed
-        message).
+        target, and report it.
 
         Parameters
         ----------
-        name : :obj:`str`
-            The nearest target's name.
         ra_text : :obj:`str`
             The nearest target's right ascension, already formatted for display.
         dec_text : :obj:`str`
             The nearest target's declination, already formatted for display.
+        text : :obj:`str`
+            The status message, already formatted for display by the Controller
+            (which logs the same text).
         """
         self.slew_target_ra_edit.setText(ra_text)
         self.slew_target_dec_edit.setText(dec_text)
-        self.status_label.setText(f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})')
+        self.show_status(text)
 
-    def show_slew_result(self, message):
-        """
-        Report a completed "Move to Target" slew (e.g., from
-        :attr:`~nickel_focus.gui.model.slew_worker.SlewWorker.slewFinished`).
-        """
-        self.status_label.setText(message)
-
-    def show_best_focus(self, best_focus, best_fwhm):
+    def show_best_focus(self, best_focus, text):
         """
         Report a completed sequence's fitted result, and set it as the Single
         tab's default focus value -- rounded, since a focus value is a
         whole-unit telescope position even though the fit itself can land on a
         fractional one.
+
+        Parameters
+        ----------
+        best_focus : :obj:`float`
+            The fitted best focus, used to set the Single tab's default.
+        text : :obj:`str`
+            The result summary, already formatted for display by the Controller
+            (which logs the same text).
         """
-        self.status_label.setText(
-            f'Sequence finished: best focus {best_focus:.1f}, expected FWHM {best_fwhm:.2f}'
-        )
+        self.show_status(text)
         self.single_focus_spin.setValue(round(best_focus))
 
-    def show_single_exposure_result(self, result):
-        """Report one exposure taken from the Single tab."""
-        self.status_label.setText(
-            f'Took exposure at focus {result.focus_value:.0f}: measured FWHM '
-            f'{result.fwhm:.2f}, source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
-        )
+    def show_status(self, text):
+        """
+        Show a one-line status message on the Log tab (e.g., a completed slew or
+        single exposure, or a failure), replacing whatever was there before.
 
-    def show_failure(self, message):
+        Parameters
+        ----------
+        text : :obj:`str`
+            The message, already formatted for display by the Controller (which
+            logs the same text).
         """
-        Display a sequence failure (e.g., from
-        :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.focusSequenceFailed`).
-        """
-        self.status_label.setText(message)
+        self.status_label.setText(text)
 
     def append_log_line(self, text):
         """Append one line of text to the Log tab's scrolling history."""

@@ -178,4 +178,6 @@ def test_single_mode_reports_failure_without_hardware(focus_sweep, qapp):
 
     assert not single, 'singleExposureFinished should not fire on failure'
     assert len(failed) == 1, 'focusSequenceFailed should fire once'
-    assert 'move to best focus' in failed[0].lower(), 'failure message should explain the action'
+    assert failed[0].startswith('Single exposure at focus 356 failed: '), \
+        'failure message should name the action and focus value'
+    assert 'ktl not connected' in failed[0], 'failure message should include the underlying cause'

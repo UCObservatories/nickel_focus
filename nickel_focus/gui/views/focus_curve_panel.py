@@ -1,7 +1,5 @@
 """
 Live FWHM-vs-focus plot for a focus sequence.
-
-See GUI_DESIGN.md §5.3.
 """
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg

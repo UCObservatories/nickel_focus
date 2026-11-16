@@ -93,6 +93,10 @@ class NickelTelescopePointing:
         # limits.
         log.info(f'Moving to RA={ra}, Dec={dec}')
         target_coo = SkyCoord(ra=ra, dec=dec, unit=('hourangle', 'deg'))
+        # NOTE: Type is double, should be radians but we don't know what happens
+        # in the ktl python package
+        #   - try using modify with sexigesimal coordinates
+
         self.rad.write(target_coo.ra.to('hourangle').value)
         self.decd.write(target_coo.dec.to('deg').value)
 

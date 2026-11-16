@@ -1,7 +1,6 @@
 """
-Interactive display of the exposures in a focus sequence.
-
-See GUI_DESIGN.md §5.2 and §5.6.
+Interactive display of the exposures in a focus sequence, including selection
+of the source to measure.
 """
 import bisect
 
@@ -20,19 +19,20 @@ class ImagePanel(QtWidgets.QWidget):
     """
     Shows the exposures collected by a focus sequence, one at a time.
 
-    Baseline interactions (GUI_DESIGN.md §5.2): pan via scroll bars, wheel zoom,
+    Baseline interactions: pan via scroll bars, wheel zoom,
     a "Recenter" button that returns to a fit-to-view zoom, and a stretch
     selector.  The measured source is boxed on every frame -- red normally,
     yellow (with an "Outlier centroid" label) if
     :attr:`~nickel_focus.focus.StepResult.is_outlier` is set.  A drop-down lists
     every exposure added so far, always kept sorted by focus value, and tracks
     the most recently *added* exposure until the user manually picks a different
-    one (§5.2's "auto-follow latest" decision) -- note that "most recently
+    one, so browsing older exposures isn't interrupted by new ones arriving --
+    note that "most recently
     added" is not the same as "highest focus value," since an adaptive
     (:class:`~nickel_focus.focus.AutomatedFocusSequence`) run doesn't acquire
     focus values in order.
 
-    Hovering over a displayed source and pressing 'm' (§5.6) emits
+    Hovering over a displayed source and pressing 'm' emits
     :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected` with
     the data coordinates under the cursor, but only while
     :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`
@@ -43,12 +43,12 @@ class ImagePanel(QtWidgets.QWidget):
     so a stray click meant only to bring the window forward was enough to kick
     off a reanalysis.
 
-    Does not implement the design doc's optional "center on measured source"
-    recenter variant; "Recenter" always fits the whole frame.
+    "Recenter" always fits the whole frame; it doesn't center on the measured
+    source.
     """
 
-    #: Emitted with the clicked ``(x, y)`` data coordinates, only while
-    #: selection is enabled (see
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'm' is
+    #: pressed, only while selection is enabled (see
     #: :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`).
     sourceSelected = QtCore.Signal(float, float)
 
@@ -58,10 +58,9 @@ class ImagePanel(QtWidgets.QWidget):
     #: already-good limits with a different stretch curve, to bring out
     #: faint structure (Sqrt/Asinh) or compress a large dynamic range
     #: (Log), without needing a separate interval choice for each. Kept
-    #: to short, single-word names -- a longer combo entry (e.g. the
-    #: originally-tried "ZScale + Sqrt") widens the whole combo box
-    #: enough to push the window past a smaller screen's available width
-    #: (see claude/GUI_IMPLEMENTATION.md's Phase 5 sub-phase 3 log).
+    #: to short, single-word names -- a longer combo entry (e.g.
+    #: "ZScale + Sqrt") widens the whole combo box, and with it the
+    #: window's minimum width, enough to overflow a smaller screen.
     STRETCHES = {
         'ZScale': lambda data: ImageNormalize(
             data, interval=ZScaleInterval(), stretch=LinearStretch()
@@ -159,7 +158,7 @@ class ImagePanel(QtWidgets.QWidget):
 
     def set_selection_enabled(self, enabled):
         """
-        Enable or disable click-to-select-source (§5.6). The Controller is
+        Enable or disable source selection with the 'm' key. The Controller is
         responsible for calling this appropriately (enabled before a
         sequence/single exposure starts or after one finishes, disabled while
         one is running).
@@ -199,7 +198,7 @@ class ImagePanel(QtWidgets.QWidget):
         :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.add_result` if no
         entry for that exposure exists yet.  Used when
         :meth:`~nickel_focus.focus.FocusSequence.reanalyze` re-measures
-        exposures already on display (§5.6).
+        exposures already on display (e.g., after a new source is selected).
         """
         existing_index = next(
             (i for i, r in enumerate(self._results) if r.exposure == result.exposure), None
@@ -267,7 +266,7 @@ class ImagePanel(QtWidgets.QWidget):
         self.canvas.draw_idle()
 
     def recenter(self):
-        """Reset to a fit-to-view zoom (GUI_DESIGN.md §5.2)."""
+        """Reset to a fit-to-view zoom."""
         self.set_zoom(1.0)
 
     def get_settings_state(self):
@@ -434,9 +433,9 @@ class ImagePanel(QtWidgets.QWidget):
         Set both scrollbars' values at once, clamped to their valid range,
         without triggering
         :meth:`~nickel_focus.gui.views.image_panel.ImagePanel._on_scroll` for
-        either -- used whenever this panel repositions the view itself
-        (recentering on a data point, panning by right-clicking, etc.) rather
-        than in response to the user actually dragging a scrollbar.  Signals are
+        either -- used whenever this panel repositions the view itself (zooming
+        around the cursor, or keeping the view fixed while switching exposures)
+        rather than in response to the user actually dragging a scrollbar.  Signals are
         blocked because
         :meth:`~nickel_focus.gui.views.image_panel.ImagePanel._on_scroll` would
         otherwise fire once per bar and redraw twice for what's really one

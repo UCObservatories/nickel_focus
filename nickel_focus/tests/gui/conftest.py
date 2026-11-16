@@ -39,8 +39,8 @@ def _remove_qt_log_handlers():
 @pytest.fixture(autouse=True)
 def isolate_qsettings(monkeypatch, tmp_path):
     """
-    Redirect `MainWindow`'s settings persistence (GUI_DESIGN.md §9 phase
-    5) to an isolated, per-test ini file instead of the real application
+    Redirect `MainWindow`'s settings persistence to an isolated, per-test
+    ini file instead of the real application
     preferences store. Without this, every test that constructs --  and
     especially every test that closes -- a `MainWindow` would read from
     and write to the developer's actual saved GUI settings on disk.

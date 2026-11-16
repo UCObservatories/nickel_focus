@@ -2,10 +2,10 @@
 The :class:`PySide6.QtCore.QThread` engine that drives a
 :class:`~nickel_focus.focus.FocusSequence` off the GUI thread.
 
-See GUI_DESIGN.md §4.3: every hardware call in
-:class:`~nickel_focus.scripts.focus.NickelFocus` is blocking, and a real
-exposure takes seconds to tens of seconds, so running a sequence directly on the
-GUI's event-loop thread would freeze the whole interface.
+Every hardware call made by :class:`~nickel_focus.focus.Focus` and
+:class:`~nickel_focus.focus.Exposure` is blocking, and a real exposure takes
+seconds to tens of seconds, so running a sequence directly on the GUI's
+event-loop thread would freeze the whole interface.
 :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` runs it here instead
 and reports progress back via Qt signals.
 """
@@ -18,19 +18,23 @@ class FocusWorker(QtCore.QThread):
     thread.
 
     A new :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` is expected
-    to be created for each run (start a sequence, reanalyze one) rather than
-    reused, matching :class:`PySide6.QtCore.QThread`'s own expectation that
-    :meth:`PySide6.QtCore.QThread.start` is called at most once per instance.
+    to be created for each run (run a sequence, reanalyze one, or take a single
+    exposure) rather than reused, matching :class:`PySide6.QtCore.QThread`'s
+    own expectation that :meth:`PySide6.QtCore.QThread.start` is called at most
+    once per instance.
 
     Parameters
     ----------
     focus_sequence : :class:`~nickel_focus.focus.FocusSequence`
         The sequence to drive.  Must already be constructed (e.g., a
         :class:`~nickel_focus.focus.GridFocusSequence` or
-        :class:`~nickel_focus.focus.ArchiveFocusSequence`); this class only
-        calls :meth:`~nickel_focus.focus.FocusSequence.step`,
-        :meth:`~nickel_focus.focus.FocusSequence.reanalyze`, and
-        :meth:`~nickel_focus.focus.FocusSequence.fit_best_focus` on it.
+        :class:`~nickel_focus.focus.ArchiveFocusSequence`); depending on
+        ``mode``, this class calls its
+        :meth:`~nickel_focus.focus.FocusSequence.step`,
+        :meth:`~nickel_focus.focus.FocusSequence.reanalyze`, or
+        :meth:`~nickel_focus.focus.FocusSequence.take_single_exposure`, then
+        :meth:`~nickel_focus.focus.FocusSequence.fit_best_focus` for the first
+        two, and configures its exposure hardware (if any) before stepping.
     method : :obj:`str`, :obj:`tuple`, optional
         The photometry method to use; see
         :func:`~nickel_focus.photometry.image_quality`.
@@ -40,16 +44,15 @@ class FocusWorker(QtCore.QThread):
         replaying archived ones), ``'reanalyze'`` to re-run photometry on
         exposures already collected
         (:meth:`~nickel_focus.focus.FocusSequence.reanalyze`), without taking
-        any new ones, or ``'single'`` to take one confirmation exposure at
-        ``focus_value``
-        (:meth:`~nickel_focus.focus.FocusSequence.take_single_exposure`) -- used
-        for "Move to Best Focus" (GUI_DESIGN.md §5.4) and the standalone
-        single-exposure workflow (§5.5).
+        any new ones, or ``'single'`` to take one exposure at ``focus_value``
+        (:meth:`~nickel_focus.focus.FocusSequence.take_single_exposure`) -- the
+        Single tab's action, whether at the most recent fitted best focus (its
+        default) or any other focus value the user enters.
     exp_kwargs : :obj:`dict`, optional
         Exposure settings (``record``, ``speed``, ``binning``, ``exptime``)
         applied via :meth:`~nickel_focus.focus.ExposureConfig.configure` before
-        stepping, matching what the old CLI-only
-        :meth:`~nickel_focus.focus.FocusSequence.execute` did.  Meaningful for
+        stepping, matching
+        :meth:`~nickel_focus.focus.FocusSequence.execute`.  Meaningful for
         ``mode='step'``/``'single'`` against a sequence with real (or fake)
         exposure hardware; ignored for ``mode='reanalyze'`` (no new exposures
         are taken) and harmless for archive/replay sequences (which have no
@@ -111,7 +114,7 @@ class FocusWorker(QtCore.QThread):
     def request_stop(self):
         """
         Ask the sequence to stop after the exposure currently in progress
-        finishes -- never mid-exposure (GUI_DESIGN.md §4.3). Has no effect once
+        finishes -- never mid-exposure. Has no effect once
         the run has already finished.
         """
         self.stop_requested = True
@@ -138,7 +141,9 @@ class FocusWorker(QtCore.QThread):
                     self.focus_value, method=self.method, **self.exp_kwargs
                 )
             except Exception as e:
-                self.focusSequenceFailed.emit(f'Could not move to best focus: {e}', e)
+                self.focusSequenceFailed.emit(
+                    f'Single exposure at focus {self.focus_value:.0f} failed: {e}', e
+                )
                 return
             self.singleExposureFinished.emit(result)
             return

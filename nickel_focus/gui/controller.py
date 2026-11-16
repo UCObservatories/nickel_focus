@@ -5,7 +5,9 @@ panels) to the Model (:class:`~nickel_focus.focus.FocusSequence` subclasses, via
 :class:`~nickel_focus.slew.NickelTelescopePointing`, via
 :class:`~nickel_focus.gui.model.slew_worker.SlewWorker`).
 
-See GUI_DESIGN.md §4.3.
+Every hardware operation (an exposure, a focus move, a slew) blocks, so each
+runs on its own worker thread rather than the GUI thread, and only one may run
+at a time.
 """
 import logging
 
@@ -28,11 +30,11 @@ class Controller(QtCore.QObject):
     driving it, and mediates between it and a
     :class:`~nickel_focus.gui.views.main_window.MainWindow`.
 
-    Implements the "hardware exclusivity" state machine from §4.3: only one
-    operation can be active at a time, and interactive source selection
+    Implements "hardware exclusivity": only one operation can be active at a
+    time, and interactive source selection
     (:attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`) is
     only enabled while nothing is running.  All three sequence types (Grid,
-    Automated, Archive/ Replay), reanalysis, and the Single tab (which also
+    Automated, Archive/Replay), reanalysis, and the Single tab (which also
     serves as "move to best focus" -- see
     :class:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel`) are
     wired up.
@@ -97,7 +99,7 @@ class Controller(QtCore.QObject):
         # a standalone Single-tab exposure (its hardware handles, not its
         # bookkeeping, matter -- see `take_single_exposure`). Seeded with
         # that one exposure's data so `reanalyze()` (via interactive
-        # source selection, §5.6) can run against it even though no real
+        # source selection) can run against it even though no real
         # sequence is loaded.
         self._standalone_focus_sequence = None
 
@@ -231,8 +233,8 @@ class Controller(QtCore.QObject):
         Re-run photometry on the already-collected exposures of whatever is
         currently loaded: the active
         :attr:`~nickel_focus.gui.controller.Controller.focus_sequence`, or -- if
-        none is loaded -- a standalone Single-tab exposure (§5.6's "no sequence
-        loaded yet" case).
+        none is loaded -- a standalone Single-tab exposure, so a source can be
+        marked on it before any sequence exists.
         """
         target = (
             self.focus_sequence if self.focus_sequence is not None
@@ -275,7 +277,11 @@ class Controller(QtCore.QObject):
         )
 
     def stop(self):
-        """Request that the running sequence stop between steps (§4.3)."""
+        """
+        Request that the running sequence stop between steps, never
+        mid-exposure; see
+        :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker.request_stop`.
+        """
         if self.focus_worker is None:
             return
         self.focus_worker.request_stop()
@@ -286,12 +292,11 @@ class Controller(QtCore.QObject):
         Update the photometry method used for future steps/reanalysis.
         ``method`` is ``'brightest'`` (the default) or an ``(x, y)`` coordinate
         tuple (from
-        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`);
-        the coordinates actually measured are reported per-exposure on the Log
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`).
+        The coordinates actually measured are reported per-exposure on the Log
         tab
         (:meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.update_step`/
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_single_exposure_result`)
-        rather than tracked as a separate "current method" display.
+        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_status`).
         """
         self.method = method
 
@@ -381,7 +386,7 @@ class Controller(QtCore.QObject):
         its full traceback is logged along with ``message``.
         """
         log.error(message, exc_info=exc)
-        self.window.control_panel.show_failure(message)
+        self.window.control_panel.show_status(message)
 
     def _find_nearest(self, obj_search_str, file=None):
         """
@@ -414,8 +419,9 @@ class Controller(QtCore.QObject):
             return
         ra_text = ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
         dec_text = dec.to_string(unit='deg', sep=':', pad=True, alwayssign=True, precision=2)
-        log.info(f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})')
-        self.window.control_panel.show_nearest_target(name, ra_text, dec_text)
+        text = f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})'
+        log.info(text)
+        self.window.control_panel.show_nearest_target(ra_text, dec_text, text)
 
     def _start_focus_worker(self, focus_sequence, mode, exp_kwargs=None, focus_value=None):
         """
@@ -473,7 +479,7 @@ class Controller(QtCore.QObject):
         if result.is_outlier:
             step_text += '  [outlier]'
         log.info(step_text)
-        self.window.control_panel.update_step(result, total_expected=total)
+        self.window.control_panel.update_step(step_text)
 
     def _on_focus_sequence_finished(self, best_focus, best_fwhm):
         """
@@ -481,8 +487,9 @@ class Controller(QtCore.QObject):
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.focusSequenceFinished`:
         report the fitted result.
         """
-        log.info(f'Sequence finished: best focus {best_focus:.1f}, expected FWHM {best_fwhm:.2f}')
-        self.window.control_panel.show_best_focus(best_focus, best_fwhm)
+        text = f'Sequence finished: best focus {best_focus:.1f}, expected FWHM {best_fwhm:.2f}'
+        log.info(text)
+        self.window.control_panel.show_best_focus(best_focus, text)
 
     def _on_single_exposure_finished(self, result):
         """
@@ -502,11 +509,12 @@ class Controller(QtCore.QObject):
         seq.source_stamps.append(result.stamp)
         seq.centroids.append(result.centroid)
         seq.step_iter = 1
-        log.info(
+        text = (
             f'Took exposure at focus {result.focus_value:.0f}: measured FWHM {result.fwhm:.2f}, '
             f'source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
         )
-        self.window.control_panel.show_single_exposure_result(result)
+        log.info(text)
+        self.window.control_panel.show_status(text)
 
     def _on_focus_worker_finished(self):
         """
@@ -542,8 +550,9 @@ class Controller(QtCore.QObject):
         :attr:`~nickel_focus.gui.model.slew_worker.SlewWorker.slewFinished`:
         report that the telescope reached its target.
         """
-        log.info('Move to target complete.')
-        self.window.control_panel.show_slew_result('Move to target complete.')
+        text = 'Move to target complete.'
+        log.info(text)
+        self.window.control_panel.show_status(text)
 
     def _on_slew_worker_finished(self):
         """
@@ -590,6 +599,6 @@ class Controller(QtCore.QObject):
         self.window.control_panel.set_current_position(ra_text, dec_text)
 
     def _set_running(self, running):
-        """Propagate the hardware-exclusivity state to the View (§4.3)."""
+        """Propagate the hardware-exclusivity state to the View."""
         self.window.control_panel.set_running(running)
         self.window.image_panel.set_selection_enabled(not running)

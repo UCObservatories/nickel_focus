@@ -1,14 +1,8 @@
 """Tests for :mod:`gui.views.focus_control_panel`."""
 from pathlib import Path
 
-from nickel_focus import focus
 from nickel_focus.gui.qt import QtWidgets
 from nickel_focus.gui.views.focus_control_panel import FocusControlPanel
-
-
-def _step_result(focus_sweep, index=0):
-    seq = focus.ArchiveFocusSequence(focus_sweep['focus_values'], focus_sweep['files'])
-    return list(seq.step(method='brightest'))[index]
 
 
 def test_tabs_exist_in_the_requested_order(qapp):
@@ -327,46 +321,27 @@ def test_set_stopping_disables_interrupt_buttons_and_shows_status(qapp):
     assert 'Stopping' in panel.status_label.text(), 'status should explain the wait'
 
 
-def test_update_step_updates_label(qapp, focus_sweep):
-    result = _step_result(focus_sweep, index=1)
+def test_update_step_updates_label(qapp):
     panel = FocusControlPanel()
 
-    panel.update_step(result, total_expected=5)
+    panel.update_step('Step 2/5 — Focus 345')
 
-    assert 'Step 2/5' in panel.step_label.text(), 'step label should show 1-based step/total'
-    assert f'{result.focus_value:.0f}' in panel.step_label.text(), 'step label should show focus'
-    assert f'{result.centroid[0]:.1f}' in panel.step_label.text(), \
-        'step label should show the measured source coordinates'
+    assert panel.step_label.text() == 'Step 2/5 — Focus 345'
 
 
 def test_show_best_focus_updates_status_and_single_tab_default(qapp):
     panel = FocusControlPanel()
 
-    panel.show_best_focus(356.6, 3.3)
+    panel.show_best_focus(356.6, 'Sequence finished')
 
-    assert '356.6' in panel.status_label.text(), 'status should show the best focus'
-    assert '3.3' in panel.status_label.text(), 'status should show the expected FWHM'
+    assert panel.status_label.text() == 'Sequence finished'
     assert panel.single_focus_spin.value() == 357, \
         'the Single tab default should be the best focus, rounded to the nearest integer'
 
 
-def test_show_single_exposure_result_updates_status(qapp, focus_sweep):
-    result = _step_result(focus_sweep)
+def test_show_status_updates_status(qapp):
     panel = FocusControlPanel()
-
-    panel.show_single_exposure_result(result)
-
-    assert f'{result.focus_value:.0f}' in panel.status_label.text(), \
-        'status should report the exposure focus value'
-    assert f'{result.fwhm:.2f}' in panel.status_label.text(), \
-        'status should report the measured FWHM'
-    assert f'{result.centroid[0]:.1f}' in panel.status_label.text(), \
-        'status should report the measured source coordinates'
-
-
-def test_show_failure_updates_status(qapp):
-    panel = FocusControlPanel()
-    panel.show_failure('Stopped early -- not enough points for a focus fit')
+    panel.show_status('Stopped early -- not enough points for a focus fit')
 
     assert panel.status_label.text() == 'Stopped early -- not enough points for a focus fit'
 
@@ -384,17 +359,16 @@ def test_status_and_step_labels_wrap_instead_of_widening(qapp):
     # length wouldn't exercise the fix meaningfully.
     long_message = 'Expected to find the following files, but they are not available: ' + \
         ', '.join(f'/some/long/data/directory/n{2000 + i}.fits' for i in range(10))
-    panel.show_failure(long_message)
+    panel.show_status(long_message)
 
     assert panel.status_label.minimumSizeHint().width() < 200, \
         'a long message should not inflate the label (and thus the panel) width'
 
 
-def test_reset_clears_status_and_log(qapp, focus_sweep):
-    result = _step_result(focus_sweep)
+def test_reset_clears_status_and_log(qapp):
     panel = FocusControlPanel()
-    panel.update_step(result)
-    panel.show_failure('oops')
+    panel.update_step('Step 1')
+    panel.show_status('oops')
     panel.append_log_line('oops')  # the view itself no longer appends to the log
 
     panel.reset()
@@ -406,7 +380,7 @@ def test_reset_clears_status_and_log(qapp, focus_sweep):
 
 def test_reset_does_not_touch_the_single_tab_default(qapp):
     panel = FocusControlPanel()
-    panel.show_best_focus(356.6, 3.3)
+    panel.show_best_focus(356.6, 'Sequence finished')
 
     panel.reset()
 
@@ -456,21 +430,13 @@ def test_set_current_position_updates_labels(qapp):
 def test_show_nearest_target_populates_target_fields_and_status(qapp):
     panel = FocusControlPanel()
 
-    panel.show_nearest_target('Pointing00', '00:30:07.29', '+29:45:06.20')
+    panel.show_nearest_target('00:30:07.29', '+29:45:06.20', 'Nearest target: Pointing00')
 
     assert panel.slew_target_ra_edit.text() == '00:30:07.29', \
         'the target RA field should be populated with the found target'
     assert panel.slew_target_dec_edit.text() == '+29:45:06.20', \
         'the target Dec field should be populated with the found target'
-    assert 'Pointing00' in panel.status_label.text(), 'status should report the target name'
-
-
-def test_show_slew_result_updates_status(qapp):
-    panel = FocusControlPanel()
-
-    panel.show_slew_result('Move to target complete.')
-
-    assert panel.status_label.text() == 'Move to target complete.'
+    assert panel.status_label.text() == 'Nearest target: Pointing00'
 
 
 def test_preferred_height_excluding_help_ignores_the_tallest_page(qapp):
