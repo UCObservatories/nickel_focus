@@ -48,9 +48,15 @@ class Controller(QtCore.QObject):
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_object`/
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_pointing`/
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_focus` (a single
-    fast ktl read plus a starlist search, not a move) do not.  A
-    :class:`PySide6.QtCore.QTimer` polls the telescope's current position for
-    the tab's live display regardless of what else is running.
+    fast ktl read plus a starlist search, not a move) do not.
+
+    A :class:`PySide6.QtCore.QTimer` polls the hardware once a second,
+    regardless of what else is running: the telescope's current position for
+    the Slew tab's live display, and the keywords behind the
+    :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicators (see
+    :meth:`~nickel_focus.gui.controller.Controller._update_status_indicators`).
+    The status bar's Quit button closes the window; like the action buttons,
+    it's disabled while anything is running.
 
     Without a live ``ktl`` connection, the Slew/Single/Grid/Auto tabs can't do
     anything but fail -- see
@@ -114,6 +120,13 @@ class Controller(QtCore.QObject):
         except RuntimeError:
             self.telescope = None
 
+        # Focus/exposure handles used only to read the keywords behind the
+        # status indicators -- never to move the focus or take an
+        # exposure (sequences and single exposures construct their own,
+        # via `focus.FocusSequence`). `None` without a ktl connection.
+        self.focus_hardware = self._connect_status_handle(focus.Focus, 'focus')
+        self.exposure_hardware = self._connect_status_handle(focus.Exposure, 'exposure')
+
         # `focus.ktl` and `slew.ktl` are the same object in normal
         # operation (see `nickel_focus/pkg/ktl.py`), so checking one is
         # enough to know whether any of the four ktl-driven tabs can do
@@ -140,19 +153,22 @@ class Controller(QtCore.QObject):
         window.control_panel.findNearestPointingRequested.connect(self.find_nearest_pointing)
         window.control_panel.findNearestFocusRequested.connect(self.find_nearest_focus)
         window.image_panel.sourceSelected.connect(self._on_source_selected)
+        window.status_bar.quitRequested.connect(self.quit)
 
         # Milliseconds, not seconds: a `QTimer` interval is always in ms.
-        # Reading `telescope.current` is one quick ktl-cache read, not a
-        # move -- safe (and useful) to keep polling no matter what else,
-        # if anything, is running.
+        # Each poll is a handful of quick ktl reads, not a move -- safe
+        # (and useful) to keep polling no matter what else, if anything,
+        # is running.
         self._position_read_failed = False
-        self._position_timer = QtCore.QTimer(self)
-        self._position_timer.timeout.connect(self._update_current_position)
-        if self.telescope is None:
-            self.window.control_panel.set_current_position('—', '—')
-        else:
-            self._update_current_position()
-            self._position_timer.start(1000)
+        self._status_read_failed = set()  # indicator keys whose last read failed
+        self._poll_timer = QtCore.QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_hardware)
+        self._poll_hardware()
+        if any(
+            handle is not None
+            for handle in (self.telescope, self.focus_hardware, self.exposure_hardware)
+        ):
+            self._poll_timer.start(1000)
 
         self._set_running(False)
 
@@ -377,6 +393,14 @@ class Controller(QtCore.QObject):
         """
         self._find_nearest('Focusing')
 
+    def quit(self):
+        """
+        Handle the status bar's Quit button: close the window, exactly as its
+        own close button would (settings are saved, and the application exits
+        once its last window closes).
+        """
+        self.window.close()
+
     # -- internals ------------------------------------------------------------
 
     def _fail(self, message, exc=None):
@@ -568,18 +592,105 @@ class Controller(QtCore.QObject):
         self.slew_worker = None
         self._set_running(False)
 
+    def _connect_status_handle(self, handle_class, description):
+        """
+        Construct one of the hardware handles used only to read the status
+        indicators' keywords
+        (:attr:`~nickel_focus.gui.controller.Controller.focus_hardware`/
+        :attr:`~nickel_focus.gui.controller.Controller.exposure_hardware`), or
+        return ``None`` if that's not possible.
+
+        Without ``ktl``, ``handle_class`` raises :obj:`RuntimeError`, which is
+        expected and silent.  Any other failure (e.g., ``ktl`` is available but
+        a keyword can't be reached) is logged as a warning rather than
+        preventing the GUI from starting, since these handles only drive the
+        indicators.
+
+        Parameters
+        ----------
+        handle_class : :obj:`type`
+            :class:`~nickel_focus.focus.Focus` or
+            :class:`~nickel_focus.focus.Exposure`.
+        description : :obj:`str`
+            Short name for the handle, used in the warning message.
+        """
+        if focus.ktl is None:
+            return None
+        try:
+            return handle_class()
+        except Exception as e:
+            log.warning(f'Could not connect to the {description} status keywords: {e}', exc_info=e)
+            return None
+
+    def _poll_hardware(self):
+        """
+        Slot for the one-second polling :class:`PySide6.QtCore.QTimer` (also
+        called once directly from
+        :meth:`~nickel_focus.gui.controller.Controller.__init__`): refresh the
+        Slew tab's current position and the status indicators.
+        """
+        self._update_current_position()
+        self._update_status_indicators()
+
+    def _update_status_indicators(self):
+        """
+        Read the keyword behind each
+        :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicator and set
+        its color (see the module-level ``_*_state`` functions for each
+        keyword's mapping):
+
+        - **Slew** -- ``NickelTelescopePointing.pocstop`` (telescope movement
+          allowed).
+        - **Track** -- ``NickelTelescopePointing.track``.
+        - **On Target** -- ``NickelTelescopePointing.target``.
+        - **Focus** -- ``Focus.seclk`` (the secondary's lock) sets the color;
+          the text is the current focus value (``Focus.current``).
+        - **Exp** -- ``Exposure.expstate``.
+
+        An indicator whose hardware handle is ``None`` (no ``ktl`` connection),
+        or whose read fails, is shown red with its default text.  A failed read
+        is logged as a warning only on the first failure in a row for that
+        indicator, since this is polled every second.
+        """
+        telescope, focus_hw, exposure_hw = (
+            self.telescope, self.focus_hardware, self.exposure_hardware
+        )
+        # key: (hardware handle, function returning (state, text or None))
+        readers = {
+            'movement': (telescope, lambda: (_movement_state(telescope.pocstop.read()), None)),
+            'track': (telescope, lambda: (_track_state(telescope.track.read()), None)),
+            'target': (telescope, lambda: (_target_state(telescope.target.read()), None)),
+            'focus': (
+                focus_hw,
+                lambda: (_seclk_state(focus_hw.seclk.read()), f'{focus_hw.current:.1f}')
+            ),
+            'exp': (exposure_hw, lambda: (_expstate_state(exposure_hw.expstate.read()), None)),
+        }
+        status_bar = self.window.status_bar
+        for key, (handle, read) in readers.items():
+            if handle is None:
+                status_bar.set_indicator(key, 'error')
+                continue
+            try:
+                state, text = read()
+            except Exception as e:
+                if key not in self._status_read_failed:
+                    log.warning(f'Could not read the {key} status: {e}', exc_info=e)
+                self._status_read_failed.add(key)
+                status_bar.set_indicator(key, 'error')
+                continue
+            self._status_read_failed.discard(key)
+            status_bar.set_indicator(key, state, text)
+
     def _update_current_position(self):
         """
         Poll :attr:`~nickel_focus.slew.NickelTelescopePointing.current` and push
-        the formatted result to the Slew tab's live "current position" display.
-        A no-op if :attr:`~nickel_focus.gui.controller.Controller.telescope` is
-        ``None`` (see the class docstring); the :class:`PySide6.QtCore.QTimer`
-        driving this is never started in that case, but this also guards the one
-        direct call made from
-        :meth:`~nickel_focus.gui.controller.Controller.__init__` before that
-        timer's first tick.
+        the formatted result to the Slew tab's live "current position" display,
+        or show "—" if :attr:`~nickel_focus.gui.controller.Controller.telescope`
+        is ``None`` (no ``ktl`` connection) or the read fails.
         """
         if self.telescope is None:
+            self.window.control_panel.set_current_position('—', '—')
             return
         try:
             current = self.telescope.current
@@ -601,4 +712,49 @@ class Controller(QtCore.QObject):
     def _set_running(self, running):
         """Propagate the hardware-exclusivity state to the View."""
         self.window.control_panel.set_running(running)
+        self.window.status_bar.set_running(running)
         self.window.image_panel.set_selection_enabled(not running)
+
+
+# -- status-indicator state mappings ------------------------------------------
+#
+# Each function maps one KTL keyword's value (as returned by its `read()`) to a
+# StatusBar indicator state: 'ok' (green), 'warn' (yellow), or 'error' (red).
+# String values are compared case-insensitively, ignoring surrounding
+# whitespace.
+
+def _normalize(value):
+    """Return ``value`` as a lowercase string with surrounding whitespace removed."""
+    return str(value).strip().lower()
+
+
+def _movement_state(value):
+    """``POCSTOP``: green if movement is ``allowed``, red otherwise."""
+    return 'ok' if _normalize(value) == 'allowed' else 'error'
+
+
+def _track_state(value):
+    """``POCTRCK``: green if tracking is ``on``, yellow otherwise."""
+    return 'ok' if _normalize(value) == 'on' else 'warn'
+
+
+def _target_state(value):
+    """
+    ``POCOT``: green if on target (``0``), yellow if off target (``1``), red for
+    an error (``-1``) or any value that isn't one of those three.
+    """
+    try:
+        code = int(_normalize(value))
+    except ValueError:
+        return 'error'
+    return {0: 'ok', 1: 'warn'}.get(code, 'error')
+
+
+def _seclk_state(value):
+    """``POCSECLK``: green if the secondary is locked (``on``), yellow otherwise."""
+    return 'ok' if _normalize(value) == 'on' else 'warn'
+
+
+def _expstate_state(value):
+    """``EXPSTATE``: green if the camera is ``Ready``, yellow otherwise."""
+    return 'ok' if _normalize(value) == 'ready' else 'warn'

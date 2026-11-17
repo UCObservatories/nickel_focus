@@ -276,3 +276,12 @@ def test_set_settings_state_ignores_an_unknown_stretch_name(qapp):
     panel.set_settings_state({'stretch': 'NotARealStretch'})
 
     assert panel._stretch_name == original, 'an unrecognized stretch name should be ignored'
+
+
+def test_image_is_anchored_to_the_top_of_the_canvas(qapp, focus_sweep):
+    # Keeps the image directly under the Exposure row, instead of centered
+    # with a blank band above it when the frame and canvas shapes differ.
+    panel = ImagePanel()
+    panel.add_result(_step_results(focus_sweep)[0])
+
+    assert panel.ax.get_anchor() == 'N'

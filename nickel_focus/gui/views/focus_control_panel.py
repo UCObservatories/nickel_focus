@@ -724,7 +724,13 @@ class FocusControlPanel(QtWidgets.QWidget):
             '<b>Acquire / Load</b> — run the action configured in that '
             'tab.<br>'
             '<b>Interrupt</b> — stop a running Grid/Auto sequence between '
-            'steps (does not abort the current exposure).'
+            'steps (does not abort the current exposure).<br><br>'
+            '<b>Status bar</b> (above the image) — green is ready, yellow '
+            'needs attention, red is an error or unavailable (all red '
+            'without a telescope connection). Slew: telescope motion '
+            'allowed. Track: tracking on. On Target: on target (yellow while '
+            'moving). Focus: current focus value; green when the secondary '
+            'is locked. Exp: camera ready.'
         )
         label = QtWidgets.QLabel(text)
         label.setWordWrap(True)

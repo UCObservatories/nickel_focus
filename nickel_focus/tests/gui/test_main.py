@@ -197,3 +197,43 @@ def test_unchecking_settings_erases_previously_saved_configuration(qapp):
     assert window3.control_panel.grid_start_spin.value() != 311, \
         'the erased configuration should not come back'
     window3.close()
+
+
+def test_status_bar_sits_directly_above_the_image_panel(qapp):
+    window = launcher.build_window()
+    window.show()
+    qapp.processEvents()
+
+    assert window.status_bar.parentWidget() is window.image_panel.parentWidget(), \
+        'the status bar should share the left column with the image panel'
+    assert window.status_bar.geometry().bottom() < window.image_panel.geometry().top(), \
+        'the status bar should be above the image panel'
+    window.close()
+
+
+def test_status_bar_lines_up_with_and_sits_close_to_the_image_panel_rows(qapp):
+    window = launcher.build_window()
+    window.show()
+    qapp.processEvents()
+    status_bar, image_panel = window.status_bar, window.image_panel
+
+    def window_rect(widget):
+        return QtCore.QRect(widget.mapTo(window, QtCore.QPoint(0, 0)), widget.size())
+
+    quit_rect = window_rect(status_bar.quit_button)
+    exp_rect = window_rect(status_bar.indicators['exp'])
+    combo_row = image_panel.layout().itemAt(0).layout()
+    label_rect = window_rect(combo_row.itemAt(0).widget())
+    recenter_rect = window_rect(image_panel.recenter_button)
+
+    assert quit_rect.left() == label_rect.left(), 'left edges should line up'
+    assert exp_rect.right() == recenter_rect.right(), 'right edges should line up'
+    gap = window_rect(image_panel.exposure_combo).top() - quit_rect.bottom()
+    assert gap <= 4, f'the status bar should sit tight against the Exposure row (gap {gap}px)'
+    window.close()
+
+
+def test_build_app_uses_the_fusion_style(qapp):
+    # Fusion is the default on Linux (where the GUI is deployed); forcing it
+    # everywhere keeps the layout the same on other platforms, e.g. macOS.
+    assert launcher.build_app().style().name().lower() == 'fusion'

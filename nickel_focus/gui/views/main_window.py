@@ -1,20 +1,24 @@
 """
-Top-level window laying out the three panels: the exposure display on the left,
-and the focus curve above the control tabs on the right.
+Top-level window laying out the panels: the Quit button and status indicators
+above the exposure display on the left, and the focus curve above the control
+tabs on the right.
 """
 from nickel_focus.gui.qt import QtCore, QtWidgets
 from nickel_focus.gui.views.image_panel import ImagePanel
 from nickel_focus.gui.views.focus_curve_panel import FocusCurvePanel
 from nickel_focus.gui.views.focus_control_panel import FocusControlPanel
+from nickel_focus.gui.views.status_bar import StatusBar
 
 
 class MainWindow(QtWidgets.QMainWindow):
     """
-    Lays out :class:`~nickel_focus.gui.views.image_panel.ImagePanel` (left),
+    Lays out :class:`~nickel_focus.gui.views.status_bar.StatusBar` above
+    :class:`~nickel_focus.gui.views.image_panel.ImagePanel` (left),
     :class:`~nickel_focus.gui.views.focus_curve_panel.FocusCurvePanel` (top
     right), and
     :class:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel`
-    (bottom right), separated by user-draggable splitters.  Purely structural --
+    (bottom right), with user-draggable splitters between the left and right
+    sides and between the two right-hand panels.  Purely structural --
     wiring the panels together is :class:`~nickel_focus.gui.controller.Controller`'s
     job, not this class's.
 
@@ -44,6 +48,10 @@ class MainWindow(QtWidgets.QMainWindow):
     _SETTINGS_ORG = 'LickObservatory'
     _SETTINGS_APP = 'NickelFocusGUI'
 
+    #: Layout spacing, in pixels, between the status bar and the image
+    #: panel's Exposure row below it.
+    _STATUS_BAR_SPACING = 2
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Nickel Focus GUI')
@@ -55,6 +63,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # doesn't show anything on screen by itself; a widget only
         # becomes visible once it's placed into a visible parent's
         # layout (below) and that parent is eventually shown.
+        self.status_bar = StatusBar()
         self.image_panel = ImagePanel()
         self.curve_panel = FocusCurvePanel()
         self.control_panel = FocusControlPanel()
@@ -73,8 +82,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # (QVBoxLayout/QHBoxLayout elsewhere in this codebase), whose
         # relative sizes the user can't adjust interactively. Splitters
         # nest like any other widget: `right` (curve plot over the
-        # control panel) becomes one side of `central` (image panel
-        # beside that whole right-hand column).
+        # control panel) becomes one side of `central` (status bar and
+        # image panel beside that whole right-hand column).
         right = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         right.addWidget(self.curve_panel)
         right.addWidget(self.control_panel)
@@ -99,8 +108,28 @@ class MainWindow(QtWidgets.QMainWindow):
         # that the default instead.
         right.setSizes([1000000, self.control_panel.preferred_height_excluding_help()])
 
+        # The status bar is a fixed single row stacked directly above the
+        # image panel (an ordinary layout, not a splitter -- there's
+        # nothing to gain from letting the user resize a one-line bar).
+        # The column's margins come from the image panel's own layout:
+        # the status bar gets the same left/top/right margins, so the two
+        # rows' edges line up. The image panel's top margin is dropped and
+        # the gap between the two rows is a small fixed spacing instead
+        # (the widgets' own frames add a couple of pixels on top of it),
+        # so the status bar sits tight against the Exposure row.
+        image_layout = self.image_panel.layout()
+        margin_left, margin_top, margin_right, margin_bottom = image_layout.getContentsMargins()
+        self.status_bar.setContentsMargins(margin_left, margin_top, margin_right, 0)
+        image_layout.setContentsMargins(margin_left, 0, margin_right, margin_bottom)
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(self._STATUS_BAR_SPACING)
+        left_layout.addWidget(self.status_bar)
+        left_layout.addWidget(self.image_panel, 1)
+
         central = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        central.addWidget(self.image_panel)
+        central.addWidget(left)
         central.addWidget(right)
         # Give both sides of the horizontal splitter equal claim on any
         # extra space when the window is resized (an equal, nonzero
@@ -134,8 +163,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def showEvent(self, event):
         """
-        The first time this window actually becomes visible, give the image
-        panel a square initial share of ``central``'s width.  ``central``'s
+        The first time this window actually becomes visible, give the left
+        column a share of ``central``'s width that makes the image panel (the
+        column's height minus the status bar above it) start out square.
+        ``central``'s
         geometry doesn't reflect the
         :meth:`~nickel_focus.gui.views.main_window.MainWindow._size_to_screen`
         resize until the window is genuinely shown -- reading it any earlier in
@@ -150,7 +181,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._sized_image_panel:
             self._sized_image_panel = True
             central = self.centralWidget()
-            central.setSizes([central.height(), central.width() - central.height()])
+            left_width = central.height() - self.status_bar.height()
+            central.setSizes([left_width, central.width() - left_width])
 
     def _settings(self):
         """

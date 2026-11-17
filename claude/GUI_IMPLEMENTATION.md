@@ -2463,3 +2463,130 @@ predated Slew/Options, and `FocusWorker`'s description of what it calls.
 
 Full suite: `224 passed` (two fewer than before, from merging the
 redundant `show_*` view tests).
+
+## Status bar and image placement (2026-11-16)
+
+Per request: a Quit button and five hardware status indicators on one row
+above the image panel's Exposure/Stretch/Recenter row, with that row moved
+closer to the displayed image.
+
+**Image placement.** The Exposure row was already directly above the
+canvas in the layout; the visible gap came from matplotlib centering the
+equal-aspect image vertically within a canvas of a different shape,
+leaving a blank band above it. Fixed with `ax.set_anchor('N')`, which
+pins the image to the top of the canvas (checked that `ax.clear()`, called
+on every redraw, preserves the anchor). Any leftover space now falls
+below the image instead.
+
+**`StatusBar`** (new `gui/views/status_bar.py`): a passive view with a
+`quit_button` (emits `quitRequested`) and five `QLabel` indicators --
+Movement, Track, Target, Focus, Exp -- each set via
+`set_indicator(key, state, text=None)` to `'ok'`/`'warn'`/`'error'`
+(green/yellow/red background via a style sheet; the state is also stored
+as a Qt dynamic property for tests). All start red. Equal stretch factors
+keep the indicators the same width. `MainWindow` stacks it above
+`ImagePanel` in a plain `QVBoxLayout` (not a splitter); the first-show
+"square image panel" sizing now subtracts the status bar's height. The
+bar keeps the style's default side margins so its edges line up with the
+image panel's rows.
+
+**Controller.** Keyword-to-state mappings are module-level pure functions
+(`_movement_state`, `_track_state`, `_target_state`, `_seclk_state`,
+`_expstate_state`; case-insensitive, whitespace-tolerant; `POCOT`
+anything other than 0/1 is red). The Controller constructs read-only
+`focus_hardware`/`exposure_hardware` handles (`focus.Focus()`/
+`focus.Exposure()`) alongside the existing `telescope`; they're `None`
+without `ktl`, and any other construction failure is logged as a warning
+rather than stopping the GUI from starting. The existing one-second
+position timer became `_poll_timer` → `_poll_hardware()`, which updates
+both the current position and the indicators
+(`_update_status_indicators()`). Each indicator is read independently:
+no handle, or a failed read, shows red; failures are logged once per
+streak, as for the position display. `quit()` just closes the window.
+
+**Not verifiable here (no `ktl` on the development machine):** the exact
+strings each keyword's `read()` returns (e.g. whether `POCOT` reads as
+`'0'`, or `POCSTOP` as `'allowed'`) -- the mappings assume the same
+values the Model's own `waitFor` expressions use. Also unverified: whether
+six synchronous keyword reads per second on the GUI thread are fast
+enough in practice.
+
+**Testing:** new `tests/gui/test_status_bar.py` (order, initial red,
+`set_indicator`, Quit signal); `test_controller.py` gained a
+parametrized test of every state mapping, indicator tests with stand-in
+keyword objects (values, failure logged once and recovery, all red
+without `ktl`), and a Quit test; plus a `MainWindow` placement test and
+an image-anchor test. Full suite: `249 passed`.
+
+**Follow-up: Quit disabled while running.** Quitting mid-operation would
+tear down a running `FocusWorker`/`SlewWorker` thread (likely crashing
+Python on exit) without stopping the exposure or slew itself. Added
+`StatusBar.set_running(running)`, called from `Controller._set_running`
+alongside `FocusControlPanel.set_running`, so Quit follows the same
+enable/disable cycle as the action buttons. The window's own close button
+is not covered. Tests: a `StatusBar` unit test and two Controller tests
+(during a Replay sequence and during a fake-telescope slew). Full suite:
+`252 passed`.
+
+**Follow-up: tighter gap above the Exposure row.** The gap between the
+status bar and the Exposure row was the left column's layout spacing
+*plus* the image panel's own top margin (~17px offscreen, more on macOS).
+Measuring also showed the "default margins line up" assumption above was
+wrong: a top-level widget's layout gets larger default margins (11px
+offscreen) than a nested one (9px), so the edges were off by 2px. Now
+`MainWindow` sets both explicitly from the image panel's layout: the
+status bar gets its left/top/right margins (the bar's own layout has
+none), the image panel's top margin is zeroed, and the column spacing is
+the image panel's own row spacing -- so the bar sits as close to the
+Exposure row as that row sits to the canvas, with edges aligned exactly.
+Test: `test_status_bar_lines_up_with_and_sits_close_to_the_image_panel_rows`.
+Full suite: `253 passed`.
+
+**Follow-up: gap reduced to 4px.** Per request, the column spacing is now
+a fixed `MainWindow._STATUS_BAR_SPACING = 2` instead of the image panel's
+row spacing (6px); the widgets' frames add 2px, for a 4px measured gap
+(offscreen). The test now asserts a gap of at most 4px. Full suite:
+`253 passed`.
+
+## Fusion style forced on all platforms (2026-11-16)
+
+The 4px gap above looked closer to 13px on the user's Mac. Rendering
+natively on macOS (cocoa platform, `WA_DontShowOnScreen`) showed why: the
+offscreen test platform always uses Qt's "Fusion" style, but macOS uses
+its native style, whose push buttons and combo boxes draw a ~22px bezel
+inside a 32px widget (transparent padding above and below). The layout
+gap was the same 4px on both; the padding made it look three times
+larger. macOS also uses 20px layout margins (Fusion: 9px) and a larger
+style-dependent row spacing, so other gaps grew too.
+
+The GUI is deployed on Ubuntu, where pip's PySide6 has no native style
+plugin and Fusion is already the default. So `launcher.build_app()` now
+calls `app.setStyle('Fusion')`, making a developer's Mac and the test
+suite match the deployment platform. The tests' `qapp` fixture now goes
+through `launcher.build_app()` too, so it always uses the same style. A
+native macOS render after the change matches the offscreen renders.
+Remaining expected Linux differences: font family/size, display scaling,
+and Qt following GNOME's light/dark color scheme. New test:
+`test_build_app_uses_the_fusion_style`. Full suite: `254 passed`.
+
+**Follow-up: circle indicators.** Per request, each indicator is now a
+colored circle next to left-aligned text instead of a colored rectangle.
+New `StatusIndicator` widget (`gui/views/status_bar.py`): a fixed-size
+`QLabel` drawn round by a style sheet (`border-radius` of half its width,
+diameter scaled to the font height, thin dark outline so yellow stays
+visible on the light background) beside a plain text `QLabel`, with a
+trailing stretch so any extra width falls to the right of the text.
+`StatusBar.set_indicator` is unchanged, so the Controller needed no
+changes. The colors were deepened slightly (green `#43a047`, yellow
+`#fbc02d`, red `#e53935`), since the old pastel shades read poorly as
+small circles. New test: the circle sits at the left edge, the text is
+right next to it, and extra width falls to the right. Full suite:
+`255 passed`.
+
+**Follow-up: indicator names and outline.** The user renamed two
+indicators in `StatusBar.INDICATORS`: Movement → "Slew" (still
+`POCSTOP`, key `'movement'`) and Target → "On Target" (still `POCOT`,
+key `'target'`); the keys, and so the Controller's mappings, are
+unchanged. Updated the Controller docstring, Help tab text, test, and
+`GUI_REFERENCE.md` to match. Also removed the circles' thin dark outline,
+per request.

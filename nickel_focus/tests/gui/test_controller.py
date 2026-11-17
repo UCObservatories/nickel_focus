@@ -722,3 +722,129 @@ def test_log_tab_reflects_worker_signal_end_to_end(qapp):
 
     assert 'total failure' in window.control_panel.log_widget.toPlainText(), \
         'a worker failure should reach the Log tab via Controller -> log.error() -> QtLogHandler'
+
+
+# -- status indicators and Quit -----------------------------------------------
+
+def _keyword(value):
+    """A stand-in for a ktl keyword whose `read()` returns ``value``."""
+    return types.SimpleNamespace(read=lambda: value)
+
+
+def _unreadable_keyword():
+    """A stand-in for a ktl keyword whose `read()` always fails."""
+    def read():
+        raise RuntimeError('keyword read failed')
+    return types.SimpleNamespace(read=read)
+
+
+def _indicator_states(window):
+    return {key: label.property('state') for key, label in window.status_bar.indicators.items()}
+
+
+def test_status_indicators_are_red_without_ktl(qapp):
+    window = MainWindow()
+    controller = Controller(window)
+
+    assert controller.focus_hardware is None and controller.exposure_hardware is None
+    assert set(_indicator_states(window).values()) == {'error'}, \
+        'every indicator should be red without a ktl connection'
+    assert window.status_bar.indicators['focus'].text() == 'Focus', \
+        'with no focus value to show, the Focus indicator keeps its default text'
+    assert not controller._poll_timer.isActive(), 'there is nothing to poll without ktl'
+
+
+@pytest.mark.parametrize('function, value, expected', [
+    ('_movement_state', 'allowed', 'ok'),
+    ('_movement_state', 'disabled', 'error'),
+    ('_track_state', 'on', 'ok'),
+    ('_track_state', 'off', 'warn'),
+    ('_target_state', '0', 'ok'),
+    ('_target_state', '1', 'warn'),
+    ('_target_state', '-1', 'error'),
+    ('_target_state', 'garbage', 'error'),
+    ('_target_state', 0, 'ok'),
+    ('_seclk_state', 'on', 'ok'),
+    ('_seclk_state', 'off', 'warn'),
+    ('_expstate_state', 'Ready', 'ok'),
+    ('_expstate_state', ' ready ', 'ok'),
+    ('_expstate_state', 'Start', 'warn'),
+])
+def test_status_state_mappings(function, value, expected):
+    from nickel_focus.gui import controller as controller_module
+    assert getattr(controller_module, function)(value) == expected
+
+
+def test_status_indicators_reflect_keyword_values(qapp):
+    window = MainWindow()
+    controller = Controller(window)
+    controller.telescope = types.SimpleNamespace(
+        pocstop=_keyword('allowed'), track=_keyword('off'), target=_keyword('1'))
+    controller.focus_hardware = types.SimpleNamespace(seclk=_keyword('on'), current=345.24)
+    controller.exposure_hardware = types.SimpleNamespace(expstate=_keyword('Exposing'))
+
+    controller._update_status_indicators()
+
+    assert _indicator_states(window) == {
+        'movement': 'ok', 'track': 'warn', 'target': 'warn', 'focus': 'ok', 'exp': 'warn',
+    }
+    assert window.status_bar.indicators['focus'].text() == '345.2', \
+        'the Focus indicator should show the current focus value'
+
+
+def test_status_read_failure_is_red_and_logged_once(qapp, caplog):
+    window = MainWindow()
+    controller = Controller(window)
+    controller.exposure_hardware = types.SimpleNamespace(expstate=_unreadable_keyword())
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller._update_status_indicators()
+        controller._update_status_indicators()
+
+    warnings = [r for r in caplog.records if 'exp status' in r.getMessage()]
+    assert len(warnings) == 1, 'repeated read failures should be logged only once'
+    assert _indicator_states(window)['exp'] == 'error', 'an unreadable keyword should show red'
+
+    controller.exposure_hardware = types.SimpleNamespace(expstate=_keyword('Ready'))
+    controller._update_status_indicators()
+    assert _indicator_states(window)['exp'] == 'ok', 'the indicator should recover'
+    assert 'exp' not in controller._status_read_failed, \
+        'a successful read should re-arm logging for the next failure'
+
+
+def test_quit_closes_the_window(qapp):
+    window = MainWindow()
+    controller = Controller(window)  # noqa: F841 (kept alive, so its connections stay live)
+    window.show()
+
+    window.status_bar.quit_button.click()
+
+    assert not window.isVisible()
+
+
+def test_quit_is_disabled_while_a_sequence_runs(qapp, focus_sweep):
+    window = MainWindow()
+    controller = Controller(window)
+    _configure_replay_tab(window.control_panel, focus_sweep)
+    assert window.status_bar.quit_button.isEnabled(), 'setup: Quit starts enabled'
+
+    controller.start_focus_sequence()
+    assert not window.status_bar.quit_button.isEnabled(), \
+        'Quit should be disabled as soon as a sequence starts'
+
+    _wait_for_focus_worker(controller)
+    assert window.status_bar.quit_button.isEnabled(), \
+        'Quit should be re-enabled once the sequence finishes'
+
+
+def test_quit_is_disabled_while_a_slew_runs(qapp, fake_telescope):
+    window = MainWindow()
+    controller = Controller(window)
+
+    controller.move_to_target('05:30:00', '+20:15:00')
+    assert not window.status_bar.quit_button.isEnabled(), \
+        'Quit should be disabled as soon as a slew starts'
+
+    _wait_for_slew_worker(controller)
+    assert window.status_bar.quit_button.isEnabled(), \
+        'Quit should be re-enabled once the slew finishes'

@@ -20,9 +20,12 @@ from nickel_focus.gui.log_handler import QtLogHandler
 
 @pytest.fixture(scope='session')
 def qapp():
-    """The (session-wide, singleton) QApplication needed to create any Qt widget."""
-    from nickel_focus.gui.qt import QtWidgets
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    """
+    The (session-wide, singleton) QApplication needed to create any Qt widget,
+    built the same way the GUI builds it (including its widget style).
+    """
+    from nickel_focus.gui import launcher
+    return launcher.build_app()
 
 
 @pytest.fixture(autouse=True)

@@ -101,6 +101,13 @@ class ImagePanel(QtWidgets.QWidget):
         self.ax = self.figure.add_subplot(111)
         self.ax.set_xticks([])
         self.ax.set_yticks([])
+        # `imshow`'s equal aspect ratio shrinks the axes to fit the frame;
+        # anchoring them to the top ('N') keeps the image directly under
+        # the Exposure row above it, instead of centering it with a blank
+        # band above (and below) whenever the frame's shape doesn't match
+        # the canvas's. `ax.clear()` doesn't reset the anchor, so this only
+        # needs to be set once.
+        self.ax.set_anchor('N')
 
         self.exposure_combo = QtWidgets.QComboBox()
         self.stretch_combo = QtWidgets.QComboBox()
