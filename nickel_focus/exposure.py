@@ -32,18 +32,31 @@ class Exposure:
         self.path = cam.path
         self.cfg = cam.cfg
 
+    FILE_TIMEOUT = 30
+    """
+    Seconds to wait, after an exposure ends, for the camera to report its
+    finished file (``FITSFILE``).
+    """
+
     def expose(self, record=None, speed=None, binning=None, exptime=None):
         """
         Configure the camera (see
         :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure`), take
-        one exposure, and wait for it to finish.
+        one exposure, and wait for its file to be finished.
+
+        The exposure is done once ``EXPSTATE`` returns to ``Ready`` *and*
+        ``FITSFILE`` names a new file, which the camera sets only when the
+        file, header included, is complete; its path is then
+        :attr:`path.previous <nickel_focus.services.nscicam.ExposurePath.previous>`.
 
         Raises
         ------
         ValueError
             Raised if the camera isn't ready to start within 15 s, the
-            exposure isn't seen to start within 30 s, or it doesn't finish
-            within the exposure time plus 90 s.
+            exposure isn't seen to start within 30 s, the camera reports an
+            error (``EXPSTATE == Error``; the message includes ``EXPRESULT``),
+            the exposure doesn't end within the exposure time plus 90 s, or no
+            new file is reported within :attr:`FILE_TIMEOUT` of its end.
         ~nickel_focus.services.base.KTLTimeoutError
             Raised if the camera service doesn't reply to one of these checks.
         """
@@ -55,6 +68,9 @@ class Exposure:
         )
 
         self.cfg.configure(record=record, speed=speed, binning=binning, exptime=exptime)
+
+        # The file from the previous exposure; this exposure's will differ.
+        previous_file = self.cam.fits_file()
 
         # Start the exposure
         # TODO: This needs to be confirmed once Will settles on the naming
@@ -81,10 +97,22 @@ class Exposure:
             'No reply from nscicam.EXPSTATE; cannot tell whether the exposure started.'
         )
 
-        # Then wait for it to be ready again
+        # Then wait for it to end, successfully (Ready) or not (Error)
         require(
-            self.cam.exposure_state_is('Ready', timeout=round(float(self.cfg.exptime) + 90.)),
-            'Exposure EXPSTATE=Ready not detected within timeout',
+            self.cam.exposure_ended(timeout=round(float(self.cfg.exptime) + 90.)),
+            'Exposure end (EXPSTATE == Ready) not detected within timeout',
             'No reply from nscicam.EXPSTATE; cannot tell whether the exposure finished.'
+        )
+        if self.cam.exposure_state().strip().lower() == 'error':
+            raise ValueError(
+                f'The camera reported an exposure error: {self.cam.exposure_result()}'
+            )
+
+        # Then wait for the finished file
+        require(
+            self.cam.fits_file_changed(previous_file, timeout=self.FILE_TIMEOUT),
+            f'The camera did not report a new file (FITSFILE) within {self.FILE_TIMEOUT} s of '
+            'the exposure ending.',
+            'No reply from nscicam.FITSFILE; cannot tell whether the exposure was written.'
         )
         log.info('Exposure completed successfully')

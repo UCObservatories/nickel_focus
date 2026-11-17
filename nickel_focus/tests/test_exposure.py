@@ -32,6 +32,46 @@ def test_expose_takes_an_exposure(fake_hardware):
     assert exp.path.previous.is_file(), 'the exposure file should have been written'
 
 
+def test_exposure_path_comes_from_fitsfile(fake_hardware):
+    sim = fake_hardware['sim']
+    exp = exposure.Exposure(fake_hardware['cam'])
+
+    exp.expose()
+    sim.keyword('nscicam', 'EXPRESULT').value = 'fake0001.fits some message'
+
+    assert exp.path.previous == fake_hardware['directory'] / 'fake0001.fits', \
+        'the exposure path should come from FITSFILE, not EXPRESULT'
+
+
+def test_expose_reports_a_camera_error(fake_hardware):
+    sim = fake_hardware['sim']
+    sim.exposure_error = 'CCD readout failed'
+
+    message = 'camera reported an exposure error: .*CCD readout failed'
+    with pytest.raises(ValueError, match=message):
+        exposure.Exposure(fake_hardware['cam']).expose()
+    assert sim.keyword('nscicam', 'FITSFILE').value == '', \
+        'a failed exposure should not report a file'
+
+
+def test_expose_fails_if_no_new_file_is_reported(fake_hardware):
+    fake_hardware['sim'].reports_file = False
+
+    with pytest.raises(ValueError, match='did not report a new file'):
+        exposure.Exposure(fake_hardware['cam']).expose()
+
+
+def test_successive_exposures_report_successive_files(fake_hardware):
+    exp = exposure.Exposure(fake_hardware['cam'])
+
+    exp.expose()
+    first = exp.path.previous
+    exp.expose()
+
+    assert (first.name, exp.path.previous.name) == ('fake0001.fits', 'fake0002.fits'), \
+        'each exposure should wait for, and report, its own file'
+
+
 def test_expose_refuses_while_the_camera_is_busy(fake_hardware):
     sim = fake_hardware['sim']
     sim.keyword('nscicam', 'EXPSTATE').value = 'Exposing'

@@ -2920,3 +2920,35 @@ description of the Makefile tree -- which also gained the `services/`
 directory (added in refactor phase 1) and the `sin` entry missing from one
 of its `DIRS` lists. `DEPLOYMENT_PLAN.md` and `PROJECT.md` still mention the
 `.toml` files and `nickucam` as part of their historical record.
+
+## Exposures use `FITSFILE` (2026-11-17)
+
+Resolves the "`EXPRESULT` isn't a reliable file path" item of the refactor
+plan's §5.1. `EXPRESULT` holds the file name plus an error message when an
+exposure fails, may not be a full path, and can be read before the
+dispatcher has finished the FITS header. `FITSFILE` is the full path, set
+only once the file is complete, and is the keyword the camera's help says
+applications should track.
+
+- `NSciCam` (`services/nscicam.py`): monitors `FITSFILE`; new `fits_file()`,
+  `fits_file_changed(previous, timeout)`, `exposure_ended(timeout)`
+  (`EXPSTATE` is `Ready` or `Error`), and `exposure_result()` (`EXPRESULT`).
+  `ExposurePath.previous` reads `FITSFILE`.
+- `Exposure.expose`: notes `FITSFILE` before starting; after `Start`, waits
+  for the exposure to end (`Ready` or `Error`, one `waitFor` --
+  `'== Ready or $nscicam.EXPSTATE == Error'`); fails at once on `Error`,
+  quoting `EXPRESULT`; then waits up to `FILE_TIMEOUT` (30 s) for `FITSFILE`
+  to change. The `FITSFILE` comparison quotes the path (`!= "<path>"`): `ktl`
+  splits expressions with `shlex`, so a quoted path is one string token,
+  where an unquoted one would be read as arithmetic (checked in
+  `Expression.py`; recorded in `KTL_REFERENCE.md` §3.4).
+- Fake `ktl`: the evaluator handles quoted operands and `or` alternatives
+  the way `ktl`'s parser splits them; the simulated camera reports
+  `FITSFILE` only once waited for, and has `exposure_error` and
+  `reports_file` failure modes. New tests: the path comes from `FITSFILE`,
+  a camera error fails with its message, a missing file fails, and
+  successive exposures report successive files.
+- Docs: `KTL_REFERENCE.md` (§3.4, §4, §4.1) and the plan (§3.4; §5.1 item
+  removed; §5.2 gains what to confirm about exposure completion).
+
+Full suite: `331 passed, 8 skipped`.

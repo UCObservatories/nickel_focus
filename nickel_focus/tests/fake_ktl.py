@@ -27,6 +27,7 @@ telescope (see the ``ktl_live`` tests).
 """
 import inspect
 import operator
+import shlex
 import threading
 import weakref
 
@@ -47,17 +48,32 @@ _OPERATORS = {'==': operator.eq, '!=': operator.ne}
 
 def _evaluate(value, expression):
     """
-    Evaluate a ``waitFor`` expression such as ``'== allowed'`` against
-    ``value``: numerically if both sides are numbers, otherwise as
-    case-insensitive strings, as :mod:`ktl` does.
+    Evaluate a ``waitFor`` expression against ``value``, for the forms
+    :mod:`nickel_focus` uses: ``'== allowed'``, a quoted operand
+    (``'!= "/data/n1.fits"'``), and alternatives on the same keyword joined
+    by ``or`` (``'== Ready or $nscicam.EXPSTATE == Error'``).  Like :mod:`ktl`,
+    the expression is split with :mod:`shlex`, and values are compared
+    numerically if both sides are numbers, otherwise as case-insensitive
+    strings.
     """
-    op, _, operand = expression.strip().partition(' ')
+    tokens = shlex.split(expression)
+    alternatives, current = [], []
+    for token in tokens:
+        if token == 'or':
+            alternatives.append(current)
+            current = []
+        elif not token.startswith('$'):  # the keyword itself, in later alternatives
+            current.append(token)
+    alternatives.append(current)
+    return any(_compare(value, op, operand) for op, operand in alternatives)
+
+
+def _compare(value, op, operand):
     compare = _OPERATORS[op]
-    operand = operand.strip()
     try:
         return compare(float(value), float(operand))
     except ValueError:
-        return compare(str(value).strip().lower(), operand.lower())
+        return compare(str(value).strip().lower(), operand.strip().lower())
 
 
 class _Update:
@@ -276,6 +292,12 @@ class Simulator:
     reaches_target : :obj:`bool`
         Whether a commanded slew arrives (``POCOT`` goes to ``0``) or fails
         (``-1``).
+    exposure_error : :obj:`str` or None
+        If set, exposures fail: ``EXPSTATE`` ends at ``Error``, ``EXPRESULT``
+        holds the file name followed by this message, and ``FITSFILE`` doesn't
+        change.
+    reports_file : :obj:`bool`
+        Whether a successful exposure updates ``FITSFILE``.
     """
 
     def __init__(self, make_frame=None, directory=None, focus=340.):
@@ -284,6 +306,8 @@ class Simulator:
         self.exposure_count = 0
         self.slew_calls = []
         self.reaches_target = True
+        self.exposure_error = None
+        self.reports_file = True
         self.ktl = FakeKTL()
 
         poco = 'nickelpoco'
@@ -304,6 +328,7 @@ class Simulator:
         define(cam, 'EXPSTATE', 'Ready')
         define(cam, 'EXPOSE', 'None', on_write=self._on_expose)
         define(cam, 'EXPRESULT', '')
+        define(cam, 'FITSFILE', '')
         define(cam, 'EXPOSURE', 5.0)
         define(cam, 'AMPCONF', '0.05MHz')
         define(cam, 'AMPCONFLIST', '5.0MHz,3.0MHz,1.0MHz,0.05MHz')  # as at the telescope
@@ -398,15 +423,26 @@ class Simulator:
             self._set('nickelpoco', 'POCOT', 1, pending=[-1])
 
     def _on_expose(self, value):
-        """``EXPOSE = Go``: write a frame for the current focus and step ``EXPSTATE``."""
+        """
+        ``EXPOSE = Go``: write a frame for the current focus, step ``EXPSTATE``
+        through the exposure, and report the finished file in ``FITSFILE``
+        (as a pending value, so it appears only once waited for).
+        """
         if value != 'Go':
             return
         if self.make_frame is None or self.directory is None:
             raise AssertionError('This Simulator was not set up to take exposures.')
         self.exposure_count += 1
         path = self.directory / f'fake{self.exposure_count:04d}.fits'
+        if self.exposure_error is not None:
+            self._set('nscicam', 'EXPRESULT', f'{path} {self.exposure_error}')
+            self._set('nscicam', 'EXPSTATE', 'Start', pending=['Exposing', 'Error'])
+            return
         fits.writeto(path, self.make_frame(self.focus), overwrite=True)
         self._set('nscicam', 'EXPRESULT', str(path))
         self._set('nscicam', 'EXPSTATE', 'Start', pending=['Exposing', 'Readout', 'Ready'])
+        if self.reports_file:
+            fitsfile = self.keyword('nscicam', 'FITSFILE')
+            fitsfile.pending = [str(path)]
         obsnum = self.keyword('nscicam', 'OBSNUM')
         obsnum.value = int(obsnum.value) + 1

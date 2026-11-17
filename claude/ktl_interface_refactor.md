@@ -211,6 +211,7 @@ phase 3) it replaces the GUI's 1 Hz polling.
 | `POCORAA`, `POCODECA` | Yes, display rate-limited | Slew tab's current position. Their broadcast rate is unknown and may be high; redraw at most a few times a second. |
 | `EXPOSURE`, `AMPCONF`, `BINNING` | Yes | Exposure fields follow the camera (§3.6). |
 | `POCHEART`, `DISP0CLK` | Heartbeats | `NickelPoco.heartbeat = 'POCHEART'` ("poco's heartbeat"); `NSciCam.heartbeat = 'DISP0CLK'` (dispatcher runtime clock). Lets `ktl` detect a dispatcher restart and restore monitoring, rather than leaving monitored values silently stale (REF §3.6). Both use a provisional 30 s `heartbeat_period`, generous because too short a period makes `ktl` reconnect needlessly; to be set from their observed broadcast rates (§5.2). |
+| `FITSFILE` | Yes | The finished exposure's path; `Exposure.expose` waits for it to change. |
 | `POCSECPD`, `POCORAD`, `POCODECD`, `RECORD`, `OBSNUM`, `EXPRESULT`, `RECORDDIR`, `SCRATCHDIR`, `FITSPREFIX`, `FITSSUFFIX`, `AMPCONFLIST` | No | Written by us or not displayed; read (with timeout) at the moment of use. |
 | `EXPOSE` | No | Written to start an exposure; never read. |
 
@@ -612,19 +613,7 @@ run there.
 
 ### 5.1 Possible defects
 
-1. **`EXPRESULT` isn't a reliable file path.** `ExposurePath.previous`
-   (used by `FocusSequence.take_exposure` for every exposure) is
-   `Path(EXPRESULT)`. On an error, `EXPRESULT` holds the filename *plus a
-   message*, which would silently become a bogus path; on success the help
-   doesn't say whether it's a full path; and reading it as soon as
-   `EXPSTATE` returns to `Ready` may be before the dispatcher has finished
-   the FITS header. *To confirm:* `EXPRESULT`'s contents on success and on
-   error, and when `FITSFILE` updates relative to `EXPSTATE == Ready`.
-   *Option:* use `FITSFILE` -- the full path, set only once the file is
-   complete, and the keyword the camera's help says applications should
-   track (REF §4.1) -- e.g. wait for it to update after the exposure, and
-   treat `EXPSTATE == Error` as a failure.
-2. **The current Dec is parsed from ascii.** `NickelPoco.pointing()` (used
+1. **The current Dec is parsed from ascii.** `NickelPoco.pointing()` (used
    by "Find nearest ...") reads `POCODECA`'s ascii text, and the
    Controller's position display parses the ascii values its subscription
    delivers. The format has no explicit sign field, so whether a Dec
@@ -633,7 +622,7 @@ run there.
    *Option:* use the binary values (radians) for `POCORAA`/`POCODECA`;
    for the display, `KTLService.subscribe` would need a way to deliver
    binary values.
-3. **`EXPSTATE == Start` may be too brief to see.** `Exposure.expose` writes
+2. **`EXPSTATE == Start` may be too brief to see.** `Exposure.expose` writes
    `EXPOSE = Go`, then waits up to 30 s for `EXPSTATE == Start` before
    waiting for `Ready`. `Start` is probably short; if the service doesn't
    broadcast it, or the exposure moves on before the broadcast is
@@ -641,16 +630,16 @@ run there.
    even though it ran (REF §3.4). *To confirm:* whether `Start` is reliably
    broadcast. *Option:* wait for `EXPSTATE != Ready` (any of `Start`/
    `Exposing`/`Readout`) instead, then for `Ready`.
-4. **The Exp indicator shows `Error` as yellow.** The Controller's
+3. **The Exp indicator shows `Error` as yellow.** The Controller's
    `_expstate_state` maps any `EXPSTATE` other than `Ready` to yellow,
    including `Error` (and `Unknown`). *Option:* show `Error` (and perhaps
    `Unknown`) red.
-5. **Indicators go stale, not red, if a service stops broadcasting
+4. **Indicators go stale, not red, if a service stops broadcasting
    entirely** (as opposed to restarting, which the heartbeat handles; §4.3).
    They just stop changing. `ktl`'s heartbeat state would tell, but only by
    polling `Keyword.isAlive()` (REF §3.6); `KTL_SUGGESTIONS.md` §5 proposes
    a notification. Whether it matters in practice is unknown.
-6. **KTL's own warnings are hidden.** KTL logs at `ERROR` level by default
+5. **KTL's own warnings are hidden.** KTL logs at `ERROR` level by default
    (REF §3.7), so its warnings -- e.g. a timeout it ignores -- never appear.
    *Option:* raise the level, or route KTL's log into `nickel_focus.log`
    with `ktl.logger(...)` (which accepts any object with a `.write()`
@@ -667,6 +656,12 @@ run there.
 - **Heartbeat periods** (`POCHEART`, `DISP0CLK`; provisional 30 s, §3.4)
   and the live heartbeat test's timeout (two periods, §3.9): set them from
   the keywords' observed broadcast intervals.
+- **Exposure completion** (`Exposure.expose`): when `FITSFILE` updates
+  relative to `EXPSTATE == Ready` (within `Exposure.FILE_TIMEOUT`, 30 s?);
+  that it names a different file for every exposure, including with
+  `RECORD = No` (if a scratch file name were reused, the wait for a new
+  `FITSFILE` would time out); that `EXPSTATE` passes through `Error` when an
+  exposure fails, and what `EXPRESULT` holds then.
 - **`POCORAA`/`POCODECA` broadcast rate**, against the position display's
   200 ms redraw limit (`Controller.POSITION_REDRAW_MS`).
 - **What write "completion" means** for `POCSECPD`, `POCORAD`/`POCODECD`,

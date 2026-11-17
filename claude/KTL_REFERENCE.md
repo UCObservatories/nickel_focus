@@ -231,6 +231,13 @@ waitFor(expression, timeout=None, case=False)   # e.g. kw.waitFor('== allowed', 
     now-monitored keyword are fine. Every keyword we `waitFor` is
     monitored and primed when its service object is constructed (§4), so
     our checks never hit this.
+- **Expression syntax.** The expression is tokenized with `shlex` in POSIX
+  mode (`Expression.py:135`, with `$`, `.`, and `_` as word characters), so a
+  double-quoted operand is a single string token -- needed for values such
+  as file paths, whose `/` would otherwise be read as an operator -- and
+  `""` is the empty string. Other keywords can be referenced as
+  `$service.KEYWORD`, and clauses combined with `or`/`and`; e.g.
+  `EXPSTATE`'s `waitFor('== Ready or $nscicam.EXPSTATE == Error')`.
 - **String comparisons are case-insensitive by default** (`case=False`):
   both sides are lower-cased before comparing (`Expression.py:633`), so
   `'== Ready'` matches `READY`. Plain Python comparisons in our own code
@@ -365,15 +372,15 @@ and one `NSciCam` and share them.
 | Class | Keywords | Methods | Notes |
 | --- | --- | --- | --- |
 | `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`; the target as binary radians) | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
-| `services.NSciCam` | `EXPSTATE`, `EXPOSE`, `DISP0CLK`; plus its helpers' keywords | `exposure_state()`, `exposure_state_is(state, timeout)` (`check`), `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE`, `EXPOSURE`, `AMPCONF`, `BINNING`; heartbeat `DISP0CLK`. |
-| `services.nscicam.ExposurePath` (`NSciCam.path`) | `RECORD`, `EXPRESULT`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous`, `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
+| `services.NSciCam` | `EXPSTATE`, `EXPOSE`, `FITSFILE`, `EXPRESULT`, `DISP0CLK`; plus its helpers' keywords | `exposure_state()`, `exposure_result()`, `fits_file()` (`read`); `exposure_state_is(state, timeout)`, `exposure_ended(timeout)` (`EXPSTATE` `Ready` or `Error`), `fits_file_changed(previous, timeout)` (`check`); `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE`, `FITSFILE`, `EXPOSURE`, `AMPCONF`, `BINNING`; heartbeat `DISP0CLK`. |
+| `services.nscicam.ExposurePath` (`NSciCam.path`) | `FITSFILE`, `RECORD`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous` (`FITSFILE`), `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
 | `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `configure`, `exptime`, `current_settings`; `setting_value(key, ascii)` (class method) converts a broadcast value | Reads `AMPCONFLIST` at construction. `keywords` maps each setting to its keyword. |
 
 | Where | Uses | Notes |
 | --- | --- | --- |
 | `focus.Focus` | `NickelPoco` | Each check goes through `require` (false → `ValueError`, no reply → `KTLTimeoutError`). `set_to` checks `movement_allowed(0.5)`, unlocks (`POCSECLK` → `off`), writes `POCSECPD`, then `secondary_locked(30)`. |
 | `focus.FocusSequence.set_focus` | `NSciCam` | `exposure_state_is('Ready', 0.5)` before every focus move a sequence makes, then `Focus.set_to`. |
-| `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, writes `Go`, then waits for `Start` (30 s) and `Ready` (exposure time + 90 s). |
+| `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, notes `FITSFILE`, writes `Go`, waits for `Start` (30 s), then for `Ready` or `Error` (exposure time + 90 s) -- `Error` fails, quoting `EXPRESULT` -- and finally for `FITSFILE` to change (`FILE_TIMEOUT`, 30 s). |
 | `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target as binary radians, then `on_target(300)`. Logs the target in sexagesimal. |
 | GUI `Controller` (subscriptions) | both | Status indicators and position display: `subscribe`s to `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`, `EXPSTATE`; values reach the GUI thread through a queued Qt signal (`gui/ktl_bridge.py`). No polling. |
 | GUI `Controller` (exposure fields) | `NSciCam` | `subscribe`s to `EXPOSURE`, `AMPCONF`, `BINNING`, so the Single/Grid/Auto fields follow the camera; a committed edit is written at once with `cfg.configure(...)`, on the GUI thread (no timeout). |
@@ -396,12 +403,13 @@ object (§2.1).
 | `nickelpoco.POCSECPA` | `focus.Focus`, Controller | Read for the current focus; subscribed to for the Focus indicator's text. |
 | `nickelpoco.POCSECPD` | `focus.Focus` | Read to skip a no-op move; written with the requested focus. |
 | `nickelpoco.POCSECLK` | `focus.Focus`, Controller | Written `off` to unlock; `waitFor('== on')` for the move to finish; subscribed to for the Focus indicator's color. |
-| `nscicam.EXPSTATE` | `focus.FocusSequence`, `exposure.Exposure`, Controller | `waitFor('== Ready')` before a focus move or exposure, `== Start`/`== Ready` during one; monitored by `NSciCam`; subscribed to for the Exp indicator. |
+| `nscicam.EXPSTATE` | `focus.FocusSequence`, `exposure.Exposure`, Controller | `waitFor('== Ready')` before a focus move or exposure, `== Start`, then `== Ready or $nscicam.EXPSTATE == Error`, during one; monitored by `NSciCam`; subscribed to for the Exp indicator. |
 | `nscicam.EXPOSE` | `exposure.Exposure` | Written `Go` to start an exposure; not monitored. |
 | `nickelpoco.POCHEART` | `NickelPoco` | Monitored; registered as the service's heartbeat (§3.6). |
 | `nscicam.DISP0CLK` | `NSciCam` | Monitored; registered as the service's heartbeat (§3.6). |
 | `nscicam.RECORD` | `ExposurePath`, `ExposureConfig` | Read to choose the record vs. scratch directory; written by `configure(record=...)`. |
-| `nscicam.EXPRESULT` | `ExposurePath` | Read for the last exposure's file path (`.previous`). |
+| `nscicam.FITSFILE` | `ExposurePath`, `exposure.Exposure` | Monitored; read before an exposure starts, then `waitFor('!= "<that path>"')` (quoted, so the path is one string token) for the new file; read for the last exposure's path (`.previous`). |
+| `nscicam.EXPRESULT` | `exposure.Exposure` | Read only when an exposure ends in `Error`, for the camera's message. |
 | `nscicam.OBSNUM` | `ExposurePath` | Read for the next observation number (`.next`). |
 | `nscicam.RECORDDIR` | `ExposurePath` | Read to build a file path. |
 | `nscicam.SCRATCHDIR` | `ExposurePath` | Read to build a file path. |
@@ -444,11 +452,12 @@ listed as `index name`; the name is the `ascii` value and the index the
 | `AMPCONFLIST` | string | comma-separated | R | Valid `AMPCONF` values. Not in the help; at the telescope (`gshow`, 2026-11-17): `5.0MHz,3.0MHz,1.0MHz,0.05MHz`. |
 | `BINNING` | enum | `0 1,1`, `1 2,2`, `2 4,4` | R/W | Matches `ExposureConfig.expbin_options` and the GUI's binning options. |
 
-Not used by us, but relevant: `nscicam.FITSFILE` (string, R) -- "Full path
-of latest FITS file", set only **after** the exposure completes *and* the
-dispatcher has finished supplementing the FITS header; the help says it is
-"the keyword that other applications should track and use".
-`nscicam.FILENAME`, by contrast, is set when the exposure begins.
+`nscicam.FITSFILE` (string, R) -- "Full path of latest FITS file", set only
+**after** the exposure completes *and* the dispatcher has finished
+supplementing the FITS header; the help says it is "the keyword that other
+applications should track and use". We use it for each exposure's path (§4).
+`nscicam.FILENAME`, by contrast, is set when the exposure begins; we don't
+use it.
 
 ## 5. Version history
 
@@ -460,4 +469,5 @@ dispatcher has finished supplementing the FITS header; the help says it is
 | `6227274` | 2026-11-17 | §3.4, §3.6, §4: keywords monitored at construction, heartbeats (`POCHEART`, `DISP0CLK`, provisional 30 s), `check`/`require`/`heartbeat_alive`. |
 | `a37e42c` | 2026-11-17 | §3.1, §3.3, §4: callbacks (clones, delivery after reads), `KTLService.subscribe`, and the GUI's subscriptions replacing its 1 Hz poll; §3.6: heartbeat state and `isAlive()`. |
 | `50b703f` | 2026-11-17 | §4: the exposure fields' subscriptions and writes; `ExposureConfig.setting_value`/`keywords`. |
-| *pending* | 2026-11-17 | §3.2, §4: the slew target is written as binary radians; §4.1: `AMPCONFLIST`'s values confirmed at the telescope. |
+| `7efcccd` | 2026-11-17 | §3.2, §4: the slew target is written as binary radians; §4.1: `AMPCONFLIST`'s values confirmed at the telescope. |
+| *pending* | 2026-11-17 | §3.4: expression syntax (quoting, `$service.KEYWORD`, `or`); §4, §4.1: exposures use `FITSFILE` for their path and fail on `EXPSTATE == Error`. |

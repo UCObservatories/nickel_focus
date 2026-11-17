@@ -12,9 +12,10 @@ class NSciCam(KTLService):
     """
     The ``nscicam`` KTL service.
 
-    ``EXPSTATE`` and the exposure settings (``EXPOSURE``, ``AMPCONF``,
-    ``BINNING``) are monitored from construction on, and ``DISP0CLK`` (the
-    dispatcher's runtime clock) is registered as the heartbeat.  The camera's
+    ``EXPSTATE``, ``FITSFILE`` (the latest complete exposure), and the
+    exposure settings (``EXPOSURE``, ``AMPCONF``, ``BINNING``) are monitored
+    from construction on, and ``DISP0CLK`` (the dispatcher's runtime clock) is
+    registered as the heartbeat.  The camera's
     settings and file paths are available through :attr:`cfg` and
     :attr:`path`.
 
@@ -30,7 +31,7 @@ class NSciCam(KTLService):
     """
 
     service = 'nscicam'
-    monitored = ('EXPSTATE', 'EXPOSURE', 'AMPCONF', 'BINNING')
+    monitored = ('EXPSTATE', 'FITSFILE', 'EXPOSURE', 'AMPCONF', 'BINNING')
     heartbeat = 'DISP0CLK'
     # Provisional: generous until DISP0CLK's broadcast interval is measured
     # at the telescope.
@@ -57,6 +58,44 @@ class NSciCam(KTLService):
         """
         return self.check('EXPSTATE', f'== {state}', timeout)
 
+    def exposure_ended(self, timeout):
+        """
+        Wait up to ``timeout`` seconds for an exposure to end: ``EXPSTATE``
+        becomes ``Ready`` (done) or ``Error``.
+
+        Returns
+        -------
+        :obj:`bool` or None
+            True if it ended (see :meth:`exposure_state` for how), False if not,
+            or None if the service didn't reply (see
+            :meth:`~nickel_focus.services.base.KTLService.check`).
+        """
+        return self.check('EXPSTATE', '== Ready or $nscicam.EXPSTATE == Error', timeout)
+
+    def exposure_result(self):
+        """
+        The camera's report on the latest exposure, ``EXPRESULT``: its file
+        name, followed by an error message if it failed.
+        """
+        return self.read('EXPRESULT')
+
+    def fits_file(self):
+        """
+        The full path of the latest complete exposure, ``FITSFILE`` (set once
+        the file, including its header, is finished).
+        """
+        return self.read('FITSFILE')
+
+    def fits_file_changed(self, previous, timeout):
+        """
+        Wait up to ``timeout`` seconds for ``FITSFILE`` to differ from
+        ``previous`` -- i.e. for a new exposure to be complete -- and return
+        True if it did, False if not, or None if the service didn't reply (see
+        :meth:`~nickel_focus.services.base.KTLService.check`).
+        """
+        # Quoted, so ktl's expression parser reads a path as one string.
+        return self.check('FITSFILE', f'!= "{previous}"', timeout)
+
     def start_exposure(self):
         """
         Start an exposure (``EXPOSE = Go``, which starts it the way the camera's
@@ -79,8 +118,8 @@ class ExposurePath:
 
     @property
     def previous(self):
-        """The path of the most recent exposure, from ``EXPRESULT``."""
-        return Path(self.cam.read('EXPRESULT'))
+        """The path of the latest complete exposure, from ``FITSFILE``."""
+        return Path(self.cam.fits_file())
 
     @property
     def next(self):

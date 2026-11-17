@@ -77,7 +77,7 @@ def test_unknown_keyword_is_a_ktl_error(fake_telescope):
 @pytest.mark.parametrize('service, names', [
     ('nickelpoco', ('POCSTOP', 'POCTRCK', 'POCOT', 'POCSECLK', 'POCSECPA', 'POCORAA',
                     'POCODECA', 'POCHEART')),
-    ('nscicam', ('EXPSTATE', 'EXPOSURE', 'AMPCONF', 'BINNING', 'DISP0CLK')),
+    ('nscicam', ('EXPSTATE', 'FITSFILE', 'EXPOSURE', 'AMPCONF', 'BINNING', 'DISP0CLK')),
 ])
 def test_services_monitor_and_prime_with_a_timeout(fake_hardware, service, names):
     sim = fake_hardware['sim']
