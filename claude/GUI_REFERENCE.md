@@ -132,7 +132,14 @@ built on its `KTLService` (`services/nickelpoco.py`'s `NickelPoco` and
 values and raise only `services/base.py`'s own exceptions (`KTLError`,
 `KTLTimeoutError`, `KTLReadOnlyError`, `KTLUnavailableError`). Every read
 has a timeout (`DEFAULT_READ_TIMEOUT`, 1 s; to be confirmed at the
-telescope); writes don't yet. The device classes (`focus.Focus`,
+telescope); writes don't yet. Each service monitors its status and
+displayed keywords from construction on (priming each with a timed read),
+and registers a heartbeat keyword (`POCHEART`, `DISP0CLK`; provisional
+30 s periods) so `ktl` reconnects after a dispatcher restart. Conditions
+are checked with `KTLService.check`, which returns `True`, `False`, or
+`None` when the service doesn't reply; the device classes turn these into a
+`ValueError` (condition false) or a `KTLTimeoutError` ("No reply from ...")
+with `services.require`, so a failure says which it was. The device classes (`focus.Focus`,
 `exposure.Exposure`, `slew.NickelTelescopePointing`) take a service
 object rather than touching keywords themselves; the "camera idle before a
 focus move" check lives in `FocusSequence.set_focus`, which holds both
@@ -339,7 +346,8 @@ never commands the telescope or camera in either case.
 **Live tests.** A few tests (`tests/test_ktl_live.py`, marked `ktl_live`)
 check the real services at the telescope -- that `NickelPoco` and `NSciCam`
 construct (every monitored keyword exists and answers), that the device
-classes construct on them, and that their values read. They run only when
+classes construct on them, that their values read, and that each service's
+heartbeat keyword changes within two heartbeat periods. They run only when
 requested:
 
 ```
@@ -370,4 +378,5 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `33f7060` | 2026-11-16 | Added `StatusBar` (Quit + Slew/Track/On Target/Focus/Exp colored-circle indicators) above the image panel (Quit disabled while running); image anchored to the top of its canvas; Fusion style forced on all platforms. |
 | `945b2ab` | 2026-11-17 | Exposure control (`ExposurePath`/`ExposureConfig`/`Exposure`) moved from `focus.py` to its own `exposure.py` module; exposure fields start at the camera's current settings. |
 | `e560841` | 2026-11-17 | Removed the Options tab and settings persistence. |
-| *pending* | 2026-11-17 | KTL access moved into `services/` (`NickelPoco`/`NSciCam` on `KTLService`, the only `ktl` import; 1 s read timeouts); Controller shares one service of each; tests run on a keyword-level fake `ktl`; `--ktl-live` tests. |
+| `4a21d56` | 2026-11-17 | KTL access moved into `services/` (`NickelPoco`/`NSciCam` on `KTLService`, the only `ktl` import; 1 s read timeouts); Controller shares one service of each; tests run on a keyword-level fake `ktl`; `--ktl-live` tests. |
+| *pending* | 2026-11-17 | Services monitor their status/display keywords and register heartbeats at construction; checks distinguish "condition false" from "no reply" (`check`/`require`); live heartbeat test. |

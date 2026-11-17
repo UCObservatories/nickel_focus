@@ -218,7 +218,9 @@ waitFor(expression, timeout=None, case=False)   # e.g. kw.waitFor('== allowed', 
     receive its priming value *within the timeout*. With a short timeout
     (we use 0.5 s), a slow first read returns `False` -- a false
     negative -- even if the condition is actually true. Later calls on the
-    now-monitored keyword are fine.
+    now-monitored keyword are fine. Every keyword we `waitFor` is
+    monitored and primed when its service object is constructed (§4), so
+    our checks never hit this.
 - **String comparisons are case-insensitive by default** (`case=False`):
   both sides are lower-cased before comparing (`Expression.py:633`), so
   `'== Ready'` matches `READY`. Plain Python comparisons in our own code
@@ -265,10 +267,20 @@ waitFor(expression, timeout=None, case=False)   # e.g. kw.waitFor('== allowed', 
 broadcast at least every `period` seconds; a background FirstResponder
 checks it and, if it stops while the service still answers a probe,
 "resuscitates" the service (closes and reopens it, restarting monitoring).
-`service.reconnect()` forces the same. **We use neither.** Without them, a
-dispatcher restart may leave monitored keywords silently stale
-**[C-layer: whether client libraries reconnect on their own]**. The help
-files don't identify an explicit heartbeat keyword for either service.
+`service.reconnect()` forces the same. Without a heartbeat, a dispatcher
+restart may leave monitored keywords silently stale **[C-layer: whether
+client libraries reconnect on their own]**. `heartbeat()` starts monitoring
+the keyword if it isn't already, without waiting for its first value
+(`Service.py`, `Heartbeat.__init__`), and registering the same keyword
+twice is a no-op. A `period` shorter than the keyword's real broadcast
+interval makes `ktl` resuscitate the service needlessly.
+
+We register one heartbeat per service, after monitoring and priming it
+ourselves (§4): `nickelpoco.POCHEART` ("poco's heartbeat") and
+`nscicam.DISP0CLK` (the dispatcher's runtime clock, in seconds). The help
+doesn't give their broadcast intervals, so both use a provisional, generous
+30 s period until they're measured at the telescope. We don't call
+`reconnect()`.
 
 ### 3.7 KTL's own logging
 
@@ -316,7 +328,10 @@ calls of §3 and every service class is built on it:
 | `read(name, binary=False, timeout=1.0)` | `ktl.cache(...).read(binary=..., timeout=...)` | Every read has a timeout (`DEFAULT_READ_TIMEOUT`, 1 s, to be confirmed at the telescope); `TimeoutException` → `KTLTimeoutError`. |
 | `write(name, value, binary=False)` | `.write(value, binary=...)` | No timeout (waits for completion). Raises `KTLReadOnlyError`, without calling `ktl`, on a `read_only=True` service. |
 | `wait_for(name, expression, timeout)` | `.waitFor(expression, timeout=...)` | Returns `True`/`False`, as `waitFor` does (§3.4). |
+| `check(name, expression, timeout)` | `wait_for`, then on `False` a `read()` (1 s) | `True`, `False` (the service answered), or `None` (it didn't). `services.require(result, false_message, no_reply_message)` turns `False` into `ValueError` and `None` into `KTLTimeoutError`. |
+| `heartbeat_alive(timeout)` | `read()`, then `waitFor('!= <value>', timeout)` | Whether the heartbeat keyword changes within `timeout`; used by the live tests. |
 | construction, for each keyword in `monitored` | `.monitor(prime=False)`, then `read(timeout=1.0)` | Primes with a timed read instead of `monitor()`'s own (untimed) one, so an unresponsive service fails construction with `KTLTimeoutError` rather than hanging. |
+| construction, for the `heartbeat` keyword | the same, then `ktl.cache(service).heartbeat(keyword, heartbeat_period)` | §3.6. |
 
 `ktl.ktlError` (and `KeyError` from `ktl.cache`) become `KTLError`; each
 exception is chained to `ktl`'s original. Values cross the boundary as
@@ -329,21 +344,23 @@ and one `NSciCam` and share them.
 
 | Class | Keywords | Methods | Notes |
 | --- | --- | --- | --- |
-| `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`wait_for`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`) | Nothing monitored at construction. Never writes `POCSTOP`. |
-| `services.NSciCam` | `EXPSTATE`, `EXPOSE`; plus its helpers' keywords | `exposure_state()`, `exposure_state_is(state, timeout)`, `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE` and `EXPOSE` at construction. |
+| `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`) | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
+| `services.NSciCam` | `EXPSTATE`, `EXPOSE`, `DISP0CLK`; plus its helpers' keywords | `exposure_state()`, `exposure_state_is(state, timeout)` (`check`), `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE`, `EXPOSURE`, `AMPCONF`, `BINNING`; heartbeat `DISP0CLK`. |
 | `services.nscicam.ExposurePath` (`NSciCam.path`) | `RECORD`, `EXPRESULT`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous`, `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
 | `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `configure`, `exptime`, `current_settings` | Reads `AMPCONFLIST` at construction. |
 
 | Where | Uses | Notes |
 | --- | --- | --- |
-| `focus.Focus` | `NickelPoco` | `set_to` checks `movement_allowed(0.5)`, unlocks (`POCSECLK` → `off`), writes `POCSECPD`, then `secondary_locked(30)`. |
+| `focus.Focus` | `NickelPoco` | Each check goes through `require` (false → `ValueError`, no reply → `KTLTimeoutError`). `set_to` checks `movement_allowed(0.5)`, unlocks (`POCSECLK` → `off`), writes `POCSECPD`, then `secondary_locked(30)`. |
 | `focus.FocusSequence.set_focus` | `NSciCam` | `exposure_state_is('Ready', 0.5)` before every focus move a sequence makes, then `Focus.set_to`. |
 | `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, writes `Go`, then waits for `Start` (30 s) and `Ready` (exposure time + 90 s). |
 | `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target (ascii decimal hours/degrees), then `on_target(300)`. |
 | GUI `Controller` (GUI thread, 1 Hz) | both | Position display and status indicators: 8 reads per second on the GUI thread, each with a 1 s timeout. |
 | GUI `Controller` (GUI thread, once at startup) | `NSciCam.cfg` | `current_settings()` seeds the Single/Grid/Auto exposure fields. |
 
-The same usage, by keyword. "Controller" means the GUI's 1 Hz poll. A
+The same usage, by keyword. "Controller" means the GUI's 1 Hz poll. Every
+keyword that is checked with `waitFor` or displayed is also monitored (see
+the service rows above). A
 keyword used by more than one class is still a single shared `Keyword`
 object (§2.1).
 
@@ -360,7 +377,9 @@ object (§2.1).
 | `nickelpoco.POCSECPD` | `focus.Focus` | Read to skip a no-op move; written with the requested focus. |
 | `nickelpoco.POCSECLK` | `focus.Focus`, Controller | Written `off` to unlock; `waitFor('== on')` for the move to finish; read for the Focus indicator's color. |
 | `nscicam.EXPSTATE` | `focus.FocusSequence`, `exposure.Exposure`, Controller | `waitFor('== Ready')` before a focus move or exposure, `== Start`/`== Ready` during one; monitored by `NSciCam`; read for the Exp indicator. |
-| `nscicam.EXPOSE` | `exposure.Exposure` | Monitored by `NSciCam`; written `Go` to start an exposure. |
+| `nscicam.EXPOSE` | `exposure.Exposure` | Written `Go` to start an exposure; not monitored. |
+| `nickelpoco.POCHEART` | `NickelPoco` | Monitored; registered as the service's heartbeat (§3.6). |
+| `nscicam.DISP0CLK` | `NSciCam` | Monitored; registered as the service's heartbeat (§3.6). |
 | `nscicam.RECORD` | `ExposurePath`, `ExposureConfig` | Read to choose the record vs. scratch directory; written by `configure(record=...)`. |
 | `nscicam.EXPRESULT` | `ExposurePath` | Read for the last exposure's file path (`.previous`). |
 | `nscicam.OBSNUM` | `ExposurePath` | Read for the next observation number (`.next`). |
@@ -417,4 +436,5 @@ dispatcher has finished supplementing the FITS header; the help says it is
 | --- | --- | --- |
 | `a33f3dd` | 2026-11-17 | Initial reference, from KTL Python 5.2 (`ktl_python/`) and the `nickelpoco`/`nscicam` keyword help; dictionary-style access documented and excluded from our use. |
 | `b247c45` | 2026-11-17 | Moved the former §5 ("Implications and open questions") into `claude/ktl_interface_refactor.md`; this document now covers only current use and reference material. |
-| *pending* | 2026-11-17 | §1, §3.1, §3.2, §4 updated for the `services/` layer: the only `ktl` import (now catching any `ImportError`), 1 s read timeouts, timed priming reads, and the per-class usage tables. |
+| `4a21d56` | 2026-11-17 | §1, §3.1, §3.2, §4 updated for the `services/` layer: the only `ktl` import (now catching any `ImportError`), 1 s read timeouts, timed priming reads, and the per-class usage tables. |
+| *pending* | 2026-11-17 | §3.4, §3.6, §4: keywords monitored at construction, heartbeats (`POCHEART`, `DISP0CLK`, provisional 30 s), `check`/`require`/`heartbeat_alive`. |

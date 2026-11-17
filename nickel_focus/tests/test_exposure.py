@@ -7,7 +7,7 @@ service classes over the fake ``ktl`` (see ``fake_ktl.py``).
 import pytest
 
 from nickel_focus import exposure
-from nickel_focus.services import KTLUnavailableError, NSciCam
+from nickel_focus.services import KTLTimeoutError, KTLUnavailableError, NSciCam
 
 
 def test_camera_requires_ktl():
@@ -39,6 +39,16 @@ def test_expose_refuses_while_the_camera_is_busy(fake_hardware):
         exposure.Exposure(fake_hardware['cam']).expose()
     assert sim.keyword('nscicam', 'EXPOSE').writes == [], \
         'no exposure should start while the camera is busy'
+
+
+def test_expose_reports_a_camera_that_does_not_reply(fake_hardware):
+    sim = fake_hardware['sim']
+    sim.keyword('nscicam', 'EXPSTATE').responsive = False
+
+    with pytest.raises(KTLTimeoutError, match='No reply from nscicam.EXPSTATE'):
+        exposure.Exposure(fake_hardware['cam']).expose()
+    assert sim.keyword('nscicam', 'EXPOSE').writes == [], \
+        'no exposure should start without a reply'
 
 
 def test_configure_maps_speed_aliases_and_validates(fake_hardware):

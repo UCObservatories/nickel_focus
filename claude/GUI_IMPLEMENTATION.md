@@ -2739,3 +2739,37 @@ The 1 s read timeout is untested at the telescope (plan §5.1). Until phase 3,
 the GUI's 1 Hz poll still reads on the GUI thread: an unresponsive service
 now stalls it for up to 1 s per read rather than indefinitely. Full suite:
 `290 passed, 5 skipped` (the live tests).
+
+## KTL interface refactor, phase 2: monitoring, checks, and heartbeats (2026-11-17)
+
+Third phase of `claude/ktl_interface_refactor.md` (details as built in its
+§4.2). Resolves Appendix A items 4 (first-use `waitFor` false negatives) and
+11 (stale data after a dispatcher restart).
+
+- `KTLService` (`services/base.py`): `heartbeat`/`heartbeat_period` class
+  attributes, registered at construction after a timed priming read;
+  `check()` (`True`/`False`/`None` for no reply); `heartbeat_alive()`; and
+  the module function `require()`, exported from `services`, which turns a
+  `check` result into `ValueError` or `KTLTimeoutError`.
+- `NickelPoco` monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`,
+  `POCSECPA`, `POCORAA`, `POCODECA`, with heartbeat `POCHEART`; `NSciCam`
+  monitors `EXPSTATE`, `EXPOSURE`, `AMPCONF`, `BINNING` (no longer
+  `EXPOSE`), with heartbeat `DISP0CLK`. Both heartbeat periods are a
+  provisional 30 s.
+- `Focus.set_to`, `FocusSequence.set_focus`, `NickelTelescopePointing.slew_to`,
+  and `Exposure.expose` check through `require`: the "condition false"
+  messages are unchanged; a silent service now gives "No reply from
+  <service>.<keyword>; ...", as a `KTLTimeoutError`.
+- Tests: the fake `ktl` gained `cache(service)` (a `FakeService` recording
+  heartbeat registrations) and the two heartbeat keywords. New tests cover
+  what each service monitors, heartbeat registration and failure,
+  `heartbeat_alive`, `check`'s three outcomes, `require`, and a "no reply"
+  case for each device class; a live test checks each service's heartbeat
+  changes within two periods. Four existing tests now break the fake after
+  construction instead of before, since construction reads more keywords.
+- Docs: `GUI_REFERENCE.md` (§2, §5), `KTL_REFERENCE.md` (§3.4, §3.6, §4),
+  and the plan (status, §4.2, §5.1, §6, Appendix A).
+
+The heartbeat periods and live-test timeout remain provisional until the
+broadcast intervals are measured at the telescope (plan §5.1, §6). Full
+suite: `303 passed, 7 skipped` (the live tests).

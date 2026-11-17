@@ -10,6 +10,7 @@ import numpy as np
 
 from nickel_focus import log
 from nickel_focus import starlist
+from nickel_focus.services.base import require
 
 
 class NickelTelescopePointing:
@@ -59,15 +60,22 @@ class NickelTelescopePointing:
             Raised if telescope movement is disabled, tracking is disabled, the
             telescope is not ready to move to a new target, or the telescope
             fails to reach the target within 5 minutes.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the telescope service doesn't reply to one of these
+            checks.
         """
-        if not self.poco.movement_allowed(timeout=0.5):
-            raise ValueError('Telescope movement is disabled!')
-
-        if not self.poco.tracking(timeout=0.5):
-            raise ValueError('Tracking is disabled!')
-
-        if not self.poco.on_target(timeout=0.5):
-            raise ValueError('Telescope is not ready to move to a new target!')
+        require(
+            self.poco.movement_allowed(timeout=0.5), 'Telescope movement is disabled!',
+            'No reply from nickelpoco.POCSTOP; cannot tell whether telescope movement is allowed.'
+        )
+        require(
+            self.poco.tracking(timeout=0.5), 'Tracking is disabled!',
+            'No reply from nickelpoco.POCTRCK; cannot tell whether the telescope is tracking.'
+        )
+        require(
+            self.poco.on_target(timeout=0.5), 'Telescope is not ready to move to a new target!',
+            'No reply from nickelpoco.POCOT; cannot tell whether the telescope is ready to move.'
+        )
 
         # TODO: Need to add checks that the request is within the pointing
         # limits.
@@ -83,9 +91,12 @@ class NickelTelescopePointing:
 
         # TODO: Need a better way to determine if the move fails!  Timeout
         # currently set at 5 min.
-        if not self.poco.on_target(timeout=300):
-            # TODO: Is there a way to appropriately handle this?
-            raise ValueError('Telescope failed to make it to target within 5 min.')
+        # TODO: Is there a way to appropriately handle a failed move?
+        require(
+            self.poco.on_target(timeout=300),
+            'Telescope failed to make it to target within 5 min.',
+            'No reply from nickelpoco.POCOT; cannot tell whether the telescope reached the target.'
+        )
 
 
 def find_nearest_target(telescope_coo, obj_search_str=None, file=None):

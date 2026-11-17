@@ -5,6 +5,7 @@ The camera's settings and file paths are part of its KTL service; see
 :class:`~nickel_focus.services.nscicam.NSciCam`.
 """
 from nickel_focus import log
+from nickel_focus.services.base import require
 
 
 class Exposure:
@@ -43,10 +44,15 @@ class Exposure:
             Raised if the camera isn't ready to start within 15 s, the
             exposure isn't seen to start within 30 s, or it doesn't finish
             within the exposure time plus 90 s.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the camera service doesn't reply to one of these checks.
         """
         # Check that an exposure isn't currently happening
-        if not self.cam.exposure_state_is('Ready', timeout=15):
-            raise ValueError('Camera exposure state not ready. Cannot take exposure.')
+        require(
+            self.cam.exposure_state_is('Ready', timeout=15),
+            'Camera exposure state not ready. Cannot take exposure.',
+            'No reply from nscicam.EXPSTATE; cannot tell whether the camera is ready.'
+        )
 
         self.cfg.configure(record=record, speed=speed, binning=binning, exptime=exptime)
 
@@ -69,11 +75,16 @@ class Exposure:
         # Check that telescope is settled
 
         # Wait for it to start
-        if not self.cam.exposure_state_is('Start', timeout=30):
-            raise ValueError('Exposure start (EXPSTATE == Start) not detected within timeout')
+        require(
+            self.cam.exposure_state_is('Start', timeout=30),
+            'Exposure start (EXPSTATE == Start) not detected within timeout',
+            'No reply from nscicam.EXPSTATE; cannot tell whether the exposure started.'
+        )
 
         # Then wait for it to be ready again
-        if self.cam.exposure_state_is('Ready', timeout=round(float(self.cfg.exptime) + 90.)):
-            log.info('Exposure completed successfully')
-        else:
-            raise ValueError('Exposure EXPSTATE=Ready not detected within timeout')
+        require(
+            self.cam.exposure_state_is('Ready', timeout=round(float(self.cfg.exptime) + 90.)),
+            'Exposure EXPSTATE=Ready not detected within timeout',
+            'No reply from nscicam.EXPSTATE; cannot tell whether the exposure finished.'
+        )
+        log.info('Exposure completed successfully')

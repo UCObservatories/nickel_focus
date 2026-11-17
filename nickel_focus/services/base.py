@@ -15,8 +15,9 @@ all.  If it can't be imported (not installed, or installed but broken),
 a warning is issued once, :func:`ktl_available` returns False, and
 constructing a service raises :class:`KTLUnavailableError`.
 
-Only the named :mod:`ktl` methods are used: ``ktl.cache`` and the keyword
-methods ``read``, ``write``, ``monitor``, and ``waitFor``.
+Only the named :mod:`ktl` methods are used: ``ktl.cache``, the keyword
+methods ``read``, ``write``, ``monitor``, and ``waitFor``, and the service
+method ``heartbeat``.
 """
 import warnings
 
@@ -52,6 +53,35 @@ def ktl_available():
     return ktl is not None
 
 
+def require(result, false_message, no_reply_message):
+    """
+    Turn the result of :meth:`KTLService.check` into an exception unless the
+    condition held.
+
+    Parameters
+    ----------
+    result : :obj:`bool` or None
+        The result of :meth:`KTLService.check`.
+    false_message : :obj:`str`
+        The error message if the condition was false.
+    no_reply_message : :obj:`str`
+        The error message if the service didn't reply.
+
+    Raises
+    ------
+    ValueError
+        Raised if ``result`` is False: the service answered, and the
+        condition doesn't hold.
+    KTLTimeoutError
+        Raised if ``result`` is None: the service didn't reply, so the
+        condition is unknown.
+    """
+    if result is None:
+        raise KTLTimeoutError(no_reply_message)
+    if not result:
+        raise ValueError(false_message)
+
+
 class KTLService:
     """
     One KTL service: access to its keywords, with timeouts on every read.
@@ -72,8 +102,10 @@ class KTLService:
     KTLUnavailableError
         Raised if the :mod:`ktl` package is not available.
     KTLError, KTLTimeoutError
-        Raised if a keyword in :attr:`monitored` can't be monitored or its
-        first value isn't received within :data:`DEFAULT_READ_TIMEOUT`.
+        Raised if a keyword in :attr:`monitored` (or the :attr:`heartbeat`)
+        can't be monitored or its first value isn't received within
+        :data:`DEFAULT_READ_TIMEOUT`, or if the heartbeat can't be
+        registered.
     """
 
     service = None
@@ -87,6 +119,20 @@ class KTLService:
     hanging it.
     """
 
+    heartbeat = None
+    """
+    A keyword the service broadcasts regularly, or None.  It is monitored like
+    :attr:`monitored` and registered with :mod:`ktl` as the service's
+    heartbeat, so that if its broadcasts stop while the service still
+    answers, :mod:`ktl` reconnects to the service and restores monitoring.
+    """
+
+    heartbeat_period = None
+    """
+    The longest expected interval, in seconds, between :attr:`heartbeat`
+    broadcasts.  Too short a period makes :mod:`ktl` reconnect needlessly.
+    """
+
     def __init__(self, read_only=False):
         if ktl is None:
             raise KTLUnavailableError(
@@ -98,6 +144,8 @@ class KTLService:
         self.read_only = read_only
         for name in self.monitored:
             self._monitor(name)
+        if self.heartbeat is not None:
+            self._register_heartbeat()
 
     def __repr__(self):
         mode = ', read_only=True' if self.read_only else ''
@@ -117,6 +165,16 @@ class KTLService:
         except self._ktl.ktlError as e:
             raise KTLError(f'Cannot monitor {self.service}.{name}: {e}') from e
         self.read(name, timeout=timeout)
+
+    def _register_heartbeat(self):
+        """Monitor :attr:`heartbeat` and register it with :mod:`ktl` (see there)."""
+        self._monitor(self.heartbeat)
+        try:
+            self._ktl.cache(self.service).heartbeat(self.heartbeat, self.heartbeat_period)
+        except (self._ktl.ktlError, KeyError) as e:
+            raise KTLError(
+                f'Cannot register {self.service}.{self.heartbeat} as a heartbeat: {e}'
+            ) from e
 
     def read(self, name, binary=False, timeout=DEFAULT_READ_TIMEOUT):
         """
@@ -219,3 +277,58 @@ class KTLService:
             return bool(keyword.waitFor(expression, timeout=timeout))
         except self._ktl.ktlError as e:
             raise KTLError(f'Cannot wait for {self.service}.{name} {expression}: {e}') from e
+
+    def check(self, name, expression, timeout):
+        """
+        Wait until a keyword's value satisfies ``expression``, and tell a false
+        condition apart from a service that doesn't reply.
+
+        If :meth:`wait_for` returns False, the keyword is read once (with
+        :data:`DEFAULT_READ_TIMEOUT`): a reply means the condition really was
+        false; a timeout means the service isn't answering, so the condition
+        is unknown.
+
+        Parameters
+        ----------
+        name : :obj:`str`
+            Keyword name.
+        expression : :obj:`str`
+            A comparison with the keyword's value as its left-hand side,
+            e.g. ``'== allowed'``.
+        timeout : :obj:`float`
+            Seconds to wait for the condition.
+
+        Returns
+        -------
+        :obj:`bool` or None
+            True if the condition held within ``timeout``, False if it
+            didn't, or None if the service didn't reply.  See :func:`require`
+            to turn the result into an exception.
+        """
+        if self.wait_for(name, expression, timeout):
+            return True
+        try:
+            self.read(name)
+        except KTLTimeoutError:
+            return None
+        return False
+
+    def heartbeat_alive(self, timeout):
+        """
+        Whether the :attr:`heartbeat` keyword is broadcasting: read it, then
+        wait up to ``timeout`` seconds for its value to change.
+
+        Returns
+        -------
+        :obj:`bool`
+            True if the value changed within ``timeout``.
+
+        Raises
+        ------
+        KTLError
+            Raised if this service has no heartbeat keyword, or the read fails.
+        """
+        if self.heartbeat is None:
+            raise KTLError(f'The {self.service} service has no heartbeat keyword.')
+        value = self.read(self.heartbeat)
+        return self.wait_for(self.heartbeat, f'!= {value}', timeout)

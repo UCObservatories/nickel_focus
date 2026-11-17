@@ -12,9 +12,10 @@ them (:class:`~nickel_focus.focus.Focus`,
 :class:`~nickel_focus.exposure.Exposure`) run unchanged.
 
 :class:`FakeKeyword` implements just the named methods :mod:`nickel_focus` uses
-(``read``, ``write``, ``monitor``, ``waitFor``), and records how they were
-called so tests can check, e.g., that every read had a timeout or that a
-read-only service never wrote.  :class:`Simulator` defines the keywords of the
+(``read``, ``write``, ``monitor``, ``waitFor``), as does :class:`FakeService`
+(``heartbeat``), and they record how they were called so tests can check,
+e.g., that every read had a timeout or that a read-only service never
+wrote.  :class:`Simulator` defines the keywords of the
 ``nickelpoco`` and ``nscicam`` services and makes writes behave like the
 hardware: commanding the focus moves the secondary and re-locks it, commanding
 a slew moves the telescope, and starting an exposure steps ``EXPSTATE`` through
@@ -128,6 +129,26 @@ class FakeKeyword:
             return True
 
 
+class FakeService:
+    """
+    Stand-in for a ``ktl.Service``: just ``heartbeat``.
+
+    Attributes
+    ----------
+    heartbeats : :obj:`dict`
+        The period registered for each heartbeat keyword.
+    """
+
+    def __init__(self, fake_ktl, name):
+        self._ktl = fake_ktl
+        self.name = name
+        self.heartbeats = {}
+
+    def heartbeat(self, keyword, period=5):
+        self._ktl.cache(self.name, keyword)  # KeyError if there's no such keyword
+        self.heartbeats[keyword] = period
+
+
 class FakeKTL:
     """
     Stand-in for the :mod:`ktl` module: :meth:`cache` and the two exception
@@ -144,14 +165,20 @@ class FakeKTL:
     def __init__(self):
         self.lock = threading.RLock()
         self.keywords = {}
+        self.services = {}
         self.writes = []
 
     def define(self, service, name, value, on_write=None):
         """Add a keyword with an initial value and an optional write hook."""
         self.keywords[service, name] = FakeKeyword(self, service, name, value, on_write)
 
-    def cache(self, service, name):
-        """Like ``ktl.cache``: the (single, shared) keyword object, or KeyError."""
+    def cache(self, service, name=None):
+        """
+        Like ``ktl.cache``: the (single, shared) :class:`FakeService` if no
+        keyword is named, otherwise the keyword object, or KeyError.
+        """
+        if name is None:
+            return self.services.setdefault(service, FakeService(self, service))
         try:
             return self.keywords[service, name]
         except KeyError:
@@ -212,6 +239,7 @@ class Simulator:
         define(poco, 'POCSECPA', focus)
         define(poco, 'POCSECPD', focus, on_write=self._on_focus)
         define(poco, 'POCSECLK', 'on')
+        define(poco, 'POCHEART', 0)
 
         cam = 'nscicam'
         define(cam, 'EXPSTATE', 'Ready')
@@ -227,6 +255,7 @@ class Simulator:
         define(cam, 'SCRATCHDIR', str(directory or '.'))
         define(cam, 'FITSPREFIX', 'fake')
         define(cam, 'FITSSUFFIX', '.fits')
+        define(cam, 'DISP0CLK', 1000)
 
     def keyword(self, service, name):
         """The :class:`FakeKeyword` for ``service.name``."""

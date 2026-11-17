@@ -12,8 +12,10 @@ class NSciCam(KTLService):
     """
     The ``nscicam`` KTL service.
 
-    ``EXPSTATE`` and ``EXPOSE`` are monitored from construction on.  The
-    camera's settings and file paths are available through :attr:`cfg` and
+    ``EXPSTATE`` and the exposure settings (``EXPOSURE``, ``AMPCONF``,
+    ``BINNING``) are monitored from construction on, and ``DISP0CLK`` (the
+    dispatcher's runtime clock) is registered as the heartbeat.  The camera's
+    settings and file paths are available through :attr:`cfg` and
     :attr:`path`.
 
     See :class:`~nickel_focus.services.base.KTLService` for the parameters
@@ -28,7 +30,11 @@ class NSciCam(KTLService):
     """
 
     service = 'nscicam'
-    monitored = ('EXPSTATE', 'EXPOSE')
+    monitored = ('EXPSTATE', 'EXPOSURE', 'AMPCONF', 'BINNING')
+    heartbeat = 'DISP0CLK'
+    # Provisional: generous until DISP0CLK's broadcast interval is measured
+    # at the telescope.
+    heartbeat_period = 30
 
     def __init__(self, read_only=False):
         super().__init__(read_only=read_only)
@@ -45,9 +51,11 @@ class NSciCam(KTLService):
     def exposure_state_is(self, state, timeout):
         """
         Wait up to ``timeout`` seconds for ``EXPSTATE`` to equal ``state``
-        (case-insensitive), and return whether it did.
+        (case-insensitive), and return True if it did, False if not, or None if
+        the service didn't reply (see
+        :meth:`~nickel_focus.services.base.KTLService.check`).
         """
-        return self.wait_for('EXPSTATE', f'== {state}', timeout)
+        return self.check('EXPSTATE', f'== {state}', timeout)
 
     def start_exposure(self):
         """

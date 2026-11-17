@@ -1,7 +1,7 @@
 # KTL Interface Refactor -- Plan
 
-**Status:** phases 0 and 1 complete (2026-11-17); phases 2-4 not started.
-Remaining open items: §6. Phase 1 as built: §4.1.
+**Status:** phases 0-2 complete (2026-11-17); phases 3-4 not started.
+Remaining open items: §6. Phases 1 and 2 as built: §4.1, §4.2.
 
 A plan to restructure how `nickel_focus` uses the `ktl` package, so that the
 focus GUI stays in step with the telescope and camera when observers change
@@ -482,6 +482,36 @@ Done as described above, with these details and small departures:
   and the device classes, plus plain reads of each service's values. Without
   `ktl`, `--ktl-live` reports them as errors with a clear message.
 
+### 4.2 Phase 2 as built
+
+- **Monitored at construction** (§3.4): `NickelPoco` -- `POCSTOP`,
+  `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`;
+  `NSciCam` -- `EXPSTATE`, `EXPOSURE`, `AMPCONF`, `BINNING` (`EXPOSE` is no
+  longer monitored). Each is primed with a 1 s read, so a service that
+  doesn't answer fails construction (the GUI logs it and leaves that
+  service unconnected). `POCORAA`/`POCODECA` are monitored now; the display
+  rate limit belongs with the callbacks (phase 3).
+- **Heartbeats:** `KTLService.heartbeat`/`heartbeat_period`; the keyword is
+  monitored and primed first, then registered with
+  `ktl.cache(service).heartbeat(keyword, period)`. `POCHEART` and
+  `DISP0CLK`, both with a **provisional 30 s period** -- deliberately
+  generous, since a period shorter than the real broadcast interval makes
+  `ktl` reconnect needlessly (§5.1, §6).
+- **`check`** returns `True`/`False`/`None` (no reply), as designed in
+  §3.1; its follow-up read uses the 1 s default timeout. All of
+  `NickelPoco`'s conditions and `NSciCam.exposure_state_is` use it.
+- **`services.require(result, false_message, no_reply_message)`** turns a
+  `check` result into an exception: `ValueError` (the condition is false,
+  as before, with the same messages) or `KTLTimeoutError` ("No reply from
+  <service>.<keyword>; cannot tell whether ..."). Used for every check in
+  `Focus.set_to`, `FocusSequence.set_focus`, `NickelTelescopePointing.slew_to`,
+  and `Exposure.expose` (the plan named only the first and third; the
+  others had the same ambiguity).
+- **`heartbeat_alive(timeout)`** and a live test per service, with a
+  timeout of two heartbeat periods.
+- Fake `ktl`: `cache(service)` returns a `FakeService` that records
+  `heartbeat()` registrations; `POCHEART` and `DISP0CLK` keywords added.
+
 ## 5. Not addressed by this plan
 
 These issues from Appendix A are outside the scope above. The refactor
@@ -518,6 +548,8 @@ telescope first.
   between 0° and −1°.
 - **Whether `EXPSTATE == Start` is reliably broadcast** (§5 item 4).
 - **`AMPCONFLIST`'s values** (§5 item 7).
+- **Startup time with every monitored keyword primed** (§4.2): roughly a
+  dozen reads at construction; each fails after 1 s if unanswered.
 - **The 1 s default read timeout** (§3.1, §6): that every service
   answers a normal read well within it, including while busy (e.g. during
   readout or a slew), and that it's short enough to keep the 1 Hz GUI poll
@@ -564,14 +596,17 @@ telescope first.
 
 - **The heartbeat timeout** used by the live heartbeat test, and the
   `Service.heartbeat` periods for `POCHEART`/`DISP0CLK` -- pending their
-  observed broadcast rates at the telescope (§3.4, §5.1).
+  observed broadcast rates at the telescope (§3.4, §5.1). Provisionally
+  (phase 2): a 30 s period for both, and a live-test timeout of two
+  periods.
 
 ## Appendix A. Issues extracted from `KTL_REFERENCE.md` §5
 
 Moved here from `KTL_REFERENCE.md` (2026-11-17), where they were recorded as
 "Implications and open questions". Section and item references below are
 to `KTL_REFERENCE.md` ("REF") unless noted. Resolution: items 4, 6, 11 by
-this plan (§4); the rest are in §5 above.
+this plan (§4) -- items 4 and 11 done in phase 2 -- and the rest are in §5
+above.
 
 1. **Slew targets are written as ascii decimal numbers to sexagesimal
    keywords.** `slew_to` writes `ra.to('hourangle').value` and

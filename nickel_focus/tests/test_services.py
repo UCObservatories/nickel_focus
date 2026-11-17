@@ -12,8 +12,8 @@ import pytest
 from nickel_focus import focus
 from nickel_focus.services import base
 from nickel_focus.services import (
-    DEFAULT_READ_TIMEOUT, KTLError, KTLReadOnlyError, KTLTimeoutError, KTLUnavailableError,
-    NickelPoco, NSciCam, ktl_available,
+    DEFAULT_READ_TIMEOUT, KTLError, KTLReadOnlyError, KTLService, KTLTimeoutError,
+    KTLUnavailableError, NickelPoco, NSciCam, ktl_available, require,
 )
 
 
@@ -35,6 +35,7 @@ def test_unavailable_is_a_runtime_error():
 
 def test_reads_use_the_default_timeout(fake_telescope):
     poco = NickelPoco()
+    fake_telescope.keyword('nickelpoco', 'POCSTOP').reads.clear()  # forget the priming read
 
     assert poco.read('POCSTOP') == 'allowed', 'the read should return the ascii value'
     assert fake_telescope.keyword('nickelpoco', 'POCSTOP').reads == [DEFAULT_READ_TIMEOUT], \
@@ -60,9 +61,9 @@ def test_ktl_errors_are_translated(fake_telescope, monkeypatch):
     def fail(*args, **kwargs):
         raise fake_telescope.ktl.ktlError('KTL::-1::boom')
 
+    poco = NickelPoco()
     keyword = fake_telescope.keyword('nickelpoco', 'POCSTOP')
     monkeypatch.setattr(keyword, 'read', fail)
-    poco = NickelPoco()
     with pytest.raises(KTLError, match='Cannot read nickelpoco.POCSTOP: KTL::-1::boom'):
         poco.read('POCSTOP')
 
@@ -72,19 +73,82 @@ def test_unknown_keyword_is_a_ktl_error(fake_telescope):
         NickelPoco().read('NOSUCH')
 
 
-def test_camera_monitors_and_primes_with_a_timeout(fake_hardware):
+@pytest.mark.parametrize('service, names', [
+    ('nickelpoco', ('POCSTOP', 'POCTRCK', 'POCOT', 'POCSECLK', 'POCSECPA', 'POCORAA',
+                    'POCODECA', 'POCHEART')),
+    ('nscicam', ('EXPSTATE', 'EXPOSURE', 'AMPCONF', 'BINNING', 'DISP0CLK')),
+])
+def test_services_monitor_and_prime_with_a_timeout(fake_hardware, service, names):
     sim = fake_hardware['sim']
-    for name in ('EXPSTATE', 'EXPOSE'):
-        keyword = sim.keyword('nscicam', name)
-        assert keyword.monitored, f'{name} should be monitored from construction'
+    for name in names:
+        keyword = sim.keyword(service, name)
+        assert keyword.monitored, f'{service}.{name} should be monitored from construction'
         assert keyword.reads[0] == DEFAULT_READ_TIMEOUT, \
-            f"{name}'s priming read should have a timeout"
+            f"{service}.{name}'s priming read should have a timeout"
+
+
+def test_expose_is_not_monitored(fake_hardware):
+    assert not fake_hardware['sim'].keyword('nscicam', 'EXPOSE').monitored, \
+        'EXPOSE is only written, so it should not be monitored'
+
+
+@pytest.mark.parametrize('service, keyword', [
+    ('nickelpoco', 'POCHEART'), ('nscicam', 'DISP0CLK'),
+])
+def test_heartbeats_are_registered(fake_hardware, service, keyword):
+    heartbeats = fake_hardware['sim'].ktl.cache(service).heartbeats
+    assert heartbeats == {keyword: 30}, \
+        f'{keyword} should be registered as the {service} heartbeat, with its period'
+
+
+def test_unresponsive_heartbeat_fails_construction(fake_telescope):
+    fake_telescope.keyword('nickelpoco', 'POCHEART').responsive = False
+    with pytest.raises(KTLTimeoutError, match='POCHEART'):
+        NickelPoco()
+
+
+def test_heartbeat_alive(fake_telescope):
+    poco = NickelPoco()
+    heart = fake_telescope.keyword('nickelpoco', 'POCHEART')
+
+    assert not poco.heartbeat_alive(timeout=1), 'a heartbeat that never changes is not alive'
+    heart.pending = [heart.value + 1]
+    assert poco.heartbeat_alive(timeout=1), 'a heartbeat that changes is alive'
+
+
+def test_heartbeat_alive_needs_a_heartbeat(fake_telescope):
+    class NoHeartbeat(KTLService):
+        service = 'nickelpoco'
+
+    with pytest.raises(KTLError, match='no heartbeat keyword'):
+        NoHeartbeat().heartbeat_alive(timeout=1)
 
 
 def test_unresponsive_camera_fails_construction_instead_of_hanging(fake_hardware):
     fake_hardware['sim'].keyword('nscicam', 'EXPSTATE').responsive = False
     with pytest.raises(KTLTimeoutError):
         NSciCam()
+
+
+def test_check_tells_false_from_no_reply(fake_telescope):
+    poco = NickelPoco()
+    stop = fake_telescope.keyword('nickelpoco', 'POCSTOP')
+
+    assert poco.check('POCSTOP', '== allowed', 0.5) is True, 'a true condition should be True'
+    stop.value = 'disabled'
+    assert poco.check('POCSTOP', '== allowed', 0.5) is False, \
+        'a false condition, with the service answering, should be False'
+    stop.responsive = False
+    assert poco.check('POCSTOP', '== allowed', 0.5) is None, \
+        'a service that does not reply should give None'
+
+
+def test_require():
+    require(True, 'false', 'no reply')  # does not raise
+    with pytest.raises(ValueError, match='^false$'):
+        require(False, 'false', 'no reply')
+    with pytest.raises(KTLTimeoutError, match='^no reply$'):
+        require(None, 'false', 'no reply')
 
 
 def test_wait_for(fake_telescope):

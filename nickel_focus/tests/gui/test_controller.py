@@ -426,11 +426,11 @@ def test_controller_polls_current_position_from_fake_telescope(qapp, fake_telesc
 
 
 def test_current_position_read_failure_is_logged_once(qapp, caplog, fake_telescope):
-    fake_telescope.keyword('nickelpoco', 'POCORAA').responsive = False
     window = MainWindow()
+    controller = Controller(window)
+    fake_telescope.keyword('nickelpoco', 'POCORAA').responsive = False
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        controller = Controller(window)
         controller._update_current_position()
         controller._update_current_position()
 

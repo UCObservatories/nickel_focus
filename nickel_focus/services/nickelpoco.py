@@ -26,33 +26,44 @@ class NickelPoco(KTLService):
     - ``POCSECPA``/``POCSECPD``: the actual and desired secondary-mirror
       (focus) position.
     - ``POCSECLK``: the secondary-mirror lock (``on``/``off``).
+    - ``POCHEART``: the service's heartbeat.
+
+    The status keywords and the actual position and focus are monitored from
+    construction on, and ``POCHEART`` is registered as the heartbeat.
 
     See :class:`~nickel_focus.services.base.KTLService` for the parameters
     and exceptions.
     """
 
     service = 'nickelpoco'
+    monitored = (
+        'POCSTOP', 'POCTRCK', 'POCOT', 'POCSECLK', 'POCSECPA', 'POCORAA', 'POCODECA',
+    )
+    heartbeat = 'POCHEART'
+    # Provisional: generous until POCHEART's broadcast interval is measured
+    # at the telescope.
+    heartbeat_period = 30
 
     # -- conditions ------------------------------------------------------------
     #
-    # Each waits up to `timeout` seconds for the condition and returns whether
-    # it holds; see KTLService.wait_for.
+    # Each waits up to `timeout` seconds for the condition and returns True,
+    # False, or None if the service didn't reply; see KTLService.check.
 
     def movement_allowed(self, timeout):
         """Whether telescope movement is enabled (``POCSTOP == allowed``)."""
-        return self.wait_for('POCSTOP', '== allowed', timeout)
+        return self.check('POCSTOP', '== allowed', timeout)
 
     def tracking(self, timeout):
         """Whether the telescope is tracking (``POCTRCK == on``)."""
-        return self.wait_for('POCTRCK', '== on', timeout)
+        return self.check('POCTRCK', '== on', timeout)
 
     def on_target(self, timeout):
         """Whether the telescope is on target and stable (``POCOT == 0``)."""
-        return self.wait_for('POCOT', '== 0', timeout)
+        return self.check('POCOT', '== 0', timeout)
 
     def secondary_locked(self, timeout):
         """Whether the secondary mirror is locked (``POCSECLK == on``)."""
-        return self.wait_for('POCSECLK', '== on', timeout)
+        return self.check('POCSECLK', '== on', timeout)
 
     # -- values ----------------------------------------------------------------
 

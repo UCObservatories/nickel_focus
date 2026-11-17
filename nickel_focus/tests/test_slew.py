@@ -8,7 +8,7 @@ import pytest
 
 from nickel_focus import slew
 from nickel_focus import starlist
-from nickel_focus.services import NickelPoco
+from nickel_focus.services import KTLTimeoutError, NickelPoco
 
 
 def _write_starlist(tmp_path, lines):
@@ -136,3 +136,11 @@ class TestNickelTelescopePointing:
             telescope.slew_to(5.5, 20.25)
         if flag != 'reaches_target':
             assert fake_telescope.slew_calls == [], 'a failed check must not command a slew'
+
+    def test_slew_reports_a_service_that_does_not_reply(self, fake_telescope):
+        telescope = slew.NickelTelescopePointing(NickelPoco())
+        fake_telescope.keyword('nickelpoco', 'POCTRCK').responsive = False
+
+        with pytest.raises(KTLTimeoutError, match='No reply from nickelpoco.POCTRCK'):
+            telescope.slew_to(5.5, 20.25)
+        assert fake_telescope.slew_calls == [], 'no slew should be commanded without a reply'

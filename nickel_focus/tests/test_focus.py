@@ -7,7 +7,7 @@ import logging
 import pytest
 
 from nickel_focus import focus
-from nickel_focus.services import NickelPoco
+from nickel_focus.services import KTLTimeoutError, NickelPoco
 
 
 @pytest.fixture
@@ -63,6 +63,14 @@ def test_set_to_refuses_when_movement_is_disabled(focus_on_fake):
     assert sim.ktl.writes == [], 'a refused move should write nothing'
 
 
+def test_set_to_reports_a_service_that_does_not_reply(focus_on_fake):
+    f, sim = focus_on_fake
+    sim.keyword('nickelpoco', 'POCSTOP').responsive = False
+    with pytest.raises(KTLTimeoutError, match='No reply from nickelpoco.POCSTOP'):
+        f.set_to(350.)
+    assert sim.ktl.writes == [], 'nothing should be written without a reply'
+
+
 def test_set_to_fails_if_the_secondary_does_not_relock(focus_on_fake):
     f, sim = focus_on_fake
     # Without the simulated move, the lock stays off once unlocked.
@@ -78,6 +86,15 @@ def test_set_focus_waits_for_the_camera(fake_hardware):
     with pytest.raises(ValueError, match='Camera exposure state not ready'):
         seq.set_focus(350.)
     assert fake_hardware['sim'].focus == 340., 'the focus must not move during an exposure'
+
+
+def test_set_focus_without_a_camera_reply_does_not_move(fake_hardware):
+    seq = focus.FocusSequence(poco=fake_hardware['poco'], cam=fake_hardware['cam'])
+    fake_hardware['sim'].keyword('nscicam', 'EXPSTATE').responsive = False
+
+    with pytest.raises(KTLTimeoutError, match='No reply from nscicam.EXPSTATE'):
+        seq.set_focus(350.)
+    assert fake_hardware['sim'].focus == 340., 'the focus must not move if the camera is silent'
 
 
 def test_sequence_without_both_services_has_no_hardware(fake_hardware):

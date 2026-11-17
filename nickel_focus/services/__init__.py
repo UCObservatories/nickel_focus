@@ -9,7 +9,7 @@ Importing this package imports :mod:`ktl` (if available); see
 """
 from nickel_focus.services.base import (
     DEFAULT_READ_TIMEOUT, KTLError, KTLReadOnlyError, KTLService, KTLTimeoutError,
-    KTLUnavailableError, ktl_available,
+    KTLUnavailableError, ktl_available, require,
 )
 from nickel_focus.services.nickelpoco import NickelPoco
 from nickel_focus.services.nscicam import NSciCam

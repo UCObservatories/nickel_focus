@@ -11,6 +11,7 @@ from nickel_focus import exposure
 from nickel_focus import log
 from nickel_focus.photometry import image_quality
 from nickel_focus import quadratic
+from nickel_focus.services.base import require
 
 
 class Focus:
@@ -53,6 +54,9 @@ class Focus:
             Raised if the focus value is outside the allowed range, if movement
             is disabled, or if the secondary does not lock again within 30 s
             of the move.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the telescope service doesn't reply to one of these
+            checks.
         """
 
         # Check that the requested focus value is valid
@@ -61,8 +65,10 @@ class Focus:
         
         # Make sure movement is enabled.  Do NOT enable movement via this
         # script!
-        if not self.poco.movement_allowed(timeout=0.5):
-            raise ValueError('Telescope movement is disabled!')
+        require(
+            self.poco.movement_allowed(timeout=0.5), 'Telescope movement is disabled!',
+            'No reply from nickelpoco.POCSTOP; cannot tell whether telescope movement is allowed.'
+        )
 
         # Check if the focus is already at the requested position.
         if abs(self.poco.secondary_demand() - focus_value) < .1:
@@ -78,10 +84,12 @@ class Focus:
         self.poco.set_secondary_demand(focus_value)
         log.info(f'Desired position: {self.poco.secondary_demand()}')
 
-        if not self.poco.secondary_locked(timeout=30):
-            # TODO: Explicitly set the lock to on?
-#            self.poco.set_secondary_lock(True)
-            raise ValueError("POCSECLK did not turn on. Focus change failed.")
+        # TODO: If the lock doesn't come back on, explicitly set it to on?
+        require(
+            self.poco.secondary_locked(timeout=30),
+            'POCSECLK did not turn on. Focus change failed.',
+            'No reply from nickelpoco.POCSECLK; cannot tell whether the focus change finished.'
+        )
 
         log.info(f"Successfully changed focus to {focus_value}")
 
@@ -295,9 +303,15 @@ class FocusSequence:
         ValueError
             Raised if the camera's exposure state isn't ``Ready`` within 0.5 s,
             or if :meth:`~nickel_focus.focus.Focus.set_to` fails.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the camera or telescope service doesn't reply to a check.
         """
-        if not self._exposure.cam.exposure_state_is('Ready', timeout=0.5):
-            raise ValueError('Camera exposure state not ready. Cannot change focus.')
+        require(
+            self._exposure.cam.exposure_state_is('Ready', timeout=0.5),
+            'Camera exposure state not ready. Cannot change focus.',
+            'No reply from nscicam.EXPSTATE; cannot tell whether the camera is idle, so the '
+            'focus was not changed.'
+        )
         self._focus.set_to(focus_value)
 
     @property
