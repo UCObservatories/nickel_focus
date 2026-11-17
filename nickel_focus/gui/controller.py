@@ -632,11 +632,9 @@ class Controller(QtCore.QObject):
 
         Without a ``ktl`` connection
         (:attr:`~nickel_focus.gui.controller.Controller.exposure_hardware` is
-        ``None``), the fields keep their built-in defaults.  Called after the
-        window has restored any saved settings, so the camera's current values
-        take precedence over remembered ones.  A failed read, or a value the
-        fields can't show, is logged as a warning and leaves those fields
-        unchanged.
+        ``None``), the fields keep their built-in defaults.  A failed read, or
+        a value the fields can't show, is logged as a warning and leaves those
+        fields unchanged.
         """
         if self.exposure_hardware is None:
             return

@@ -276,21 +276,6 @@ class ImagePanel(QtWidgets.QWidget):
         """Reset to a fit-to-view zoom."""
         self.set_zoom(1.0)
 
-    def get_settings_state(self):
-        """
-        Return the persistable display preference (currently just the stretch
-        choice) as a flat :obj:`dict`, suitable for a settings store like
-        :class:`PySide6.QtCore.QSettings`.
-        """
-        return {'stretch': self._stretch_name}
-
-    def set_settings_state(self, state):
-        """Apply a settings :obj:`dict` from
-        :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.get_settings_state`."""
-        name = state.get('stretch')
-        if name in self.STRETCHES:
-            self.stretch_combo.setCurrentText(name)
-
     def set_zoom(self, zoom):
         """Set the display magnification (``1.0`` fits the whole frame)."""
         self._zoom = max(1.0, float(zoom))

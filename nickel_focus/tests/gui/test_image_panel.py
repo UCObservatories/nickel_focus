@@ -256,28 +256,6 @@ def test_every_stretch_option_renders_without_error(qapp, focus_sweep):
         assert panel.ax.get_images(), f'{name} should have actually drawn an image'
 
 
-def test_get_and_set_settings_state_round_trip(qapp):
-    panel = ImagePanel()
-    panel.stretch_combo.setCurrentText('Min/Max')
-
-    state = panel.get_settings_state()
-    assert state == {'stretch': 'Min/Max'}
-
-    fresh = ImagePanel()
-    fresh.set_settings_state(state)
-    assert fresh._stretch_name == 'Min/Max'
-    assert fresh.stretch_combo.currentText() == 'Min/Max'
-
-
-def test_set_settings_state_ignores_an_unknown_stretch_name(qapp):
-    panel = ImagePanel()
-    original = panel._stretch_name
-
-    panel.set_settings_state({'stretch': 'NotARealStretch'})
-
-    assert panel._stretch_name == original, 'an unrecognized stretch name should be ignored'
-
-
 def test_image_is_anchored_to_the_top_of_the_canvas(qapp, focus_sweep):
     # Keeps the image directly under the Exposure row, instead of centered
     # with a blank band above it when the frame and canvas shapes differ.

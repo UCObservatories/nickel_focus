@@ -49,11 +49,11 @@ gui/
 │   └── slew_worker.py     QThread that drives a telescope slew
 └── views/
     ├── __init__.py
-    ├── main_window.py       top-level window, layout, settings persistence
+    ├── main_window.py       top-level window and layout
     ├── status_bar.py        Quit button and hardware status indicators
     ├── image_panel.py       exposure display/pan/zoom/source selection
     ├── focus_curve_panel.py live FWHM-vs-focus plot
-    └── focus_control_panel.py Slew/Single/Grid/Auto/Replay tabs, log, options
+    └── focus_control_panel.py Slew/Single/Grid/Auto/Replay tabs, log, help
 ```
 
 This is a fairly conventional Model-View-Controller split, with one Qt-
@@ -71,7 +71,7 @@ specific wrinkle:
   `FocusCurvePanel` above `FocusControlPanel` on the right, composed
   inside `MainWindow`;
   `FocusControlPanel` itself holds the Slew/Single/Grid/Auto/Replay tabs
-  plus Log/Options/Help. Views only display state and emit Qt signals for
+  plus Log/Help. Views only display state and emit Qt signals for
   user actions (button clicks, a key press, a picked drop-down entry);
   they never import `focus`/`slew` or talk to `FocusWorker`/`SlewWorker`
   directly.
@@ -102,9 +102,7 @@ At construction, the Controller also starts the Single/Grid/Auto tabs'
 exposure fields (exposure time, speed, binning) at the camera's current
 settings, read via `exposure.ExposureConfig.current_settings()` (which
 reports the speed by its GUI name, e.g. `Fast`) and applied with
-`FocusControlPanel.set_exposure_config`. This runs after `MainWindow`
-restores any saved settings, so the camera's values take precedence. A
-failed read, or a speed/binning that isn't one of the drop-down options,
+`FocusControlPanel.set_exposure_config`. A failed read, or a speed/binning that isn't one of the drop-down options,
 is logged as a warning and leaves those fields unchanged. Without `ktl`
 the fields keep their built-in defaults (visible only with `--test`).
 
@@ -171,25 +169,25 @@ implementation history.
 | `gui/log_handler.py` | `QtLogHandler`, a `logging.Handler` that forwards formatted `nickel_focus.log` records into the Log tab via a Qt signal, so records logged from a background thread are delivered safely to the GUI thread. |
 | `gui/model/focus_worker.py` | `QThread` subclass that runs one `FocusSequence` operation (step/reanalyze/single exposure) off the GUI thread, reporting progress via signals. |
 | `gui/model/slew_worker.py` | `QThread` subclass that runs one `NickelTelescopePointing.slew_to` call off the GUI thread, since a slew can block for up to five minutes. |
-| `gui/views/main_window.py` | Top-level `QMainWindow`; lays out the panels (status bar stacked above the image panel; splitters between left/right and between the two right-hand panels); persists/restores settings via `QSettings`. |
+| `gui/views/main_window.py` | Top-level `QMainWindow`; lays out the panels (status bar stacked above the image panel; splitters between left/right and between the two right-hand panels). |
 | `gui/views/status_bar.py` | One row: a Quit button (disabled while anything is running) and five indicators (Slew, Track, On Target, Focus, Exp), each a `StatusIndicator`: a green/yellow/red circle, as set by the Controller, next to left-aligned text. |
 | `gui/views/image_panel.py` | Displays collected exposures one at a time: pan, zoom, stretch selection, and source selection (hover and press 'm') for reanalysis. |
 | `gui/views/focus_curve_panel.py` | Live scatter plot of FWHM vs. focus value, with the fitted quadratic and its vertex once enough points exist. |
-| `gui/views/focus_control_panel.py` | Tabbed sequence configuration -- Slew (target entry, "Move to Target", "Find nearest object/pointing/focus star") plus Single/Grid/Auto/Replay -- and Log/Options/Help tabs; emits the signals that request an action. `set_hardware_tabs_enabled` grays out the four ktl-driven tabs (and switches to Replay) on the Controller's say-so. |
+| `gui/views/focus_control_panel.py` | Tabbed sequence configuration -- Slew (target entry, "Move to Target", "Find nearest object/pointing/focus star") plus Single/Grid/Auto/Replay -- and Log/Help tabs; emits the signals that request an action. `set_hardware_tabs_enabled` grays out the four ktl-driven tabs (and switches to Replay) on the Controller's say-so. |
 
 ### Lines of communication
 
 ```
                         ┌─────────────────────────┐
                         │        MainWindow        │
-                        │  (layout + settings)     │
+                        │  (layout)                │
                         └───────────┬───────────────┘
                                     │ owns
               ┌─────────────────────┼─────────────────────┐
               ▼                     ▼                      ▼
       ImagePanel            FocusCurvePanel         FocusControlPanel
    (exposure display)       (FWHM vs focus)      (Slew/Single/Grid/Auto/
-              │                     ▲              Replay tabs, log, options)
+              │                     ▲              Replay tabs, log, help)
     sourceSelected            add_result /                │
     (Signal)                  reset              startRequested / stopRequested /
               │                     ▲            takeSingleExposureRequested /
@@ -335,3 +333,4 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `034a374` | 2026-11-16 | Status text built once in the Controller (`show_status`); 'm'-key selection and curve-panel API corrected; install/testing now point to `README.md`. |
 | `33f7060` | 2026-11-16 | Added `StatusBar` (Quit + Slew/Track/On Target/Focus/Exp colored-circle indicators) above the image panel (Quit disabled while running); image anchored to the top of its canvas; Fusion style forced on all platforms. |
 | `945b2ab` | 2026-11-17 | Exposure control (`ExposurePath`/`ExposureConfig`/`Exposure`) moved from `focus.py` to its own `exposure.py` module; exposure fields start at the camera's current settings. |
+| *pending* | 2026-11-17 | Removed the Options tab and settings persistence. |

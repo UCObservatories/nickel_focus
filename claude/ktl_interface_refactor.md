@@ -1,6 +1,7 @@
 # KTL Interface Refactor -- Plan
 
-**Status:** proposed, not started (2026-11-17).
+**Status:** phase 0 complete (2026-11-17); phases 1-4 not started.
+Remaining open items: §6.
 
 A plan to restructure how `nickel_focus` uses the `ktl` package, so that the
 focus GUI stays in step with the telescope and camera when observers change
@@ -46,13 +47,27 @@ the keywords we use is in `claude/KTL_REFERENCE.md` (cited below as "REF
   `GUI_IMPLEMENTATION.md` gets an entry per phase.
 - **Behavior-preserving first.** The structural change (phase 1) should
   not change behavior, so it can be verified on its own before behavior
-  changes land on top of it.
+  changes land on top of it. Its only intended differences: reads gain
+  timeouts (§3.1), a broken `ktl` install degrades instead of failing to
+  import (§3.2), and `nickel_focus.ktl` no longer exists (§3.2).
 
 ## 3. Design
 
 ### 3.1 Service classes
 
-A new module (proposed: `nickel_focus/ktl_service.py`) with:
+A new package, `nickel_focus/services/`:
+
+```
+services/
+├── __init__.py
+├── base.py         KTLService, our exceptions, ktl_available() -- the only module that imports ktl
+├── nickelpoco.py   NickelPoco(KTLService)
+└── nscicam.py      NSciCam(KTLService), with its file-path and settings helpers
+```
+
+`base.py` holds everything generic; each service module holds that
+service's own knowledge (keyword names and meanings, named queries). In
+outline:
 
 ```python
 class KTLService:
@@ -61,27 +76,45 @@ class KTLService:
     monitored = ()      # keywords monitored, with a blocking priming read, at construction
     heartbeat = None    # keyword registered via Service.heartbeat
 
-    def __init__(self): ...         # KTLUnavailableError if no ktl (§3.2); monitor; heartbeat
+    def __init__(self, read_only=False): ...
+        # KTLUnavailableError if no ktl (§3.2); monitor and prime the
+        # monitored keywords; register the heartbeat. read_only: §3.9.
     def _keyword(self, name): ...   # ktl.cache(self.service, name); private (§3.2)
-    def read(self, name, binary=False, timeout=DEFAULT_TIMEOUT): ...
-    def write(self, name, value, binary=False, timeout=DEFAULT_TIMEOUT): ...
+    def read(self, name, binary=False, timeout=DEFAULT_READ_TIMEOUT): ...
+    def write(self, name, value, binary=False, timeout=...): ...
+        # KTLReadOnlyError if read_only (§3.9); no timeout yet (below)
     def check(self, name, expression, timeout):
         """waitFor; on failure, a read(timeout=...) to tell 'false' from
         'no reply' (REF §3.4). Returns True, False, or None (no reply)."""
+    def heartbeat_alive(self, timeout): ...     # §3.9
     def subscribe(self, names, function): ...   # Keyword.callback; see §3.5
 
+# services/nickelpoco.py
 class NickelPoco(KTLService):   # service = 'nickelpoco'
     # named queries, e.g. movement_allowed(), tracking(), on_target(),
     # pointing(), secondary_position(), secondary_locked()
 
+# services/nscicam.py
 class NSciCam(KTLService):      # service = 'nscicam'
     # named queries, e.g. exposure_state(), exposure_settings();
     # file-path helpers (today's ExposurePath) and settings (ExposureConfig)
 ```
 
-All reads and writes go through `KTLService` with an explicit timeout, so
-nothing in `nickel_focus` can wait on a service indefinitely (REF §3.1).
-Our services honor timeouts (REF §2.1, §3.1).
+All reads go through `KTLService` with an explicit timeout, so nothing in
+`nickel_focus` waits on a reply indefinitely (REF §3.1); our services honor
+timeouts (REF §2.1, §3.1). Writes also go through `KTLService`, but
+**without a timeout for now**: they keep today's behavior (wait for the
+service to report completion), because what "completion" means for each
+written keyword -- e.g. whether a `POCSECPD` write completes when accepted
+or when the move finishes -- isn't known yet, and a timeout could abort a
+legitimately long write. Per-keyword write timeouts follow once that's
+confirmed at the telescope (§5.1).
+
+**Priming without hanging.** `Keyword.monitor()`'s own priming read has no
+timeout (REF §3.3), so construction instead calls
+`monitor(prime=False)` for each monitored keyword and then primes it with
+`read(timeout=...)`. A service whose dispatcher doesn't answer therefore
+fails construction with `KTLTimeoutError` instead of hanging.
 
 ### 3.2 Importing `ktl` and handling its absence
 
@@ -93,17 +126,17 @@ their constructors; `FocusSequence` checks `ktl is not None`; the GUI
 Controller checks `focus.ktl is not None`; and the tests' `no_ktl` fixture
 patches `focus.ktl`, `exposure.ktl`, and `slew.ktl` separately.
 
-**Proposed: `ktl_service.py` is the only module that uses `ktl`.**
+**Proposed: `services/base.py` is the only module that uses `ktl`.**
 
-- **One import.** `ktl_service.py` does `from nickel_focus.pkg.ktl import
-  ktl`. `pkg/ktl.py` keeps its role as the soft-failing import shim, but
-  nothing else imports it, and the package-level re-export in
-  `nickel_focus/__init__.py` is removed -- so `from nickel_focus import ktl`
-  stops working, and any new direct use of `ktl` fails loudly instead of
-  quietly bypassing the service layer. `focus.py`, `exposure.py`, and
-  `slew.py` no longer import `ktl` at all; they receive service objects
-  (§3.3).
-- **Availability.** A module-level `ktl_service.ktl_available()` replaces
+- **One import.** `services/base.py` imports `ktl` itself, with the same
+  soft-failing guard `pkg/ktl.py` uses today (warn once, set `ktl = None`),
+  and `pkg/ktl.py` is removed, along with the package-level re-export in
+  `nickel_focus/__init__.py`. So `from nickel_focus import ktl` stops
+  working, and any new direct use of `ktl` fails loudly instead of quietly
+  bypassing the service layer. `focus.py`, `exposure.py`, and `slew.py` no
+  longer import `ktl` at all; they receive service objects (§3.3), and
+  `NickelPoco`/`NSciCam` use only `KTLService` methods.
+- **Availability.** A module-level `services.base.ktl_available()` replaces
   every `... ktl is not None` check (Controller, `FocusSequence`, CLI
   scripts).
 - **Construction without `ktl`.** `KTLService.__init__` raises a new
@@ -114,30 +147,33 @@ patches `focus.ktl`, `exposure.ktl`, and `slew.ktl` separately.
   None`.
 - **Exceptions.** `ktl`'s own exceptions (`ktl.ktlError`,
   `ktl.TimeoutException`) are attributes of a module that may be `None`, so
-  code outside `ktl_service.py` can't safely name them in an `except`.
+  code outside `services/base.py` can't safely name them in an `except`.
   `KTLService` catches them at its boundary and re-raises exceptions
-  defined in `ktl_service.py` (e.g. `KTLError`, `KTLTimeoutError`),
-  chained to the original (`raise ... from e`).
+  defined in `services/base.py` (e.g. `KTLError`, `KTLTimeoutError`),
+  chained to the original (`raise ... from e`). `KTLReadOnlyError` (§3.9)
+  joins them.
 - **Plain values across the boundary.** Service methods take and return
   plain Python values (`str`, `float`, `int`, `SkyCoord`, ...) and raise
-  only our exceptions; `ktl.Keyword` objects never leave `ktl_service.py`.
+  only our exceptions; `ktl.Keyword` objects never leave `services/base.py`.
   Callbacks (§3.5) likewise deliver `(service, keyword, value)`, not
   keyword objects.
-- **Broken installs.** `pkg/ktl.py` currently catches only
+- **Broken installs.** Today's guard in `pkg/ktl.py` catches only
   `ModuleNotFoundError` (REF §1). An installed `ktl` whose compiled `ktlc`
   extension or `py-util` dependency fails to load can raise other
   `ImportError`s, which would stop `nickel_focus` from importing at all.
-  Catch `ImportError` instead, and include the error in the warning, so a
-  broken install degrades the same way a missing one does.
+  `services/base.py` catches `ImportError` instead, and includes the error
+  in the warning, so a broken install degrades the same way a missing one
+  does.
 - **Import timing.** Importing `ktl` starts its background threads
   (REF §2.2). Today that happens on any `import nickel_focus` -- even for
   replay-only CLI runs -- because of the package-level re-export. With the
-  re-export gone, `ktl` is imported only when `ktl_service` is. (Deferring
-  it further, to the first `ktl_available()` call or service
-  construction, is an open decision, §6.)
-- **Tests: one seam.** `no_ktl` patches only `ktl_service.ktl` to `None`.
+  re-export gone, `ktl` is imported only when `services.base` is -- i.e.
+  only by code that works with services. (Decided: no further deferral;
+  importing `ktl` lazily on first use was considered and judged not worth
+  the extra complexity.)
+- **Tests: one seam.** `no_ktl` patches only `services.base.ktl` to `None`.
   The keyword-level fake (§3.7) is installed the same way: by patching
-  `ktl_service.ktl` with a fake module object whose `cache(service,
+  `services.base.ktl` with a fake module object whose `cache(service,
   keyword)` returns fake keywords and which defines the `ktl` exception
   classes, so the real service and device classes run unchanged in tests.
 
@@ -163,9 +199,9 @@ owner of its callbacks, heartbeat, and monitored state.
 
 ### 3.4 What to monitor
 
-Monitoring (with a blocking priming read at construction) replaces the
-GUI's 1 Hz polling and fixes the first-use `waitFor` false negatives
-(Appendix A, item 4).
+Monitoring at construction (phase 2) fixes the first-use `waitFor` false
+negatives (Appendix A, item 4); together with callbacks (§3.5, phase 3) it
+replaces the GUI's 1 Hz polling.
 
 | Keyword | Monitor | Purpose |
 | --- | --- | --- |
@@ -175,6 +211,7 @@ GUI's 1 Hz polling and fixes the first-use `waitFor` false negatives
 | `EXPOSURE`, `AMPCONF`, `BINNING` | Yes | Exposure fields follow the camera (§3.6). |
 | `POCHEART`, `DISP0CLK` | Heartbeats | `NickelPoco.heartbeat = 'POCHEART'` ("poco's heartbeat"); `NSciCam.heartbeat = 'DISP0CLK'` (dispatcher runtime clock). Lets `ktl` detect a dispatcher restart and restore monitoring (Appendix A, item 11). Periods to be set from their observed broadcast rates. |
 | `POCSECPD`, `POCORAD`, `POCODECD`, `RECORD`, `OBSNUM`, `EXPRESULT`, `RECORDDIR`, `SCRATCHDIR`, `FITSPREFIX`, `FITSSUFFIX`, `AMPCONFLIST` | No | Written by us or not displayed; read (with timeout) at the moment of use. |
+| `EXPOSE` | No | Written to start an exposure; never read. `Exposure` monitors it today; phase 2 drops that, along with any other monitoring not in this table. |
 
 ### 3.5 GUI binding: callbacks instead of polling
 
@@ -183,10 +220,15 @@ GUI's 1 Hz polling and fixes the first-use `waitFor` false negatives
   thread with a frozen copy of the keyword, whose `read()` returns the
   broadcast value without contacting the service (`Keyword.clone`;
   `Keyword.read`, `Keyword.py:846`) -- a named method, so within our rules.
+- `ktl` stores callbacks as **weak references** (REF §3.3), so a callback
+  that nothing else references is silently dropped. `subscribe` wraps
+  `function` (to read the value and call `function(service, keyword,
+  value)`), and the service object must keep a strong reference to each
+  wrapper for as long as the subscription should last; likewise, the
+  Controller must keep its bridge alive.
 - The Controller owns a small `QObject` bridge whose callback emits a Qt
   signal `(service, keyword, value)`; Qt queues it onto the GUI thread (the
-  same pattern as `QtLogHandler`). The bridge must be kept alive by the
-  Controller: `ktl` stores callbacks as weak references (REF §3.3).
+  same pattern as `QtLogHandler`).
 - The Controller maps each signal to a view update (status indicator,
   position display, exposure fields) using the existing pure mapping
   functions. The 1 Hz `_poll_timer` and `_update_status_indicators()`
@@ -214,8 +256,9 @@ GUI's 1 Hz polling and fixes the first-use `waitFor` false negatives
 - **Consequences to accept:**
   - Single/Grid/Auto each have their own exposure fields today. With the
     camera as the single source of truth they always show the same
-    values, so an edit on one tab appears on all three. (Optionally, they
-    could later be merged into one shared set of fields.)
+    values, so an edit on one tab appears on all three. Decided: keep the
+    three synchronized sets for now; merging them into one shared group is
+    a separate, later layout change.
   - Nothing about the exposure fields is saved between sessions: the
     camera defines them. (Settings persistence is removed altogether, in
     phase 0; §3.8.)
@@ -224,6 +267,9 @@ GUI's 1 Hz polling and fixes the first-use `waitFor` false negatives
   - Fields are already disabled while anything runs (`set_running`), so
     user edits can't change the camera mid-sequence. Broadcasts still
     update them.
+  - Without a camera connection (no `ktl`, e.g. under `--test`), the
+    fields are plain inputs with their built-in defaults, as today:
+    edits aren't written anywhere.
 
 ### 3.7 Testing
 
@@ -232,10 +278,13 @@ GUI's 1 Hz polling and fixes the first-use `waitFor` false negatives
   `waitFor`, `monitor`, `callback`, honoring timeouts) underneath the
   service classes, so the real logic in `Focus.set_to`,
   `NickelTelescopePointing.slew_to`, and `Exposure.expose` runs under test
-  for the first time. The fake hardware's simulated camera/telescope
-  behavior moves into fake *service* state driven by the fake keywords.
-- The autouse `no_ktl` fixture keeps forcing every `ktl` reference to
-  `None`; tests that need hardware inject fake services explicitly.
+  for the first time. Today's simulated camera/telescope behavior
+  (synthesized frames, focus and pointing that follow what's commanded)
+  moves into the fake keywords' responses to writes (e.g. writing
+  `EXPOSE = Go` steps `EXPSTATE` and produces a new frame and file name).
+- The autouse `no_ktl` fixture keeps `services.base.ktl` set to `None`;
+  tests that need hardware install the fake `ktl` module there instead
+  (§3.2), and then construct the real service classes.
 - New tests: service classes (monitoring at construction, `check`
   tri-state, timeouts), the Qt bridge (callback on a non-GUI thread reaches
   the GUI thread), callback-driven indicators and position display,
@@ -278,7 +327,9 @@ persistence is opt-in by design, so all of it goes:
   `test_focus_control_panel.py` (3), and `test_image_panel.py` (2); and the
   `options_tab` entries in the tab-order, button-set, and tab-list tests.
 - **Docs:** `GUI_REFERENCE.md` (persistence, the Options tab, the
-  `main_window.py` description).
+  `main_window.py` description) and the user manual,
+  `docs/html/focusGUI.html` (its Options paragraph; its screenshots also
+  show the old tab bar).
 
 **What observers lose:** remembered Grid/Auto/Replay values (start, step,
 number of steps), Replay's data directory/prefix/suffix/obsnum, the Slew
@@ -307,7 +358,7 @@ telescope (e.g. after a `ktl` or dispatcher upgrade). Two rules:
 registered in `tests/conftest.py` (`pytest_addoption`), together with a
 `ktl_live` marker on each live test. A collection hook skips every
 `ktl_live` test unless `--ktl-live` is given, so `pytest`, `tox`, and CI
-never run them. If `--ktl-live` *is* given but `ktl_service.ktl_available()`
+never run them. If `--ktl-live` *is* given but `services.base.ktl_available()`
 is false, the live tests **fail** with a clear message rather than skip:
 the run was explicitly requested, so a missing `ktl` is an error, not a
 reason to report success. The live tests live in their own module (e.g.
@@ -318,15 +369,20 @@ pytest nickel_focus/tests --ktl-live            # normal suite plus the live tes
 pytest nickel_focus/tests --ktl-live -m ktl_live   # live tests only
 ```
 
+**Documentation.** How to run the live tests -- the commands above, that
+they need a live `ktl` connection (they fail, not skip, without one), and
+that they never change a keyword value -- goes in both the README's
+testing section and `GUI_REFERENCE.md` §5 (Testing).
+
 **Isolation from the rest of the suite.** The autouse `no_ktl` fixture
-(§3.2) stays in force for every other test. It leaves `ktl_service.ktl`
+(§3.2) stays in force for every other test. It leaves `services.base.ktl`
 alone only for tests carrying the `ktl_live` marker -- and those only run
 under `--ktl-live` -- so the guarantee that the ordinary suite never
 touches hardware is unchanged.
 
 **No writes, enforced rather than promised.** Because every keyword write
 in `nickel_focus` goes through `KTLService.write` (keyword objects never
-leave `ktl_service.py`, §3.2), the service classes take a
+leave `services/base.py`, §3.2), the service classes take a
 `read_only=False` constructor argument: when `True`, `write` raises a new
 `KTLReadOnlyError` *before* touching `ktl`. Every live test constructs its
 services with `read_only=True`, so even a device method that writes (e.g.
@@ -366,14 +422,16 @@ fails the same way on a read-only service.
    especially phase 4, which changes the exposure fields -- don't have to
    keep the settings code and its tests working.
 1. **Service classes, no behavior change.** Add `KTLService`,
-   `NickelPoco`, `NSciCam`; make `ktl_service.py` the only user of `ktl`
-   (§3.2: remove the package-level re-export, add `ktl_available()` and our
-   exception types, broaden `pkg/ktl.py`'s import guard); move the device
+   `NickelPoco`, `NSciCam` in `services/` (§3.1); make `services/base.py`
+   the only user of `ktl` (§3.2: move and broaden `pkg/ktl.py`'s import
+   guard, remove `pkg/ktl.py` and the package-level re-export, add
+   `ktl_available()` and our exception types); move the device
    classes onto the service objects (composition, §3.3), including the
    `EXPSTATE` interlock move; add the keyword-level fake and port the
    tests. Add the `read_only` service mode and the live-test
    infrastructure (`--ktl-live`, the `ktl_live` marker, `no_ktl`'s
-   exemption) with the construction tests (§3.9). Reads keep today's semantics
+   exemption) with the construction tests, and document how to run them in
+   the README and `GUI_REFERENCE.md` (§3.9). Reads keep today's semantics
    except for the added timeouts. The GUI keeps polling, through the
    service objects.
 2. **Monitoring and checks.** Monitor the §3.4 keywords at construction;
@@ -388,7 +446,8 @@ fails the same way on a read-only service.
    describes them (§3.8).
 
 Each phase ends with the full suite passing, updated `GUI_REFERENCE.md`/
-`KTL_REFERENCE.md`, and a `GUI_IMPLEMENTATION.md` entry.
+`KTL_REFERENCE.md` (and the README where it describes something the phase
+changes), and a `GUI_IMPLEMENTATION.md` entry.
 
 ## 5. Not addressed by this plan
 
@@ -429,7 +488,8 @@ telescope first.
 - **Broadcast rates** of `POCORAA`/`POCODECA` (display rate limit, §3.5)
   and of `POCHEART`/`DISP0CLK` (heartbeat periods, §3.4).
 - **What write "completion" means** for `POCSECPD`, `POCORAD`/`POCODECD`,
-  `EXPOSE`, and the exposure settings (REF §3.2).
+  `EXPOSE`, and the exposure settings (REF §3.2) -- needed to set the
+  per-keyword write timeouts deferred in §3.1.
 - **Notify flags as the Python layer sees them**: in an interactive
   session (a diagnostic, not `nickel_focus` code), check
   `keyword['notify_reads']`/`['notify_writes']` for one keyword per
@@ -438,23 +498,35 @@ telescope first.
 - **Whether the data-acquisition GUI tracks `EXPOSURE`/`AMPCONF`/
   `BINNING`**, so Goal 2's "both ways" is visible there.
 
-## 6. Open decisions
+## 6. Decisions
 
-- Module name and location for the service classes
-  (`nickel_focus/ktl_service.py` proposed).
-- Exception names (`KTLUnavailableError`, `KTLError`, `KTLTimeoutError`
-  proposed, §3.2).
-- When to import `ktl` (§3.2): when `ktl_service` is first imported
-  (proposed, simplest), or lazily on the first `ktl_available()` call or
-  service construction, so code paths that never touch hardware never
-  start `ktl`'s threads.
-- Default read/write timeout for `KTLService`.
-- Live-test details (§3.9): the option and marker names (`--ktl-live`,
-  `ktl_live` proposed), the heartbeat timeout (pending the observed
-  heartbeat periods, §5.1), and whether to document how to run them in the
-  README as well as in `GUI_REFERENCE.md`.
-- Whether to merge the Single/Grid/Auto exposure fields into one shared
-  set now (§3.6) or keep three synchronized copies.
+**Settled (2026-11-17):**
+
+- **Layout:** a `nickel_focus/services/` package, with `KTLService`, our
+  exceptions, and `ktl_available()` in `services/base.py`, and one module
+  per service (`nickelpoco.py`, `nscicam.py`) (§3.1).
+- **Importing `ktl`:** the guarded import moves from `pkg/ktl.py` into
+  `services/base.py` (broadened to `ImportError`), and `pkg/ktl.py` is
+  removed; `ktl` is imported when `services.base` loads, with no further
+  deferral (§3.2).
+- **Exceptions:** `KTLUnavailableError` (a `RuntimeError`), `KTLError`,
+  `KTLTimeoutError`, and `KTLReadOnlyError`, all defined in
+  `services/base.py`, with `ktl`'s own exceptions caught and re-raised as
+  these at the service boundary (§3.2, §3.9).
+- **Write timeouts:** deferred. Writes keep today's behavior until what
+  write completion means is confirmed at the telescope (§3.1, §5.1).
+- **Exposure fields:** the Single/Grid/Auto tabs keep three synchronized
+  sets for now; merging them is a separate, later change (§3.6).
+- **Live tests:** the `--ktl-live` option and `ktl_live` marker as
+  proposed (§3.9). How to run them is documented in both the README and
+  `GUI_REFERENCE.md` (§3.9).
+
+**Still open:**
+
+- **The default read timeout** for `KTLService` (§3.1).
+- **The heartbeat timeout** used by the live heartbeat test, and the
+  `Service.heartbeat` periods for `POCHEART`/`DISP0CLK` -- pending their
+  observed broadcast rates at the telescope (§3.4, §5.1).
 
 ## Appendix A. Issues extracted from `KTL_REFERENCE.md` §5
 

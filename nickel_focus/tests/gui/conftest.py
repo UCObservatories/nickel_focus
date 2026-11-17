@@ -38,19 +38,3 @@ def _remove_qt_log_handlers():
     yield
     log.remove_handlers_of_type(QtLogHandler)
 
-
-@pytest.fixture(autouse=True)
-def isolate_qsettings(monkeypatch, tmp_path):
-    """
-    Redirect `MainWindow`'s settings persistence to an isolated, per-test
-    ini file instead of the real application
-    preferences store. Without this, every test that constructs --  and
-    especially every test that closes -- a `MainWindow` would read from
-    and write to the developer's actual saved GUI settings on disk.
-    """
-    from nickel_focus.gui.qt import QtCore
-    from nickel_focus.gui.views.main_window import MainWindow
-    settings_path = str(tmp_path / 'test_settings.ini')
-    monkeypatch.setattr(
-        MainWindow, '_settings',
-        lambda self: QtCore.QSettings(settings_path, QtCore.QSettings.Format.IniFormat))

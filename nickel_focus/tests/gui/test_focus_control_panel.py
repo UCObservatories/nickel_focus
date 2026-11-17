@@ -8,7 +8,7 @@ from nickel_focus.gui.views.focus_control_panel import FocusControlPanel
 def test_tabs_exist_in_the_requested_order(qapp):
     panel = FocusControlPanel()
     titles = [panel.tabs.tabText(i) for i in range(panel.tabs.count())]
-    assert titles == ['Slew', 'Single', 'Grid', 'Auto', 'Replay', 'Log', 'Options', 'Help'], \
+    assert titles == ['Slew', 'Single', 'Grid', 'Auto', 'Replay', 'Log', 'Help'], \
         'tabs should appear in the documented order, with Slew first'
 
 
@@ -179,7 +179,6 @@ def test_each_tab_has_the_requested_buttons(qapp):
     # the acquisition action.
     assert button_texts(panel.replay_tab) == ['Browse…', 'Load']
     assert button_texts(panel.log_tab) == []
-    assert button_texts(panel.options_tab) == []
     assert button_texts(panel.help_tab) == []
 
 
@@ -448,7 +447,7 @@ def test_preferred_height_excluding_help_ignores_the_tallest_page(qapp):
     assert height < panel.help_tab.widget().minimumSizeHint().height() + tab_bar_height, \
         'excluding Help should give a smaller preferred height than including it would'
     other_tabs = (panel.slew_tab, panel.single_tab, panel.grid_tab, panel.auto_tab,
-                  panel.replay_tab, panel.log_tab, panel.options_tab)
+                  panel.replay_tab, panel.log_tab)
     for tab in other_tabs:
         assert height >= tab.widget().minimumSizeHint().height(), \
             'the preferred height should be tall enough for every tab except Help'
@@ -461,43 +460,6 @@ def test_help_tab_has_reminder_text(qapp):
     text = ' '.join(label.text() for label in labels)
     for keyword in ('Slew', 'Single', 'Grid', 'Auto', 'Replay', 'Log'):
         assert keyword in text, f'Help text should mention {keyword}'
-
-
-def test_get_and_set_settings_state_round_trip(qapp):
-    panel = FocusControlPanel()
-    panel.grid_start_spin.setValue(310)
-    panel.grid_exptime_spin.setValue(12.5)
-    panel.auto_maxsteps_spin.setValue(7)
-    panel.replay_datadir_edit.setText('/some/dir')
-    panel.replay_prefix_edit.setText('x')
-    panel.single_speed_combo.setCurrentText('Fast')
-
-    state = panel.get_settings_state()
-
-    fresh = FocusControlPanel()
-    fresh.set_settings_state(state)
-
-    assert fresh.get_settings_state() == state
-
-
-def test_settings_state_excludes_the_single_tab_focus_value(qapp):
-    panel = FocusControlPanel()
-    assert 'single/focus' not in panel.get_settings_state(), \
-        "the Single tab's focus value should track the most recent fit, not a persisted default"
-
-
-def test_set_settings_state_ignores_unknown_and_missing_keys(qapp):
-    panel = FocusControlPanel()
-    original = panel.get_settings_state()
-
-    panel.set_settings_state({'grid/start': 400, 'nonexistent/key': 'whatever'})
-
-    assert panel.grid_start_spin.value() == 400, 'a recognized key should be applied'
-    updated = panel.get_settings_state()
-    for key, value in original.items():
-        if key == 'grid/start':
-            continue
-        assert updated[key] == value, f'{key} should be untouched by an unrelated/partial update'
 
 
 def test_set_exposure_config_sets_every_exposure_tab(qapp):

@@ -2649,3 +2649,39 @@ stand-in keyword objects.
   `ExposureConfig.expbin_options` already does).
 
 Full suite: `264 passed`.
+
+## KTL interface refactor, phase 0: Options tab and settings persistence removed (2026-11-17)
+
+First phase of `claude/ktl_interface_refactor.md` (§3.8). The Options tab's
+only control was "Remember settings between sessions", which saw little use
+in testing, and the refactor makes most of what it saved redundant (the
+exposure fields will follow the camera). Persistence was opt-in through
+that checkbox, so with the tab gone, all of it went:
+
+- `FocusControlPanel`: the Options tab (`options_tab`, `_build_options_tab`,
+  `remember_settings_checkbox`), `get_settings_state`/`set_settings_state`/
+  `_settings_fields`, and `options_tab` in
+  `preferred_height_excluding_help`. Docstrings that listed the tab were
+  updated. In the Help text, the Options entry was removed and its
+  paragraph break moved onto the Log entry; nothing else in the Help text
+  referred to remembered settings.
+- `ImagePanel`: `get_settings_state`/`set_settings_state` (stretch).
+- `MainWindow`: `_load_settings`, `_save_settings`, `_settings`,
+  `_SETTINGS_ORG`/`_SETTINGS_APP`, and the `closeEvent` override (it existed
+  only to save settings). Its docstring's explanation of overriding a Qt
+  event handler, as distinct from a signal connection, moved to
+  `showEvent`, the remaining event-handler override.
+- Controller: removed the note that the camera's exposure settings are
+  applied after saved settings are restored.
+- Tests: removed the `isolate_qsettings` autouse fixture and the nine
+  settings tests (`test_main.py` 4, `test_focus_control_panel.py` 3,
+  `test_image_panel.py` 2), and `options_tab` from the tab-order,
+  button-set, and tab-height tests.
+- Docs: `GUI_REFERENCE.md`; and the user manual, `docs/html/focusGUI.html`,
+  whose Options paragraph was removed (it wasn't listed in the plan). The
+  manual's screenshots (`docs/images/focusGUI_*.png`) still show the old
+  tab bar and need retaking.
+
+Observers' existing settings files (if they ever opted in) are left in
+place and are no longer read. Full suite: `255 passed` (264 minus the nine
+removed settings tests).

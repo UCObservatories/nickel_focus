@@ -1,8 +1,8 @@
 """
 Tabbed telescope/focus-sequence configuration and controls.
 
-One tab per action (Slew, Single, Grid, Auto, Replay), plus Log, Options, and
-Help.  This view only exposes configuration and emits signals for requested
+One tab per action (Slew, Single, Grid, Auto, Replay), plus Log and Help.
+This view only exposes configuration and emits signals for requested
 actions; it never constructs a :class:`~nickel_focus.focus.FocusSequence` or
 talks to :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` itself --
 that's the Controller's job.
@@ -206,8 +206,7 @@ class FocusControlPanel(QtWidgets.QWidget):
     value(s) that define the sequence on the right -- with its own acquisition
     button(s) below both, spanning the full tab width rather than belonging to
     either sub-panel: Single has "Acquire"; Grid and Auto have "Acquire" and
-    "Interrupt"; Replay has "Load". Log, Options, and Help have no action
-    buttons.
+    "Interrupt"; Replay has "Load". Log and Help have no action buttons.
     Because a :class:`PySide6.QtWidgets.QTabWidget` only lets the user interact
     with the currently visible page, each button unambiguously means "do this
     tab's action" -- there's no need to track which tab is active to decide what
@@ -246,13 +245,6 @@ class FocusControlPanel(QtWidgets.QWidget):
     via
     :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.update_step`/
     :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_status`.
-
-    The Options tab holds app-wide preferences -- currently just "Remember
-    settings between sessions," which opts into (and, when unchecked,
-    immediately erases) the settings persistence handled by
-    :class:`~nickel_focus.gui.views.main_window.MainWindow`. It's meant to grow
-    as more such preferences become useful, rather than being specific to any
-    one sequence action the way the other tabs are.
 
     Attributes
     ----------
@@ -304,7 +296,6 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.auto_tab = self._build_auto_tab()
         self.replay_tab = self._build_replay_tab()
         self.log_tab = self._build_log_tab()
-        self.options_tab = self._build_options_tab()
         self.help_tab = self._build_help_tab()
 
         # QTabWidget shows exactly one of its pages (each an ordinary
@@ -321,7 +312,6 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.tabs.addTab(self.auto_tab, 'Auto')
         self.tabs.addTab(self.replay_tab, 'Replay')
         self.tabs.addTab(self.log_tab, 'Log')
-        self.tabs.addTab(self.options_tab, 'Options')
         self.tabs.addTab(self.help_tab, 'Help')
 
         # Every input widget across the five actionable tabs, locked
@@ -684,21 +674,6 @@ class FocusControlPanel(QtWidgets.QWidget):
         layout.addWidget(self.log_widget)
         return _tab_widget(layout)
 
-    def _build_options_tab(self):
-        """
-        Build the Options tab: currently just the "remember settings" checkbox.
-        """
-        # Meant to grow as more app-wide (as opposed to per-sequence)
-        # preferences become useful -- currently just the one checkbox.
-        self.remember_settings_checkbox = QtWidgets.QCheckBox(
-            'Remember settings between sessions'
-        )
-
-        layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(self.remember_settings_checkbox)
-        layout.addStretch(1)
-        return _tab_widget(layout)
-
     def _build_help_tab(self):
         """
         Build the Help tab: a single block of short, rich-text usage reminders.
@@ -715,8 +690,7 @@ class FocusControlPanel(QtWidgets.QWidget):
             '<b>Grid</b> — step through an evenly spaced focus grid.<br>'
             '<b>Auto</b> — adaptively search for the best focus.<br>'
             '<b>Replay</b> — reprocess an existing set of exposures from disk.<br>'
-            '<b>Log</b> — live status and history.<br>'
-            '<b>Options</b> — app-wide preferences.<br><br>'
+            '<b>Log</b> — live status and history.<br><br>'
             '<b>Source selection</b> — the brightest star is measured '
             "automatically by default (see the Log for its coordinates); "
             "hover over a different star in the image and press 'm' to "
@@ -760,7 +734,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         that scrolling) stays put either way.  Help is excluded because it's a
         large block of static reference text that's taller than every other tab
         combined with the tab bar; sizing the *initial* height around it too
-        would waste space under the seven shorter tabs every time the window
+        would waste space under the six shorter tabs every time the window
         opens, for the sake of a tab that's fine to need a scrollbar
         immediately.
 
@@ -782,7 +756,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         """
         other_tabs = [
             self.slew_tab, self.single_tab, self.grid_tab, self.auto_tab, self.replay_tab,
-            self.log_tab, self.options_tab
+            self.log_tab
         ]
         tallest_other = max(tab.widget().minimumSizeHint().height() for tab in other_tabs)
         tab_bar_height = self.tabs.tabBar().sizeHint().height()
@@ -797,7 +771,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         """
         The sequence type for the currently active tab, as ``'grid'``,
         ``'automated'``, or ``'archive'`` -- or ``None`` for any other tab
-        (Slew, Single, Log, Options, Help; none of which can have triggered
+        (Slew, Single, Log, Help; none of which can have triggered
         :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.startRequested`
         in the first place).
         """
@@ -817,7 +791,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         ``datadir``, an Auto config has ``maxsteps`` instead of ``nstep`` --
         matching the CLI arguments of
         :class:`~nickel_focus.scripts.focus.NickelFocus`. Empty for any other
-        tab (Slew, Single, Log, Options, Help).
+        tab (Slew, Single, Log, Help).
         """
         tab = self.tabs.currentWidget()
         if tab is self.grid_tab:
@@ -911,81 +885,6 @@ class FocusControlPanel(QtWidgets.QWidget):
             if 'binning' in config and 'binning' not in unmatched:
                 binning_combo.setCurrentText(config['binning'])
         return unmatched
-
-    def get_settings_state(self):
-        """
-        Return every persistable field's current value as a flat :obj:`dict`
-        keyed by ``'<tab>/<field>'`` (e.g.  ``'grid/start'``), suitable for a
-        settings store like :class:`PySide6.QtCore.QSettings`. The Single tab's
-        focus value is deliberately excluded -- it tracks the most recent fit
-        (see
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_best_focus`),
-        not a persisted default.
-        """
-        state = {}
-        for key, widget in self._settings_fields().items():
-            if isinstance(widget, QtWidgets.QComboBox):
-                state[key] = widget.currentText()
-            elif isinstance(widget, QtWidgets.QLineEdit):
-                state[key] = widget.text()
-            else:
-                state[key] = widget.value()
-        return state
-
-    def set_settings_state(self, state):
-        """
-        Apply a settings :obj:`dict` from
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.get_settings_state`
-        (or any subset of it -- e.g.  an older saved state missing a field added
-        later). Keys not recognized, or missing entirely, are left at their
-        current value.
-        """
-        for key, widget in self._settings_fields().items():
-            if key not in state:
-                continue
-            value = state[key]
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.setCurrentText(value)
-            elif isinstance(widget, QtWidgets.QLineEdit):
-                widget.setText(value)
-            else:
-                widget.setValue(value)
-
-    def _settings_fields(self):
-        """
-        Map of persistable setting key to the widget holding it.  The single
-        source of truth for both
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.get_settings_state`
-        and
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.set_settings_state`,
-        so the two can't drift apart into covering different fields.
-        """
-        return {
-            'slew/file': self.slew_file_edit,
-            'slew/search': self.slew_search_edit,
-            'single/exptime': self.single_exptime_spin,
-            'single/speed': self.single_speed_combo,
-            'single/binning': self.single_binning_combo,
-            'grid/start': self.grid_start_spin,
-            'grid/step': self.grid_step_spin,
-            'grid/nstep': self.grid_nstep_spin,
-            'grid/exptime': self.grid_exptime_spin,
-            'grid/speed': self.grid_speed_combo,
-            'grid/binning': self.grid_binning_combo,
-            'auto/start': self.auto_start_spin,
-            'auto/step': self.auto_step_spin,
-            'auto/maxsteps': self.auto_maxsteps_spin,
-            'auto/exptime': self.auto_exptime_spin,
-            'auto/speed': self.auto_speed_combo,
-            'auto/binning': self.auto_binning_combo,
-            'replay/datadir': self.replay_datadir_edit,
-            'replay/prefix': self.replay_prefix_edit,
-            'replay/suffix': self.replay_suffix_edit,
-            'replay/obsnum': self.replay_obsnum_spin,
-            'replay/start': self.replay_start_spin,
-            'replay/step': self.replay_step_spin,
-            'replay/nstep': self.replay_nstep_spin,
-        }
 
     def set_hardware_tabs_enabled(self, enabled):
         """
