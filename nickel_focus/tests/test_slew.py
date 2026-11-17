@@ -3,6 +3,8 @@ Tests for :mod:`slew`: :class:`slew.NickelTelescopePointing`, run on the real
 service class over the fake ``ktl`` (see ``fake_ktl.py``), and
 :func:`slew.find_nearest_target`.
 """
+import logging
+
 from astropy.coordinates import Angle, SkyCoord
 import pytest
 
@@ -113,13 +115,31 @@ class TestNickelTelescopePointing:
         assert current.ra.hour == pytest.approx(5.5), 'the current RA should be read in hours'
         assert current.dec.deg == pytest.approx(30.25), 'the current Dec should be read in degrees'
 
-    def test_slew_writes_decimal_hours_and_degrees(self, fake_telescope):
+    def test_slew_writes_binary_radians(self, fake_telescope):
         telescope = slew.NickelTelescopePointing(NickelPoco())
 
-        telescope.slew_to(Angle('05:30:00', unit='hourangle'), Angle('+20:15:00', unit='deg'))
+        telescope.slew_to(Angle('05:30:00', unit='hourangle'), Angle('-20:15:00', unit='deg'))
 
-        assert fake_telescope.slew_calls == [(pytest.approx(5.5), pytest.approx(20.25))], \
-            'the target should be written in decimal hours and degrees'
+        rad = fake_telescope.keyword('nickelpoco', 'POCORAD')
+        decd = fake_telescope.keyword('nickelpoco', 'POCODECD')
+        assert rad.writes == [pytest.approx(Angle(5.5, unit='hourangle').radian)], \
+            'the target RA should be written in radians'
+        assert decd.writes == [pytest.approx(Angle(-20.25, unit='deg').radian)], \
+            'the target Dec should be written in radians, keeping its sign'
+        assert rad.binary_writes == [True] and decd.binary_writes == [True], \
+            'the target should be written as binary values, not ascii'
+        assert fake_telescope.slew_calls == [(pytest.approx(5.5), pytest.approx(-20.25))], \
+            'the simulated telescope should receive the requested target'
+
+    def test_slew_logs_the_target_in_sexagesimal(self, fake_telescope, caplog):
+        telescope = slew.NickelTelescopePointing(NickelPoco())
+
+        with caplog.at_level(logging.INFO, logger='nickel_focus'):
+            telescope.slew_to(5.5, -0.5)
+
+        assert any('Moving to RA=05:30:00.00, Dec=-00:30:00.00' in r.getMessage()
+                   for r in caplog.records), \
+            'the target should be logged in sexagesimal, with the sign of a small negative Dec'
         assert fake_telescope.ra == pytest.approx(5.5), 'the simulated telescope should arrive'
 
     @pytest.mark.parametrize('flag,message', [

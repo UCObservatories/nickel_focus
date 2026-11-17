@@ -79,15 +79,14 @@ class NickelTelescopePointing:
 
         # TODO: Need to add checks that the request is within the pointing
         # limits.
-        log.info(f'Moving to RA={ra}, Dec={dec}')
         target_coo = SkyCoord(ra=ra, dec=dec, unit=('hourangle', 'deg'))
-        # NOTE: Type is double, should be radians but we don't know what happens
-        # in the ktl python package
-        #   - try using modify with sexigesimal coordinates
-
-        self.poco.set_pointing_demand(
-            target_coo.ra.to('hourangle').value, target_coo.dec.to('deg').value
+        ra_text = target_coo.ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
+        dec_text = target_coo.dec.to_string(
+            unit='deg', sep=':', pad=True, alwayssign=True, precision=2
         )
+        log.info(f'Moving to RA={ra_text}, Dec={dec_text}')
+        # Written in binary radians (see NickelPoco.set_pointing_demand).
+        self.poco.set_pointing_demand(target_coo.ra, target_coo.dec)
 
         # TODO: Need a better way to determine if the move fails!  Timeout
         # currently set at 5 min.

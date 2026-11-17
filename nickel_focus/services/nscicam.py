@@ -115,8 +115,10 @@ class ExposureConfig:
         The camera service.
     """
     # Map user-facing speed names (e.g., from the GUI or CLI) to the AMPCONF
-    # values accepted by the camera.  Names not in this map are passed through
-    # unchanged and validated against AMPCONFLIST.
+    # values accepted by the camera -- the same Fast/Slow mapping the
+    # data-acquisition GUI offers observers.  Names not in this map are passed
+    # through unchanged and validated against AMPCONFLIST (at the telescope:
+    # 5.0MHz, 3.0MHz, 1.0MHz, 0.05MHz).
     speed_aliases = {
         'Fast': '1.0MHz',
         'Slow': '0.05MHz',

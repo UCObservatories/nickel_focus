@@ -89,6 +89,8 @@ class FakeKeyword:
         :class:`TimeoutException` and ``waitFor`` returns False.
     reads, writes : :obj:`list`
         The ``timeout`` of each read, and the value of each write.
+    binary_writes : :obj:`list`
+        For each write, whether it was binary (``binary=True``).
     monitored : :obj:`bool`
         Whether ``monitor()`` has been called.
 
@@ -109,6 +111,7 @@ class FakeKeyword:
         self.on_write = on_write
         self.reads = []
         self.writes = []
+        self.binary_writes = []
         self.monitored = False
         self._callbacks = []
         self.callback_errors = []
@@ -152,6 +155,7 @@ class FakeKeyword:
     def write(self, value, wait=True, binary=False, timeout=None):
         with self._ktl.lock:
             self.writes.append(value)
+            self.binary_writes.append(binary)
             self._ktl.writes.append((self.service, self.name, value))
             self.pending = []
             self.value = value
@@ -266,7 +270,9 @@ class Simulator:
     ktl : :class:`FakeKTL`
         The fake module, to install in place of :mod:`ktl`.
     slew_calls : :obj:`list`
-        The ``(POCORAD, POCODECD)`` values of each commanded slew.
+        Each commanded slew, as ``(ra, dec)`` in hours and degrees, converted
+        from the binary radians written to ``POCORAD``/``POCODECD``.  A
+        target written any other way (e.g. as ascii) is an error.
     reaches_target : :obj:`bool`
         Whether a commanded slew arrives (``POCOT`` goes to ``0``) or fails
         (``-1``).
@@ -300,7 +306,7 @@ class Simulator:
         define(cam, 'EXPRESULT', '')
         define(cam, 'EXPOSURE', 5.0)
         define(cam, 'AMPCONF', '0.05MHz')
-        define(cam, 'AMPCONFLIST', '1.0MHz,0.05MHz')
+        define(cam, 'AMPCONFLIST', '5.0MHz,3.0MHz,1.0MHz,0.05MHz')  # as at the telescope
         define(cam, 'BINNING', '2,2')
         define(cam, 'RECORD', 'Yes')
         define(cam, 'OBSNUM', 1)
@@ -378,8 +384,12 @@ class Simulator:
 
     def _on_slew(self, dec):
         """``POCODECD`` written (after ``POCORAD``): the telescope slews."""
-        ra = float(self.keyword('nickelpoco', 'POCORAD').value)
-        dec = float(dec)
+        rad = self.keyword('nickelpoco', 'POCORAD')
+        decd = self.keyword('nickelpoco', 'POCODECD')
+        if not (rad.binary_writes[-1:] == [True] and decd.binary_writes[-1:] == [True]):
+            raise AssertionError('The slew target must be written as binary radians.')
+        ra = Angle(float(rad.value), unit='rad').hour
+        dec = Angle(float(dec), unit='rad').deg
         self.slew_calls.append((ra, dec))
         if self.reaches_target:
             self.ra, self.dec = ra, dec

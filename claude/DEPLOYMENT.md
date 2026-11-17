@@ -19,9 +19,9 @@ Makefile tree.
 - **The Makefile tree mirrors the directory tree**, and this is done
   entirely by hand via explicit `DIRS =` directives at each level — there's
   no automatic recursive-copy behavior. `nickel_focus/Makefile` sets
-  `DIRS = config data gui pkg scripts tests`; `gui/Makefile` further sets
+  `DIRS = data gui pkg scripts services sin tests`; `gui/Makefile` further sets
   `DIRS = model views`; `tests/Makefile` sets `DIRS = gui`.
-- **Data-like files (`.toml` configs, `point_focus.txt`) are declared via
+- **Data-like files (`point_focus.txt`) are declared via
   `LIBFILES`/`LIBSUB`, not `DATAFILES`/`DATASUB`.** Brad's `DATA*`
   directives install to a separate directory tree from the code; the
   preference for now is to keep these files alongside the code they belong
@@ -36,9 +36,8 @@ Makefile tree.
   a wildcard** (`LIBFILES = $(wildcard *.py)`) instead of an explicit
   enumeration, mirroring the existing `SINFILES = $(wildcard *.sin)`
   pattern from Brad's example. This applies to `nickel_focus/Makefile`
-  itself and every subdirectory Makefile except `config/` (explicit list,
-  since only two of its files are meant to ship) and `data/` (explicit,
-  since two of its three files are deliberately excluded).
+  itself and every subdirectory Makefile except `data/` (explicit, since
+  two of its three files are deliberately excluded).
 - **`tests/` and `tests/gui/` are included** in the mirrored tree (their
   own `LIBFILES = $(wildcard *.py)`), even though the test suite isn't
   needed at runtime — kept for consistency/completeness of the mirrored
@@ -69,14 +68,14 @@ Makefile tree.
 | Directory | Role | Installs |
 |---|---|---|
 | `/` (repo root) | router | `DIRS = nickel_focus` |
-| `nickel_focus/` | router + leaf | `LIBFILES = $(wildcard *.py)` → `LIBSUB = nickel_focus/`; `DIRS = config data gui pkg scripts sin tests` |
-| `nickel_focus/config/` | leaf | `LIBFILES = nickucam.toml nscicam.toml` → `nickel_focus/config/` |
+| `nickel_focus/` | router + leaf | `LIBFILES = $(wildcard *.py)` → `LIBSUB = nickel_focus/`; `DIRS = data gui pkg scripts services sin tests` |
 | `nickel_focus/data/` | leaf | `LIBFILES = point_focus.txt` → `nickel_focus/data/` |
 | `nickel_focus/gui/` | router + leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/gui/`; `DIRS = model views` |
 | `nickel_focus/gui/model/` | leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/gui/model/` |
 | `nickel_focus/gui/views/` | leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/gui/views/` |
 | `nickel_focus/pkg/` | leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/pkg/` (includes `version.py`, see below) |
 | `nickel_focus/scripts/` | leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/scripts/` |
+| `nickel_focus/services/` | leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/services/` |
 | `nickel_focus/sin/` | leaf | `SINFILES = $(wildcard *.sin)`, `FILES`/`BINFILES` derived from it → `BINSUB = nickel` |
 | `nickel_focus/tests/` | router + leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/tests/`; `DIRS = gui` |
 | `nickel_focus/tests/gui/` | leaf | `LIBFILES = $(wildcard *.py)` → `nickel_focus/tests/gui/` |

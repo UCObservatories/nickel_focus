@@ -2869,3 +2869,54 @@ telescope (§5.2), and possible later improvements (§5.3). Issues the
 refactor resolved were dropped: first-use `waitFor` false negatives, the
 GUI-thread poll, stale data after a dispatcher restart, and the `POCSTOP`
 comment (now in `NickelPoco`'s docstring).
+
+## Slew targets written as binary radians (2026-11-17)
+
+Resolves the first "possible defect" in the refactor plan's §5.1: slew
+targets were written to `POCORAD`/`POCODECD` as ascii decimal hours and
+degrees, although those keywords' ascii form is sexagesimal and how the
+service parses a decimal ascii value is unknown. Coordinates written to
+keywords are now always binary radians -- the keywords' native unit --
+while everything displayed or entered stays sexagesimal.
+
+- `NickelPoco.set_pointing_demand(ra, dec)` takes angles (e.g.
+  `SkyCoord.ra`/`.dec`) and writes `Angle(...).radian` with `binary=True`.
+- `NickelTelescopePointing.slew_to` passes the target's angles straight
+  through, and logs the target in sexagesimal (it used to log whatever it
+  was given, e.g. an `Angle`'s default text).
+- Fake `ktl`: keywords record whether each write was binary
+  (`binary_writes`); the simulated telescope rejects a slew target that
+  isn't binary, and reports `slew_calls` in hours and degrees, converted
+  from radians. New tests check the written radians (including a negative
+  Dec) and the sexagesimal log message.
+- Docs: `KTL_REFERENCE.md` (§3.2, §4) and the plan (§5.1, item removed).
+
+Reading positions (`POCORAA`/`POCODECA`) still uses their ascii form; that
+is §5.1's item on the Dec sign. Full suite: `327 passed, 8 skipped`.
+
+## Read-speed names confirmed (2026-11-17)
+
+`AMPCONFLIST` at the telescope is `5.0MHz,3.0MHz,1.0MHz,0.05MHz` (`gshow -s
+nscicam AMPCONFLIST`), so the `Fast`/`Slow` aliases (`1.0MHz`/`0.05MHz`) are
+valid; the data-acquisition GUI likewise limits observers to Fast or Slow,
+with the same mapping. Removed the "read-speed names are unconfirmed" item
+from the refactor plan's §5.1; recorded the values in `KTL_REFERENCE.md`
+§4.1 and in a comment on `ExposureConfig.speed_aliases`; the fake `ktl`'s
+`AMPCONFLIST` now matches. A camera set to `5.0MHz` or `3.0MHz` from
+elsewhere shows up in the GUI's Speed drop-down as that raw value (added to
+the options, with a warning), as for any value without an alias.
+
+Coordinates are still read in their ascii form, pending a check of the Dec
+sign at the telescope (plan §5.1).
+
+## `config/` removed (2026-11-17)
+
+The user deleted `nickel_focus/config/` (`nscicam.toml`, `nickucam.toml`,
+and its Makefile): it was meant to let the GUI work with cameras served by
+different KTL services, but the UCAM camera has been decommissioned, and
+nothing in the package read those files. Removed `config` from
+`nickel_focus/Makefile`'s `DIRS`, and from `claude/DEPLOYMENT.md`'s
+description of the Makefile tree -- which also gained the `services/`
+directory (added in refactor phase 1) and the `sin` entry missing from one
+of its `DIRS` lists. `DEPLOYMENT_PLAN.md` and `PROJECT.md` still mention the
+`.toml` files and `nickucam` as part of their historical record.

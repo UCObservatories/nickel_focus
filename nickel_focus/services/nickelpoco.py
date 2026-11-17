@@ -2,7 +2,7 @@
 The Nickel telescope's pointing and control service, ``nickelpoco``: pointing,
 tracking, and the secondary mirror (focus).
 """
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import Angle, SkyCoord
 
 from nickel_focus.services.base import KTLService
 
@@ -22,7 +22,9 @@ class NickelPoco(KTLService):
       there (``-1``).
     - ``POCORAA``/``POCODECA``: the actual RA (hours) and Dec (degrees),
       sexagesimal in ascii.
-    - ``POCORAD``/``POCODECD``: the desired RA and Dec.
+    - ``POCORAD``/``POCODECD``: the desired RA and Dec.  Always written as
+      binary values, in radians -- the keywords' native unit -- so that how
+      the service would parse an ascii value never matters.
     - ``POCSECPA``/``POCSECPD``: the actual and desired secondary-mirror
       (focus) position.
     - ``POCSECLK``: the secondary-mirror lock (``on``/``off``).
@@ -100,13 +102,14 @@ class NickelPoco(KTLService):
 
     def set_pointing_demand(self, ra, dec):
         """
-        Set the desired RA (``POCORAD``) and then Dec (``POCODECD``).
+        Set the desired RA (``POCORAD``) and then Dec (``POCODECD``), written as
+        binary values in radians.
 
         Parameters
         ----------
-        ra, dec
-            The values to write, as given (e.g. decimal hours and degrees,
-            written as ascii).
+        ra, dec : :class:`~astropy.coordinates.Angle` or :class:`~astropy.units.Quantity`
+            The target's right ascension and declination, in any angular unit
+            (e.g. ``SkyCoord.ra``/``.dec``).
         """
-        self.write('POCORAD', ra)
-        self.write('POCODECD', dec)
+        self.write('POCORAD', Angle(ra).radian, binary=True)
+        self.write('POCODECD', Angle(dec).radian, binary=True)

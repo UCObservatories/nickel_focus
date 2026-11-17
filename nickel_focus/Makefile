@@ -7,6 +7,6 @@ include $(LROOT)/etc/Make.defs
 LIBFILES = $(wildcard *.py)
 LIBSUB = nickel_focus/
 
-DIRS = config data gui pkg scripts services sin tests
+DIRS = data gui pkg scripts services sin tests
 
 include $(LROOT)/etc/Make.rules

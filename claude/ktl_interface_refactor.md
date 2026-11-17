@@ -612,17 +612,7 @@ run there.
 
 ### 5.1 Possible defects
 
-1. **Slew targets are written as ascii decimal numbers to sexagesimal
-   keywords.** `NickelTelescopePointing.slew_to` passes
-   `ra.to('hourangle').value` and `dec.to('deg').value` (e.g. `5.5`) to
-   `NickelPoco.set_pointing_demand`, which writes them to `POCORAD`/
-   `POCODECD` as ascii. Those keywords' ascii form is sexagesimal
-   (`05:30:00.00`), and how the service parses a decimal ascii value is a
-   C-layer question (REF §3.2); if it misreads it, the telescope slews to
-   the wrong place. *To confirm:* what `POCORAD`/`POCODECD` do with `5.5`.
-   *Option:* write the binary value in radians (`binary=True`), the
-   keywords' native unit (REF §4.1).
-2. **`EXPRESULT` isn't a reliable file path.** `ExposurePath.previous`
+1. **`EXPRESULT` isn't a reliable file path.** `ExposurePath.previous`
    (used by `FocusSequence.take_exposure` for every exposure) is
    `Path(EXPRESULT)`. On an error, `EXPRESULT` holds the filename *plus a
    message*, which would silently become a bogus path; on success the help
@@ -634,7 +624,7 @@ run there.
    complete, and the keyword the camera's help says applications should
    track (REF §4.1) -- e.g. wait for it to update after the exposure, and
    treat `EXPSTATE == Error` as a failure.
-3. **The current Dec is parsed from ascii.** `NickelPoco.pointing()` (used
+2. **The current Dec is parsed from ascii.** `NickelPoco.pointing()` (used
    by "Find nearest ...") reads `POCODECA`'s ascii text, and the
    Controller's position display parses the ascii values its subscription
    delivers. The format has no explicit sign field, so whether a Dec
@@ -643,7 +633,7 @@ run there.
    *Option:* use the binary values (radians) for `POCORAA`/`POCODECA`;
    for the display, `KTLService.subscribe` would need a way to deliver
    binary values.
-4. **`EXPSTATE == Start` may be too brief to see.** `Exposure.expose` writes
+3. **`EXPSTATE == Start` may be too brief to see.** `Exposure.expose` writes
    `EXPOSE = Go`, then waits up to 30 s for `EXPSTATE == Start` before
    waiting for `Ready`. `Start` is probably short; if the service doesn't
    broadcast it, or the exposure moves on before the broadcast is
@@ -651,23 +641,16 @@ run there.
    even though it ran (REF §3.4). *To confirm:* whether `Start` is reliably
    broadcast. *Option:* wait for `EXPSTATE != Ready` (any of `Start`/
    `Exposing`/`Readout`) instead, then for `Ready`.
-5. **The Exp indicator shows `Error` as yellow.** The Controller's
+4. **The Exp indicator shows `Error` as yellow.** The Controller's
    `_expstate_state` maps any `EXPSTATE` other than `Ready` to yellow,
    including `Error` (and `Unknown`). *Option:* show `Error` (and perhaps
    `Unknown`) red.
-6. **Read-speed names are unconfirmed.** `ExposureConfig.speed_aliases`
-   maps `Fast`/`Slow` to `1.0MHz`/`0.05MHz`, but the help doesn't list
-   `AMPCONFLIST`'s values. If they're wrong, the camera's actual speed is
-   still shown (an unrecognized value is added to the drop-down), but
-   choosing `Fast` or `Slow` fails `configure`'s check against
-   `AMPCONFLIST`, and the GUI reports the error and reverts the field.
-   *To confirm:* `AMPCONFLIST`'s values.
-7. **Indicators go stale, not red, if a service stops broadcasting
+5. **Indicators go stale, not red, if a service stops broadcasting
    entirely** (as opposed to restarting, which the heartbeat handles; §4.3).
    They just stop changing. `ktl`'s heartbeat state would tell, but only by
    polling `Keyword.isAlive()` (REF §3.6); `KTL_SUGGESTIONS.md` §5 proposes
    a notification. Whether it matters in practice is unknown.
-8. **KTL's own warnings are hidden.** KTL logs at `ERROR` level by default
+6. **KTL's own warnings are hidden.** KTL logs at `ERROR` level by default
    (REF §3.7), so its warnings -- e.g. a timeout it ignores -- never appear.
    *Option:* raise the level, or route KTL's log into `nickel_focus.log`
    with `ktl.logger(...)` (which accepts any object with a `.write()`

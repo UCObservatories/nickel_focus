@@ -173,7 +173,8 @@ write(value, wait=True, binary=False, timeout=None)
   binary form -- notably the coordinate keywords, displayed sexagesimal but
   stored in radians (§4.1) -- **how the service parses an ascii write (e.g.
   whether `'5.5'` means 5.5 hours or something else) is [C-layer]**.
-  `binary=True` sends the native value (radians) and avoids the question.
+  `binary=True` sends the native value (radians) and avoids the question;
+  that's how we write the slew target (`NickelPoco.set_pointing_demand`).
 - **[C-layer]** What "complete" means is defined by each service's
   dispatcher -- e.g. whether a `POCSECPD` write completes when the value
   is accepted or when the secondary has finished moving. Our code doesn't
@@ -363,7 +364,7 @@ and one `NSciCam` and share them.
 
 | Class | Keywords | Methods | Notes |
 | --- | --- | --- | --- |
-| `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`) | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
+| `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`; the target as binary radians) | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
 | `services.NSciCam` | `EXPSTATE`, `EXPOSE`, `DISP0CLK`; plus its helpers' keywords | `exposure_state()`, `exposure_state_is(state, timeout)` (`check`), `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE`, `EXPOSURE`, `AMPCONF`, `BINNING`; heartbeat `DISP0CLK`. |
 | `services.nscicam.ExposurePath` (`NSciCam.path`) | `RECORD`, `EXPRESULT`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous`, `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
 | `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `configure`, `exptime`, `current_settings`; `setting_value(key, ascii)` (class method) converts a broadcast value | Reads `AMPCONFLIST` at construction. `keywords` maps each setting to its keyword. |
@@ -373,7 +374,7 @@ and one `NSciCam` and share them.
 | `focus.Focus` | `NickelPoco` | Each check goes through `require` (false → `ValueError`, no reply → `KTLTimeoutError`). `set_to` checks `movement_allowed(0.5)`, unlocks (`POCSECLK` → `off`), writes `POCSECPD`, then `secondary_locked(30)`. |
 | `focus.FocusSequence.set_focus` | `NSciCam` | `exposure_state_is('Ready', 0.5)` before every focus move a sequence makes, then `Focus.set_to`. |
 | `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, writes `Go`, then waits for `Start` (30 s) and `Ready` (exposure time + 90 s). |
-| `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target (ascii decimal hours/degrees), then `on_target(300)`. |
+| `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target as binary radians, then `on_target(300)`. Logs the target in sexagesimal. |
 | GUI `Controller` (subscriptions) | both | Status indicators and position display: `subscribe`s to `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`, `EXPSTATE`; values reach the GUI thread through a queued Qt signal (`gui/ktl_bridge.py`). No polling. |
 | GUI `Controller` (exposure fields) | `NSciCam` | `subscribe`s to `EXPOSURE`, `AMPCONF`, `BINNING`, so the Single/Grid/Auto fields follow the camera; a committed edit is written at once with `cfg.configure(...)`, on the GUI thread (no timeout). |
 
@@ -390,8 +391,8 @@ object (§2.1).
 | `nickelpoco.POCOT` | `slew.NickelTelescopePointing`, Controller | `waitFor('== 0')` before and after slewing; subscribed to for the On Target indicator. |
 | `nickelpoco.POCORAA` | `slew.NickelTelescopePointing`, Controller | Read for the current RA (`NickelPoco.pointing()`); subscribed to for the Slew tab's position display. |
 | `nickelpoco.POCODECA` | `slew.NickelTelescopePointing`, Controller | Read for the current Dec, likewise; subscribed to likewise. |
-| `nickelpoco.POCORAD` | `slew.NickelTelescopePointing` | Written with the target RA. |
-| `nickelpoco.POCODECD` | `slew.NickelTelescopePointing` | Written with the target Dec. |
+| `nickelpoco.POCORAD` | `slew.NickelTelescopePointing` | Written with the target RA, as binary radians. |
+| `nickelpoco.POCODECD` | `slew.NickelTelescopePointing` | Written with the target Dec, as binary radians. |
 | `nickelpoco.POCSECPA` | `focus.Focus`, Controller | Read for the current focus; subscribed to for the Focus indicator's text. |
 | `nickelpoco.POCSECPD` | `focus.Focus` | Read to skip a no-op move; written with the requested focus. |
 | `nickelpoco.POCSECLK` | `focus.Focus`, Controller | Written `off` to unlock; `waitFor('== on')` for the move to finish; subscribed to for the Focus indicator's color. |
@@ -439,8 +440,8 @@ listed as `index name`; the name is the `ascii` value and the index the
 | `RECORDDIR`, `SCRATCHDIR` | string | | R/W | Directories for recorded/scratch files. |
 | `FITSPREFIX`, `FITSSUFFIX` | string | | R/W | Filename prefix/suffix. Separate `FITSPREFIX` values are kept for `RECORD` = No/Yes. |
 | `EXPOSURE` | double | `%.3f` s, range 0 .. ∞ | R/W | The camera may increase the requested time slightly to a valid value. |
-| `AMPCONF` | string | | R/W | Amplifier and read speed; valid values come from `AMPCONFLIST`. The help doesn't list them, so our `Fast`/`Slow` aliases (`1.0MHz`/`0.05MHz`) are unconfirmed. |
-| `AMPCONFLIST` | string | comma-separated | R | Valid `AMPCONF` values. |
+| `AMPCONF` | string | | R/W | Amplifier and read speed; valid values come from `AMPCONFLIST`. Our `Fast`/`Slow` aliases (`1.0MHz`/`0.05MHz`) are both valid, and match the choices the data-acquisition GUI offers observers. |
+| `AMPCONFLIST` | string | comma-separated | R | Valid `AMPCONF` values. Not in the help; at the telescope (`gshow`, 2026-11-17): `5.0MHz,3.0MHz,1.0MHz,0.05MHz`. |
 | `BINNING` | enum | `0 1,1`, `1 2,2`, `2 4,4` | R/W | Matches `ExposureConfig.expbin_options` and the GUI's binning options. |
 
 Not used by us, but relevant: `nscicam.FITSFILE` (string, R) -- "Full path
@@ -458,4 +459,5 @@ dispatcher has finished supplementing the FITS header; the help says it is
 | `4a21d56` | 2026-11-17 | §1, §3.1, §3.2, §4 updated for the `services/` layer: the only `ktl` import (now catching any `ImportError`), 1 s read timeouts, timed priming reads, and the per-class usage tables. |
 | `6227274` | 2026-11-17 | §3.4, §3.6, §4: keywords monitored at construction, heartbeats (`POCHEART`, `DISP0CLK`, provisional 30 s), `check`/`require`/`heartbeat_alive`. |
 | `a37e42c` | 2026-11-17 | §3.1, §3.3, §4: callbacks (clones, delivery after reads), `KTLService.subscribe`, and the GUI's subscriptions replacing its 1 Hz poll; §3.6: heartbeat state and `isAlive()`. |
-| *pending* | 2026-11-17 | §4: the exposure fields' subscriptions and writes; `ExposureConfig.setting_value`/`keywords`. |
+| `50b703f` | 2026-11-17 | §4: the exposure fields' subscriptions and writes; `ExposureConfig.setting_value`/`keywords`. |
+| *pending* | 2026-11-17 | §3.2, §4: the slew target is written as binary radians; §4.1: `AMPCONFLIST`'s values confirmed at the telescope. |
