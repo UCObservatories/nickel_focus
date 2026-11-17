@@ -11,12 +11,13 @@ at a time.
 """
 import logging
 
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import Angle, SkyCoord
 
 from nickel_focus import focus
 from nickel_focus import log
 from nickel_focus import slew
 from nickel_focus.services import NickelPoco, NSciCam, ktl_available
+from nickel_focus.gui.ktl_bridge import KTLBridge
 from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.model.focus_worker import FocusWorker
 from nickel_focus.gui.model.slew_worker import SlewWorker
@@ -57,13 +58,18 @@ class Controller(QtCore.QObject):
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_focus` (a single
     fast ktl read plus a starlist search, not a move) do not.
 
-    A :class:`PySide6.QtCore.QTimer` polls the hardware once a second,
-    regardless of what else is running: the telescope's current position for
-    the Slew tab's live display, and the keywords behind the
-    :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicators (see
-    :meth:`~nickel_focus.gui.controller.Controller._update_status_indicators`).
-    The status bar's Quit button closes the window; like the action buttons,
-    it's disabled while anything is running.
+    The :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicators and
+    the Slew tab's live position display follow the telescope's and camera's
+    keyword broadcasts, whatever else is running and whoever changed them
+    (e.g. another GUI): the Controller subscribes to those keywords (see
+    :meth:`~nickel_focus.services.base.KTLService.subscribe`), and a
+    :class:`~nickel_focus.gui.ktl_bridge.KTLBridge` hands each new value to the
+    GUI thread (see
+    :meth:`~nickel_focus.gui.controller.Controller._on_keyword_changed`).
+    Position updates are redrawn at most every
+    :attr:`~nickel_focus.gui.controller.Controller.POSITION_REDRAW_MS`
+    milliseconds.  The status bar's Quit button closes the window; like the
+    action buttons, it's disabled while anything is running.
 
     Without a live ``ktl`` connection, the Slew/Single/Grid/Auto tabs can't do
     anything but fail -- see
@@ -85,6 +91,12 @@ class Controller(QtCore.QObject):
         :attr:`~nickel_focus.gui.controller.Controller.cam` itself) -- this only
         skips graying them out.  Wired to the GUI script's suppressed ``--test`` flag; never set
         outside of that.
+    """
+
+    POSITION_REDRAW_MS = 200
+    """
+    The shortest interval, in milliseconds, between redraws of the Slew tab's
+    current position, however often ``POCORAA``/``POCODECA`` broadcast.
     """
 
     def __init__(self, window, parent=None, force_enable_hardware_tabs=False):
@@ -156,19 +168,27 @@ class Controller(QtCore.QObject):
         window.image_panel.sourceSelected.connect(self._on_source_selected)
         window.status_bar.quitRequested.connect(self.quit)
 
-        # Milliseconds, not seconds: a `QTimer` interval is always in ms.
-        # Each poll is a handful of ktl reads, not a move -- safe (and
-        # useful) to keep polling no matter what else, if anything, is
-        # running. The reads run on the GUI thread, so an unresponsive
-        # service stalls the GUI for up to each read's timeout
-        # (`services.base.DEFAULT_READ_TIMEOUT`) per poll.
-        self._position_read_failed = False
-        self._status_read_failed = set()  # indicator keys whose last read failed
-        self._poll_timer = QtCore.QTimer(self)
-        self._poll_timer.timeout.connect(self._poll_hardware)
-        self._poll_hardware()
-        if self.poco is not None or self.cam is not None:
-            self._poll_timer.start(1000)
+        # The status indicators and current position follow the keywords'
+        # broadcasts. ktl delivers each new value on its own callback
+        # thread; the bridge re-emits it as a Qt signal, and the queued
+        # connection runs `_on_keyword_changed` on the GUI thread.
+        self._latest = {}  # (service, keyword) -> the latest value received
+        self._bad_position_logged = False
+        # Position broadcasts may be frequent: redraw at most once per
+        # POSITION_REDRAW_MS (a QTimer interval is in ms, not seconds).
+        self._position_timer = QtCore.QTimer(self)
+        self._position_timer.setSingleShot(True)
+        self._position_timer.setInterval(self.POSITION_REDRAW_MS)
+        self._position_timer.timeout.connect(self._show_current_position)
+        self._ktl_bridge = KTLBridge(self)
+        self._ktl_bridge.keywordChanged.connect(
+            self._on_keyword_changed, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+        for key in _INDICATORS:
+            self._show_indicator(key)
+        self._show_current_position()
+        self._subscribe(self.poco, _POCO_DISPLAY_KEYWORDS)
+        self._subscribe(self.cam, _CAM_DISPLAY_KEYWORDS)
 
         self._set_running(False)
 
@@ -651,89 +671,89 @@ class Controller(QtCore.QObject):
         if applied:
             log.info(f'Exposure settings initialized from the camera: {applied}')
 
-    def _poll_hardware(self):
+    def _subscribe(self, service, names):
         """
-        Slot for the one-second polling :class:`PySide6.QtCore.QTimer` (also
-        called once directly from
-        :meth:`~nickel_focus.gui.controller.Controller.__init__`): refresh the
-        Slew tab's current position and the status indicators.
+        Subscribe :attr:`_ktl_bridge` to ``names`` in ``service`` (see
+        :meth:`~nickel_focus.services.base.KTLService.subscribe`), unless
+        ``service`` is ``None``.  A failure is logged as a warning; the
+        affected indicators then stay red.
         """
-        self._update_current_position()
-        self._update_status_indicators()
+        if service is None:
+            return
+        try:
+            service.subscribe(names, self._ktl_bridge.relay)
+        except Exception as e:
+            log.warning(
+                f'Could not subscribe to the {service.service} status keywords: {e}', exc_info=e
+            )
 
-    def _update_status_indicators(self):
+    def _on_keyword_changed(self, service, keyword, value):
         """
-        Read the keyword behind each
-        :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicator and set
-        its color (see the module-level ``_*_state`` functions for each
-        keyword's mapping):
+        Slot for :attr:`~nickel_focus.gui.ktl_bridge.KTLBridge.keywordChanged`
+        (on the GUI thread): record ``value`` and update whatever shows it --
+        a status indicator, or (rate-limited) the Slew tab's current position.
+        """
+        self._latest[service, keyword] = value
+        if (service, keyword) in _POSITION_KEYWORDS:
+            if not self._position_timer.isActive():
+                self._position_timer.start()
+            return
+        for key in _INDICATOR_KEYWORDS.get((service, keyword), ()):
+            self._show_indicator(key)
+
+    def _show_indicator(self, key):
+        """
+        Set one :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicator
+        from the latest value of its keyword (see ``_INDICATORS`` for each
+        keyword and its mapping to a color):
 
         - **Slew** -- ``nickelpoco.POCSTOP`` (telescope movement allowed).
         - **Track** -- ``nickelpoco.POCTRCK``.
         - **On Target** -- ``nickelpoco.POCOT``.
         - **Focus** -- ``nickelpoco.POCSECLK`` (the secondary's lock) sets the
-          color; the text is the current focus value
-          (:meth:`~nickel_focus.services.nickelpoco.NickelPoco.secondary_position`).
+          color; the text is the current focus value, ``nickelpoco.POCSECPA``.
         - **Exp** -- ``nscicam.EXPSTATE``.
 
-        An indicator whose service is ``None`` (no connection), or whose read
-        fails (including a read timeout), is shown red with its default text.
-        A failed read is logged as a warning only on the first failure in a
-        row for that indicator, since this is polled every second.
+        An indicator with no value yet (including when its service isn't
+        connected) is red with its default text.
         """
-        poco, cam = self.poco, self.cam
-        # key: (service, function returning (state, text or None))
-        readers = {
-            'movement': (poco, lambda: (_movement_state(poco.read('POCSTOP')), None)),
-            'track': (poco, lambda: (_track_state(poco.read('POCTRCK')), None)),
-            'target': (poco, lambda: (_target_state(poco.read('POCOT')), None)),
-            'focus': (
-                poco,
-                lambda: (_seclk_state(poco.read('POCSECLK')), f'{poco.secondary_position():.1f}')
-            ),
-            'exp': (cam, lambda: (_expstate_state(cam.exposure_state()), None)),
-        }
-        status_bar = self.window.status_bar
-        for key, (service, read) in readers.items():
-            if service is None:
-                status_bar.set_indicator(key, 'error')
-                continue
-            try:
-                state, text = read()
-            except Exception as e:
-                if key not in self._status_read_failed:
-                    log.warning(f'Could not read the {key} status: {e}', exc_info=e)
-                self._status_read_failed.add(key)
-                status_bar.set_indicator(key, 'error')
-                continue
-            self._status_read_failed.discard(key)
-            status_bar.set_indicator(key, state, text)
+        service, keyword, state_function = _INDICATORS[key]
+        value = self._latest.get((service, keyword))
+        state = 'error' if value is None else state_function(value)
+        text = None
+        if key == 'focus':
+            text = _focus_text(self._latest.get(('nickelpoco', 'POCSECPA')))
+        self.window.status_bar.set_indicator(key, state, text)
 
-    def _update_current_position(self):
+    def _show_current_position(self):
         """
-        Poll :attr:`~nickel_focus.slew.NickelTelescopePointing.current` and push
-        the formatted result to the Slew tab's live "current position" display,
-        or show "—" if :attr:`~nickel_focus.gui.controller.Controller.telescope`
-        is ``None`` (no telescope connection) or the read fails.
+        Show the latest ``POCORAA``/``POCODECA`` values on the Slew tab's live
+        "current position" display, or "—" if there are none yet (e.g. no
+        telescope connection) or they can't be parsed.  A value that can't be
+        parsed is logged as a warning, once per run of bad values.
         """
-        if self.telescope is None:
+        ra = self._latest.get(('nickelpoco', 'POCORAA'))
+        dec = self._latest.get(('nickelpoco', 'POCODECA'))
+        if ra is None or dec is None:
             self.window.control_panel.set_current_position('—', '—')
             return
         try:
-            current = self.telescope.current
-        except Exception as e:
-            # This is polled every second, so only log the first failure in
-            # a row instead of flooding the log.
-            if not self._position_read_failed:
-                log.warning(f'Could not read the current telescope position: {e}', exc_info=e)
-            self._position_read_failed = True
+            ra_text = Angle(ra, unit='hourangle').to_string(
+                unit='hourangle', sep=':', pad=True, precision=2
+            )
+            dec_text = Angle(dec, unit='deg').to_string(
+                unit='deg', sep=':', pad=True, alwayssign=True, precision=2
+            )
+        except ValueError as e:
+            if not self._bad_position_logged:
+                log.warning(
+                    f'Could not read the current telescope position (RA={ra!r}, Dec={dec!r}): '
+                    f'{e}', exc_info=e
+                )
+            self._bad_position_logged = True
             self.window.control_panel.set_current_position('—', '—')
             return
-        self._position_read_failed = False
-        ra_text = current.ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
-        dec_text = current.dec.to_string(
-            unit='deg', sep=':', pad=True, alwayssign=True, precision=2
-        )
+        self._bad_position_logged = False
         self.window.control_panel.set_current_position(ra_text, dec_text)
 
     def _set_running(self, running):
@@ -745,8 +765,8 @@ class Controller(QtCore.QObject):
 
 # -- status-indicator state mappings ------------------------------------------
 #
-# Each function maps one KTL keyword's value (as returned by a service read) to a
-# StatusBar indicator state: 'ok' (green), 'warn' (yellow), or 'error' (red).
+# Each function maps one KTL keyword's (ascii) value to a StatusBar indicator
+# state: 'ok' (green), 'warn' (yellow), or 'error' (red).
 # String values are compared case-insensitively, ignoring surrounding
 # whitespace.
 
@@ -785,3 +805,36 @@ def _seclk_state(value):
 def _expstate_state(value):
     """``EXPSTATE``: green if the camera is ``Ready``, yellow otherwise."""
     return 'ok' if _normalize(value) == 'ready' else 'warn'
+
+
+def _focus_text(value):
+    """``POCSECPA``: the Focus indicator's text, e.g. ``'345.2'``, or None if unknown."""
+    try:
+        return f'{float(value):.1f}'
+    except (TypeError, ValueError):
+        return None
+
+
+# Each status-bar indicator: (service, keyword, mapping of its value to a state).
+_INDICATORS = {
+    'movement': ('nickelpoco', 'POCSTOP', _movement_state),
+    'track': ('nickelpoco', 'POCTRCK', _track_state),
+    'target': ('nickelpoco', 'POCOT', _target_state),
+    'focus': ('nickelpoco', 'POCSECLK', _seclk_state),
+    'exp': ('nscicam', 'EXPSTATE', _expstate_state),
+}
+
+# The indicators each keyword affects; POCSECPA is the Focus indicator's text.
+_INDICATOR_KEYWORDS = {
+    (service, keyword): (key,) for key, (service, keyword, _) in _INDICATORS.items()
+}
+_INDICATOR_KEYWORDS['nickelpoco', 'POCSECPA'] = ('focus',)
+
+# The Slew tab's current position.
+_POSITION_KEYWORDS = {('nickelpoco', 'POCORAA'), ('nickelpoco', 'POCODECA')}
+
+# Every keyword the Controller subscribes to (all of the above), by service.
+_POCO_DISPLAY_KEYWORDS = (
+    'POCSTOP', 'POCTRCK', 'POCOT', 'POCSECLK', 'POCSECPA', 'POCORAA', 'POCODECA',
+)
+_CAM_DISPLAY_KEYWORDS = ('EXPSTATE',)

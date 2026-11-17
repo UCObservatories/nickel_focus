@@ -1,7 +1,7 @@
 # KTL Interface Refactor -- Plan
 
-**Status:** phases 0-2 complete (2026-11-17); phases 3-4 not started.
-Remaining open items: §6. Phases 1 and 2 as built: §4.1, §4.2.
+**Status:** phases 0-3 complete (2026-11-17); phase 4 not started.
+Remaining open items: §6. Phases 1-3 as built: §4.1-§4.3.
 
 A plan to restructure how `nickel_focus` uses the `ktl` package, so that the
 focus GUI stays in step with the telescope and camera when observers change
@@ -512,6 +512,46 @@ Done as described above, with these details and small departures:
 - Fake `ktl`: `cache(service)` returns a `FakeService` that records
   `heartbeat()` registrations; `POCHEART` and `DISP0CLK` keywords added.
 
+### 4.3 Phase 3 as built
+
+- **`KTLService.subscribe(names, function)`** registers, per keyword, a
+  `relay(clone)` that calls `function(service, keyword, clone.read())`, and
+  keeps it in the service's `_subscriptions` list (strong references; §3.5).
+  It then monitors and primes each keyword: `ktl` runs callbacks after every
+  completed read as well as every broadcast (`Keyword.propagate`), so the
+  priming read delivers the current value -- no separate seeding step.
+  Reading the clone inside the callback was confirmed safe in the source: a
+  clone's `read()` returns its frozen value before any lock or I/O
+  (`KTL_REFERENCE.md` §3.1).
+- **`gui/ktl_bridge.py`'s `KTLBridge`** re-emits `relay`'s arguments as
+  `keywordChanged(service, keyword, value)`. The Controller connects it with
+  an explicit `QueuedConnection`, so its slot always runs on the GUI thread,
+  even when the value arrives on the GUI thread itself (as it can in tests).
+- **Controller:** subscribes `poco` to `POCSTOP`, `POCTRCK`, `POCOT`,
+  `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA` and `cam` to `EXPSTATE`;
+  `_on_keyword_changed` keeps the latest value of each and updates the
+  affected indicator (`_show_indicator`), or starts a single-shot timer for
+  the position (`_show_current_position`, at most every
+  `POSITION_REDRAW_MS` = 200 ms). `_poll_timer`, `_poll_hardware`,
+  `_update_status_indicators`, `_update_current_position`, and the
+  "logged once" read-failure tracking are gone. A failed subscription is
+  logged, and its indicators stay red. Finding the nearest target still
+  reads the position directly (one timed read, on demand).
+- **Fake `ktl`:** keyword callbacks are held weakly (as `ktl` does, so a
+  dropped subscription would show up in tests), receive a frozen copy, run
+  after each read and -- while monitored -- each value change, and have
+  their exceptions swallowed. Unlike `ktl`, they run on the thread that
+  changed the value; the queued connection makes this irrelevant to the
+  Controller.
+- **Known limitation:** an indicator shows the last value received. If a
+  service stops broadcasting altogether (as opposed to restarting, which
+  the heartbeat handles), the indicators don't turn red; they just stop
+  changing. `ktl` tracks this in its heartbeat state, which the named
+  method `Keyword.isAlive()` reports, but only by polling (its first call
+  also does a blocking lookup), with no notification of changes. Whether
+  this matters in practice is unknown; `KTL_SUGGESTIONS.md` §5 proposes a
+  heartbeat-state callback, marked as of unconfirmed usefulness.
+
 ## 5. Not addressed by this plan
 
 These issues from Appendix A are outside the scope above. The refactor
@@ -605,8 +645,8 @@ telescope first.
 Moved here from `KTL_REFERENCE.md` (2026-11-17), where they were recorded as
 "Implications and open questions". Section and item references below are
 to `KTL_REFERENCE.md` ("REF") unless noted. Resolution: items 4, 6, 11 by
-this plan (§4) -- items 4 and 11 done in phase 2 -- and the rest are in §5
-above.
+this plan (§4) -- items 4 and 11 done in phase 2, item 6 in phase 3 -- and
+the rest are in §5 above.
 
 1. **Slew targets are written as ascii decimal numbers to sexagesimal
    keywords.** `slew_to` writes `ra.to('hourangle').value` and

@@ -85,7 +85,7 @@ class StatusBar(QtWidgets.QWidget):
     states: ``'ok'`` (green), ``'warn'`` (yellow), or ``'error'`` (red), set by
     :meth:`~nickel_focus.gui.views.status_bar.StatusBar.set_indicator`.  Which
     hardware value maps to which state is the Controller's job (see
-    :meth:`~nickel_focus.gui.controller.Controller._update_status_indicators`);
+    :meth:`~nickel_focus.gui.controller.Controller._show_indicator`);
     this view only displays what it's told.  Every indicator starts out red,
     which is also what it shows whenever the hardware state can't be read
     (e.g., no ``ktl`` connection).

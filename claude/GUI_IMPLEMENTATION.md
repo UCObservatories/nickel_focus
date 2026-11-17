@@ -2773,3 +2773,42 @@ Third phase of `claude/ktl_interface_refactor.md` (details as built in its
 The heartbeat periods and live-test timeout remain provisional until the
 broadcast intervals are measured at the telescope (plan §5.1, §6). Full
 suite: `303 passed, 7 skipped` (the live tests).
+
+## KTL interface refactor, phase 3: callback-driven status bar and position (2026-11-17)
+
+Fourth phase of `claude/ktl_interface_refactor.md` (details as built in its
+§4.3). Resolves Appendix A item 6 (the 1 Hz poll reading on the GUI
+thread), and with it Goal 1 for the status bar and position display:
+changes made from other GUIs appear as soon as they're broadcast.
+
+- `KTLService.subscribe(names, function)` (`services/base.py`): registers a
+  callback per keyword, keeps strong references to them (`ktl` holds
+  callbacks weakly), and primes each keyword with a timed read, which
+  delivers its current value through the same callback.
+- New `gui/ktl_bridge.py` (`KTLBridge`): re-emits values from `ktl`'s
+  callback thread as a Qt signal; the Controller connects it with an
+  explicit queued connection.
+- Controller: subscriptions replace `_poll_timer`/`_poll_hardware`/
+  `_update_status_indicators`/`_update_current_position`. New
+  `_on_keyword_changed`, `_show_indicator`, `_show_current_position`,
+  `_subscribe`, and `POSITION_REDRAW_MS` (200 ms); module tables
+  `_INDICATORS`, `_INDICATOR_KEYWORDS`, `_POSITION_KEYWORDS`, and the
+  subscribed keyword lists. `StatusBar`'s docstring now points at
+  `_show_indicator`.
+- Tests: the fake keyword gained weakly held callbacks and broadcasts on
+  value changes. The poll-based Controller tests became broadcast-based
+  (`_deliver_broadcasts` runs the event loop past a position redraw): the
+  indicators and position start at the current values and follow
+  external changes, position redraws are rate-limited, a bad position is
+  logged once, and a failed subscription is logged and left red. New
+  `test_ktl_bridge.py` (a value relayed from another thread reaches the
+  GUI thread) and `subscribe` tests (initial value, broadcasts, surviving
+  garbage collection, read-only). One more live test: a subscription
+  delivers a real `POCSTOP` value.
+- Docs: `GUI_REFERENCE.md` (§2 directory tree and lines of communication),
+  `KTL_REFERENCE.md` (§3.1, §3.3, §4), and the plan (status, §4.3,
+  Appendix A).
+
+Known limitation (plan §4.3): if a service stops broadcasting entirely, the
+indicators keep their last values rather than turning red. Full suite:
+`310 passed, 8 skipped` (the live tests).

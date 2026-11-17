@@ -43,6 +43,7 @@ gui/
 ├── launcher.py            builds the QApplication/MainWindow (entry point: `nickel_focus_gui`)
 ├── controller.py          wires views to the model; owns app state
 ├── log_handler.py         logging.Handler that forwards nickel_focus.log records into the Log tab
+├── ktl_bridge.py          QObject that hands KTL keyword values from ktl's callback thread to the GUI thread
 ├── model/
 │   ├── __init__.py
 │   ├── focus_worker.py    QThread that drives a FocusSequence
@@ -270,17 +271,26 @@ implementation history.
 - Not shown above: `MainWindow` also owns the `StatusBar`, whose
   `quitRequested` signal the Controller connects to `quit()` (closing the
   window); `Controller._set_running` disables Quit, along with the action
-  buttons, while anything is running. The Controller also owns a `QTimer` that polls the hardware
-  once a second, independent of whatever else is running:
-  `telescope.current` for the Slew tab's live position display, and the
-  keywords behind the status indicators (`POCSTOP`, `POCTRCK`, `POCOT`,
-  `POCSECLK` plus the focus value, `EXPSTATE`), read through `poco`/`cam`,
+  buttons, while anything is running.
+- **KTL → Controller (status bar and current position)**: no polling. The
+  Controller subscribes (`KTLService.subscribe`) to the keywords behind the
+  status indicators (`POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK` plus the
+  focus value `POCSECPA`, `EXPSTATE`) and the Slew tab's live position
+  display (`POCORAA`, `POCODECA`). `ktl` calls back on its own thread with
+  each broadcast (and each completed read, which also delivers the current
+  values at startup); `gui/ktl_bridge.py`'s `KTLBridge.relay` re-emits it as
+  `keywordChanged(service, keyword, value)`, connected with a *queued*
+  connection to `Controller._on_keyword_changed`, which runs on the GUI
+  thread. That records the value and updates the affected indicator --
   each mapped to a color by a small pure function in `controller.py` and
-  pushed to `StatusBar.set_indicator`. Without either service the timer
-  never starts and every indicator stays red; a failed read (including a
-  timeout) shows red and is logged once per streak of failures. The reads
-  run on the GUI thread, so an unresponsive service stalls the GUI for up to
-  1 s per read on each poll.
+  pushed to `StatusBar.set_indicator` -- or, for the position, starts a
+  single-shot `QTimer` so redraws happen at most every
+  `Controller.POSITION_REDRAW_MS` (200 ms). Changes made elsewhere (e.g. by
+  another GUI) therefore show up as soon as they're broadcast, and no
+  keyword read runs on the GUI thread except finding the nearest target.
+  An indicator with no value yet -- its service isn't connected, or the
+  subscription failed (logged as a warning) -- is red; a position that
+  can't be parsed shows "—" and is logged once per run of bad values.
 
 ## 4. Usage
 
@@ -379,4 +389,5 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `945b2ab` | 2026-11-17 | Exposure control (`ExposurePath`/`ExposureConfig`/`Exposure`) moved from `focus.py` to its own `exposure.py` module; exposure fields start at the camera's current settings. |
 | `e560841` | 2026-11-17 | Removed the Options tab and settings persistence. |
 | `4a21d56` | 2026-11-17 | KTL access moved into `services/` (`NickelPoco`/`NSciCam` on `KTLService`, the only `ktl` import; 1 s read timeouts); Controller shares one service of each; tests run on a keyword-level fake `ktl`; `--ktl-live` tests. |
-| *pending* | 2026-11-17 | Services monitor their status/display keywords and register heartbeats at construction; checks distinguish "condition false" from "no reply" (`check`/`require`); live heartbeat test. |
+| `6227274` | 2026-11-17 | Services monitor their status/display keywords and register heartbeats at construction; checks distinguish "condition false" from "no reply" (`check`/`require`); live heartbeat test. |
+| *pending* | 2026-11-17 | Status indicators and current position follow keyword broadcasts (`KTLService.subscribe` → `gui/ktl_bridge.py` → queued signal), replacing the 1 Hz poll; position redraws limited to every 200 ms. |

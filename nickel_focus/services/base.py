@@ -16,8 +16,8 @@ a warning is issued once, :func:`ktl_available` returns False, and
 constructing a service raises :class:`KTLUnavailableError`.
 
 Only the named :mod:`ktl` methods are used: ``ktl.cache``, the keyword
-methods ``read``, ``write``, ``monitor``, and ``waitFor``, and the service
-method ``heartbeat``.
+methods ``read``, ``write``, ``monitor``, ``waitFor``, and ``callback``, and
+the service method ``heartbeat``.
 """
 import warnings
 
@@ -142,6 +142,9 @@ class KTLService:
         # The module this service talks to, kept for its lifetime.
         self._ktl = ktl
         self.read_only = read_only
+        # Strong references to the callbacks registered by subscribe(): ktl
+        # holds callbacks only weakly, and drops any that nothing else holds.
+        self._subscriptions = []
         for name in self.monitored:
             self._monitor(name)
         if self.heartbeat is not None:
@@ -332,3 +335,47 @@ class KTLService:
             raise KTLError(f'The {self.service} service has no heartbeat keyword.')
         value = self.read(self.heartbeat)
         return self.wait_for(self.heartbeat, f'!= {value}', timeout)
+
+    def subscribe(self, names, function):
+        """
+        Call ``function(service, keyword, value)`` with each new value of the
+        named keywords: every broadcast, and every completed read.
+
+        Each keyword is monitored (if it isn't already) and then read once, so
+        ``function`` also receives each keyword's current value right away.
+        ``value`` is the ascii value, as :meth:`read` returns by default.
+
+        ``function`` is called on :mod:`ktl`'s own callback thread, not the
+        caller's; it must not block, and a GUI must hand the value over to its
+        own thread (e.g. with a queued Qt signal).  Exceptions it raises are
+        logged by :mod:`ktl`, not raised.  The subscription lasts as long as
+        this service object.
+
+        Parameters
+        ----------
+        names : iterable of :obj:`str`
+            Keyword names.
+        function : callable
+            Called as ``function(service, keyword, value)``, where
+            ``service`` and ``keyword`` are names (:obj:`str`).
+
+        Raises
+        ------
+        KTLError, KTLTimeoutError
+            Raised if a keyword can't be subscribed to or its current value
+            isn't received within :data:`DEFAULT_READ_TIMEOUT`.
+        """
+        for name in names:
+            keyword = self._keyword(name)
+
+            # ktl calls this with a frozen copy of the keyword, whose read()
+            # returns the value of this update without contacting the service.
+            def relay(update, name=name):
+                function(self.service, name, update.read())
+
+            self._subscriptions.append(relay)
+            try:
+                keyword.callback(relay)
+            except self._ktl.ktlError as e:
+                raise KTLError(f'Cannot subscribe to {self.service}.{name}: {e}') from e
+            self._monitor(name)

@@ -8,6 +8,8 @@ value:** every service is constructed with ``read_only=True``, so any write
 raises :class:`~nickel_focus.services.base.KTLReadOnlyError` before reaching
 ``ktl``.  They never construct the GUI.
 """
+import threading
+
 import pytest
 
 from nickel_focus import exposure
@@ -65,3 +67,23 @@ def test_camera_values_read(cam):
     assert set(settings) == {'exptime', 'speed', 'binning'}, \
         'the camera settings should have exptime, speed, and binning'
     cam.path.next
+
+
+def test_subscription_delivers_values(poco):
+    # ktl delivers each update on its own thread; the subscription reads the
+    # value from the frozen copy ktl passes to the callback.
+    received = []
+    arrived = threading.Event()
+
+    def record(service, keyword, value):
+        received.append((service, keyword, value))
+        arrived.set()
+
+    poco.subscribe(['POCSTOP'], record)
+
+    assert arrived.wait(timeout=5), 'the current value should be delivered within 5 s'
+    service, keyword, value = received[0]
+    assert (service, keyword) == ('nickelpoco', 'POCSTOP'), \
+        'the callback should name the service and keyword'
+    assert value.strip().lower() in ('allowed', 'disabled'), \
+        f'the value should be a POCSTOP state, not {value!r}'

@@ -46,6 +46,16 @@ def _wait_for_slew_worker(controller, timeout_ms=5000):
     loop.exec()
 
 
+def _deliver_broadcasts(controller):
+    """
+    Run the event loop long enough for queued keyword values -- and a
+    rate-limited position redraw -- to reach the window.
+    """
+    loop = QtCore.QEventLoop()
+    QtCore.QTimer.singleShot(controller.POSITION_REDRAW_MS + 50, loop.quit)
+    loop.exec()
+
+
 def _make_step_result(index=0, focus_value=350., fwhm=3.2, centroid=(12.3, 45.6),
                        is_outlier=False):
     return focus.StepResult(
@@ -413,32 +423,60 @@ def test_force_enable_hardware_tabs_overrides_no_ktl(qapp):
             f'tab {panel.tabs.tabText(i)!r} should stay enabled with force_enable_hardware_tabs'
 
 
-def test_controller_polls_current_position_from_fake_telescope(qapp, fake_telescope):
+def test_current_position_follows_the_telescope(qapp, fake_telescope):
     fake_telescope.ra, fake_telescope.dec = 5.5, 30.25
-
-    window = MainWindow()
-    Controller(window)
-
-    assert window.control_panel.slew_current_ra_label.text() == '05:30:00.00', \
-        'the current-position display should be seeded from the telescope on construction'
-    assert window.control_panel.slew_current_dec_label.text() == '+30:15:00.00', \
-        'the current-position display should show the telescope Dec'
-
-
-def test_current_position_read_failure_is_logged_once(qapp, caplog, fake_telescope):
     window = MainWindow()
     controller = Controller(window)
-    fake_telescope.keyword('nickelpoco', 'POCORAA').responsive = False
+    _deliver_broadcasts(controller)
+    panel = window.control_panel
+
+    assert panel.slew_current_ra_label.text() == '05:30:00.00', \
+        'the current-position display should start at the telescope RA'
+    assert panel.slew_current_dec_label.text() == '+30:15:00.00', \
+        'the current-position display should start at the telescope Dec'
+
+    fake_telescope.ra, fake_telescope.dec = 6.25, -10.5  # e.g. moved by another GUI
+    _deliver_broadcasts(controller)
+
+    assert panel.slew_current_ra_label.text() == '06:15:00.00', \
+        'the display should follow a broadcast RA change'
+    assert panel.slew_current_dec_label.text() == '-10:30:00.00', \
+        'the display should follow a broadcast Dec change'
+
+
+def test_current_position_redraws_are_rate_limited(qapp, fake_telescope, monkeypatch):
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
+    redraws = []
+    monkeypatch.setattr(window.control_panel, 'set_current_position',
+                        lambda ra, dec: redraws.append((ra, dec)))
+
+    for hours in (1.0, 1.1, 1.2, 1.3, 1.4):
+        fake_telescope.ra = hours
+    _deliver_broadcasts(controller)
+
+    assert len(redraws) == 1, 'a burst of position broadcasts should be redrawn once'
+    assert redraws[0][0] == '01:24:00.00', 'the redraw should show the latest position'
+
+
+def test_unparseable_position_is_logged_once(qapp, caplog, fake_telescope):
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
+    raa = fake_telescope.keyword('nickelpoco', 'POCORAA')
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        controller._update_current_position()
-        controller._update_current_position()
+        raa.value = 'garbage'
+        _deliver_broadcasts(controller)
+        raa.value = 'more garbage'
+        _deliver_broadcasts(controller)
 
     warnings = [r for r in caplog.records if 'current telescope position' in r.getMessage()]
-    assert len(warnings) == 1, 'repeated poll failures should be logged only once'
+    assert len(warnings) == 1, 'a run of bad position values should be logged only once'
     assert warnings[0].exc_info is not None, 'the traceback should be logged'
     assert window.control_panel.slew_current_ra_label.text() == '—', \
-        'an unreadable position should show the placeholder'
+        'an unparseable position should show the placeholder'
 
 
 def test_move_to_target_runs_against_fake_telescope(qapp, fake_telescope):
@@ -747,7 +785,6 @@ def test_status_indicators_are_red_without_ktl(qapp):
         'every indicator should be red without a ktl connection'
     assert window.status_bar.indicators['focus'].text() == 'Focus', \
         'with no focus value to show, the Focus indicator keeps its default text'
-    assert not controller._poll_timer.isActive(), 'there is nothing to poll without ktl'
 
 
 @pytest.mark.parametrize('function, value, expected', [
@@ -772,43 +809,66 @@ def test_status_state_mappings(function, value, expected):
         f'{function}({value!r}) should map to {expected!r}'
 
 
-def test_status_indicators_reflect_keyword_values(qapp, fake_hardware):
-    window = MainWindow()
-    controller = Controller(window)
+def test_status_indicators_start_at_the_keyword_values(qapp, fake_hardware):
     sim = fake_hardware['sim']
     sim.tracking_on = False
     sim.ready = False
     sim.keyword('nickelpoco', 'POCSECPA').value = 345.24
     sim.keyword('nscicam', 'EXPSTATE').value = 'Exposing'
+    window = MainWindow()
+    controller = Controller(window)
 
-    controller._update_status_indicators()
+    _deliver_broadcasts(controller)
 
     assert _indicator_states(window) == {
         'movement': 'ok', 'track': 'warn', 'target': 'warn', 'focus': 'ok', 'exp': 'warn',
-    }, 'each indicator should reflect its keyword value'
+    }, 'each indicator should start at its keyword value'
     assert window.status_bar.indicators['focus'].text() == '345.2', \
         'the Focus indicator should show the current focus value'
 
 
-def test_status_read_failure_is_red_and_logged_once(qapp, caplog, fake_hardware):
+def test_status_indicators_follow_broadcasts(qapp, fake_hardware):
+    # E.g. another GUI disables movement, starts an exposure, or moves the
+    # focus: the indicators follow without the focus GUI doing anything.
     window = MainWindow()
     controller = Controller(window)
-    expstate = fake_hardware['sim'].keyword('nscicam', 'EXPSTATE')
-    expstate.responsive = False
+    _deliver_broadcasts(controller)
+    assert _indicator_states(window)['movement'] == 'ok', 'setup: movement starts allowed'
+    sim = fake_hardware['sim']
+
+    sim.movement_allowed = False
+    sim.keyword('nscicam', 'EXPSTATE').value = 'Readout'
+    sim.keyword('nickelpoco', 'POCSECPA').value = 352.06
+    _deliver_broadcasts(controller)
+
+    states = _indicator_states(window)
+    assert states['movement'] == 'error', 'disabled movement should turn the Slew indicator red'
+    assert states['exp'] == 'warn', 'an exposure in progress should turn the Exp indicator yellow'
+    assert window.status_bar.indicators['focus'].text() == '352.1', \
+        'the Focus indicator should follow the focus value'
+
+
+def test_failed_subscription_is_logged_and_left_red(qapp, caplog, fake_hardware, monkeypatch):
+    sim = fake_hardware['sim']
+
+    def refuse(function, remove=False, preferred=False):
+        raise sim.ktl.ktlError('KTL::-1::no callbacks today')
+
+    monkeypatch.setattr(sim.keyword('nscicam', 'EXPSTATE'), 'callback', refuse)
+    window = MainWindow()
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        controller._update_status_indicators()
-        controller._update_status_indicators()
+        controller = Controller(window)
+        _deliver_broadcasts(controller)
 
-    warnings = [r for r in caplog.records if 'exp status' in r.getMessage()]
-    assert len(warnings) == 1, 'repeated read failures should be logged only once'
-    assert _indicator_states(window)['exp'] == 'error', 'an unreadable keyword should show red'
-
-    expstate.responsive = True
-    controller._update_status_indicators()
-    assert _indicator_states(window)['exp'] == 'ok', 'the indicator should recover'
-    assert 'exp' not in controller._status_read_failed, \
-        'a successful read should re-arm logging for the next failure'
+    assert any(
+        r.levelname == 'WARNING' and 'Could not subscribe to the nscicam' in r.getMessage()
+        for r in caplog.records
+    ), 'the failed subscription should be logged as a warning'
+    assert _indicator_states(window)['exp'] == 'error', \
+        'an indicator with no subscription should stay red'
+    assert _indicator_states(window)['movement'] == 'ok', \
+        'the other service should be unaffected'
 
 
 def test_quit_closes_the_window(qapp):
@@ -945,6 +1005,7 @@ def test_unresponsive_service_is_logged_and_left_unconnected(qapp, caplog, fake_
 
     assert controller.cam is None, 'the camera service should not be connected'
     assert controller.poco is not None, 'the telescope service is unaffected'
+    _deliver_broadcasts(controller)
     assert any(
         r.levelname == 'WARNING' and 'Could not connect to the nscicam service' in r.getMessage()
         for r in caplog.records

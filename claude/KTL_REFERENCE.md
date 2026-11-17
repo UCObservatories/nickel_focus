@@ -140,8 +140,12 @@ read(binary=False, both=False, wait=True, timeout=None)
   at it without a round trip is dictionary-style access (§3.8), which we
   don't use. `KTL_SUGGESTIONS.md` §4 proposes a named method for it.
 - `ktl` warns against calling `read()` on a keyword from inside that
-  keyword's own callback (`Keyword.py:1869`). We don't use callbacks; if we
-  ever do, that case needs a named-method alternative first.
+  keyword's own callback (`Keyword.py:1869`). That applies to the original
+  keyword object, not to what callbacks receive: `ktl` calls each callback
+  with a **clone** (`Keyword.clone`, `Keyword.py:771`, queued to the Courier
+  at `Keyword.py:1938`), and a clone's `read()` returns its frozen value
+  before any locking or I/O (`Keyword.py:846`). Our callbacks read only the
+  clone (§3.3).
 
 ### 3.2 `keyword.write(value)` -- `Keyword.write`, `Keyword.py:961`
 
@@ -198,6 +202,11 @@ monitor(start=True, prime=True, wait=True)
 - `keyword.callback(function)` registers a callback (stored as a weak
   reference -- a bound method of an object that's garbage-collected silently
   stops being called). Exceptions in callbacks are logged, not raised.
+- Callbacks run (on the Courier thread, with a clone of the keyword; §3.1)
+  after every update: each broadcast received while monitored, **and each
+  completed `read()`** (`Keyword.propagate`, `Keyword.py:1467`). So
+  registering a callback and then reading the keyword delivers its current
+  value to the callback.
 
 ### 3.4 `keyword.waitFor(expression, timeout)` -- `Keyword.py:1425`, `Expression.py`
 
@@ -282,6 +291,15 @@ doesn't give their broadcast intervals, so both use a provisional, generous
 30 s period until they're measured at the telescope. We don't call
 `reconnect()`.
 
+Heartbeat state: the FirstResponder marks a heartbeat *not beating* when it
+misses its period (`Service.py:1474`); if the service then fails a probe,
+it stays so until broadcasts resume (`Service.py:1771`). The named method
+`keyword.isAlive()` (`Keyword.py:1150`) reports this for any keyword sharing
+a server with a heartbeat keyword -- but it must be polled (there's no
+notification), its first call does a blocking `servers` lookup, and it
+raises `NoHeartbeatsError` if no heartbeat applies. We don't use it; see
+`KTL_SUGGESTIONS.md` §5.
+
 ### 3.7 KTL's own logging
 
 KTL logs through its own Lumberjack thread to `sys.stderr`, at level
@@ -329,6 +347,7 @@ calls of §3 and every service class is built on it:
 | `write(name, value, binary=False)` | `.write(value, binary=...)` | No timeout (waits for completion). Raises `KTLReadOnlyError`, without calling `ktl`, on a `read_only=True` service. |
 | `wait_for(name, expression, timeout)` | `.waitFor(expression, timeout=...)` | Returns `True`/`False`, as `waitFor` does (§3.4). |
 | `check(name, expression, timeout)` | `wait_for`, then on `False` a `read()` (1 s) | `True`, `False` (the service answered), or `None` (it didn't). `services.require(result, false_message, no_reply_message)` turns `False` into `ValueError` and `None` into `KTLTimeoutError`. |
+| `subscribe(names, function)` | `.callback(relay)`, then the monitor-and-prime step below | `relay(clone)` calls `function(service, keyword, clone.read())`; the service keeps a strong reference to each `relay` (§3.3). The priming read delivers the current value. |
 | `heartbeat_alive(timeout)` | `read()`, then `waitFor('!= <value>', timeout)` | Whether the heartbeat keyword changes within `timeout`; used by the live tests. |
 | construction, for each keyword in `monitored` | `.monitor(prime=False)`, then `read(timeout=1.0)` | Primes with a timed read instead of `monitor()`'s own (untimed) one, so an unresponsive service fails construction with `KTLTimeoutError` rather than hanging. |
 | construction, for the `heartbeat` keyword | the same, then `ktl.cache(service).heartbeat(keyword, heartbeat_period)` | §3.6. |
@@ -355,10 +374,10 @@ and one `NSciCam` and share them.
 | `focus.FocusSequence.set_focus` | `NSciCam` | `exposure_state_is('Ready', 0.5)` before every focus move a sequence makes, then `Focus.set_to`. |
 | `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, writes `Go`, then waits for `Start` (30 s) and `Ready` (exposure time + 90 s). |
 | `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target (ascii decimal hours/degrees), then `on_target(300)`. |
-| GUI `Controller` (GUI thread, 1 Hz) | both | Position display and status indicators: 8 reads per second on the GUI thread, each with a 1 s timeout. |
+| GUI `Controller` (subscriptions) | both | Status indicators and position display: `subscribe`s to `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`, `EXPSTATE`; values reach the GUI thread through a queued Qt signal (`gui/ktl_bridge.py`). No polling. |
 | GUI `Controller` (GUI thread, once at startup) | `NSciCam.cfg` | `current_settings()` seeds the Single/Grid/Auto exposure fields. |
 
-The same usage, by keyword. "Controller" means the GUI's 1 Hz poll. Every
+The same usage, by keyword. "Controller" means the GUI's subscriptions. Every
 keyword that is checked with `waitFor` or displayed is also monitored (see
 the service rows above). A
 keyword used by more than one class is still a single shared `Keyword`
@@ -366,17 +385,17 @@ object (§2.1).
 
 | Keyword | Used by | How |
 | --- | --- | --- |
-| `nickelpoco.POCSTOP` | `focus.Focus`, `slew.NickelTelescopePointing`, Controller | `waitFor('== allowed')` before moving the focus or slewing; read for the Slew indicator. |
-| `nickelpoco.POCTRCK` | `slew.NickelTelescopePointing`, Controller | `waitFor('== on')` before slewing; read for the Track indicator. |
-| `nickelpoco.POCOT` | `slew.NickelTelescopePointing`, Controller | `waitFor('== 0')` before and after slewing; read for the On Target indicator. |
-| `nickelpoco.POCORAA` | `slew.NickelTelescopePointing`, Controller | Read for the current RA (`NickelPoco.pointing()`), incl. the Slew tab's position display. |
-| `nickelpoco.POCODECA` | `slew.NickelTelescopePointing`, Controller | Read for the current Dec, likewise. |
+| `nickelpoco.POCSTOP` | `focus.Focus`, `slew.NickelTelescopePointing`, Controller | `waitFor('== allowed')` before moving the focus or slewing; subscribed to for the Slew indicator. |
+| `nickelpoco.POCTRCK` | `slew.NickelTelescopePointing`, Controller | `waitFor('== on')` before slewing; subscribed to for the Track indicator. |
+| `nickelpoco.POCOT` | `slew.NickelTelescopePointing`, Controller | `waitFor('== 0')` before and after slewing; subscribed to for the On Target indicator. |
+| `nickelpoco.POCORAA` | `slew.NickelTelescopePointing`, Controller | Read for the current RA (`NickelPoco.pointing()`); subscribed to for the Slew tab's position display. |
+| `nickelpoco.POCODECA` | `slew.NickelTelescopePointing`, Controller | Read for the current Dec, likewise; subscribed to likewise. |
 | `nickelpoco.POCORAD` | `slew.NickelTelescopePointing` | Written with the target RA. |
 | `nickelpoco.POCODECD` | `slew.NickelTelescopePointing` | Written with the target Dec. |
-| `nickelpoco.POCSECPA` | `focus.Focus`, Controller | Read for the current focus, incl. the Focus indicator's text. |
+| `nickelpoco.POCSECPA` | `focus.Focus`, Controller | Read for the current focus; subscribed to for the Focus indicator's text. |
 | `nickelpoco.POCSECPD` | `focus.Focus` | Read to skip a no-op move; written with the requested focus. |
-| `nickelpoco.POCSECLK` | `focus.Focus`, Controller | Written `off` to unlock; `waitFor('== on')` for the move to finish; read for the Focus indicator's color. |
-| `nscicam.EXPSTATE` | `focus.FocusSequence`, `exposure.Exposure`, Controller | `waitFor('== Ready')` before a focus move or exposure, `== Start`/`== Ready` during one; monitored by `NSciCam`; read for the Exp indicator. |
+| `nickelpoco.POCSECLK` | `focus.Focus`, Controller | Written `off` to unlock; `waitFor('== on')` for the move to finish; subscribed to for the Focus indicator's color. |
+| `nscicam.EXPSTATE` | `focus.FocusSequence`, `exposure.Exposure`, Controller | `waitFor('== Ready')` before a focus move or exposure, `== Start`/`== Ready` during one; monitored by `NSciCam`; subscribed to for the Exp indicator. |
 | `nscicam.EXPOSE` | `exposure.Exposure` | Written `Go` to start an exposure; not monitored. |
 | `nickelpoco.POCHEART` | `NickelPoco` | Monitored; registered as the service's heartbeat (§3.6). |
 | `nscicam.DISP0CLK` | `NSciCam` | Monitored; registered as the service's heartbeat (§3.6). |
@@ -437,4 +456,5 @@ dispatcher has finished supplementing the FITS header; the help says it is
 | `a33f3dd` | 2026-11-17 | Initial reference, from KTL Python 5.2 (`ktl_python/`) and the `nickelpoco`/`nscicam` keyword help; dictionary-style access documented and excluded from our use. |
 | `b247c45` | 2026-11-17 | Moved the former §5 ("Implications and open questions") into `claude/ktl_interface_refactor.md`; this document now covers only current use and reference material. |
 | `4a21d56` | 2026-11-17 | §1, §3.1, §3.2, §4 updated for the `services/` layer: the only `ktl` import (now catching any `ImportError`), 1 s read timeouts, timed priming reads, and the per-class usage tables. |
-| *pending* | 2026-11-17 | §3.4, §3.6, §4: keywords monitored at construction, heartbeats (`POCHEART`, `DISP0CLK`, provisional 30 s), `check`/`require`/`heartbeat_alive`. |
+| `6227274` | 2026-11-17 | §3.4, §3.6, §4: keywords monitored at construction, heartbeats (`POCHEART`, `DISP0CLK`, provisional 30 s), `check`/`require`/`heartbeat_alive`. |
+| *pending* | 2026-11-17 | §3.1, §3.3, §4: callbacks (clones, delivery after reads), `KTLService.subscribe`, and the GUI's subscriptions replacing its 1 Hz poll. |

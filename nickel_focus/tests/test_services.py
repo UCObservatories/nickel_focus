@@ -3,6 +3,7 @@ Tests for :mod:`nickel_focus.services`: the boundary between
 :mod:`nickel_focus` and :mod:`ktl`, run over the fake ``ktl`` (see
 ``fake_ktl.py``).
 """
+import gc
 import importlib.abc
 import importlib.util
 import sys
@@ -218,3 +219,50 @@ def test_broken_ktl_install_degrades_instead_of_failing(monkeypatch):
 
     assert module.ktl is None, 'a broken ktl import should leave ktl as None'
     assert not module.ktl_available(), 'ktl should be reported as unavailable'
+
+
+# -- subscriptions -------------------------------------------------------------
+
+def test_subscribe_delivers_current_values_then_broadcasts(fake_telescope):
+    received = []
+    poco = NickelPoco()
+
+    poco.subscribe(['POCSTOP', 'POCTRCK'], lambda *args: received.append(args))
+
+    assert received == [('nickelpoco', 'POCSTOP', 'allowed'), ('nickelpoco', 'POCTRCK', 'on')], \
+        'each keyword\'s current value should be delivered right away'
+    received.clear()
+    fake_telescope.movement_allowed = False
+    assert received == [('nickelpoco', 'POCSTOP', 'disabled')], \
+        'a broadcast should be delivered as (service, keyword, ascii value)'
+
+
+def test_subscription_survives_garbage_collection(fake_telescope):
+    # ktl holds callbacks only weakly; the service must keep its own
+    # callback wrappers alive, or broadcasts would silently stop arriving.
+    received = []
+    poco = NickelPoco()
+    poco.subscribe(['POCSECPA'], lambda *args: received.append(args[2]))
+    received.clear()
+
+    gc.collect()
+    fake_telescope.keyword('nickelpoco', 'POCSECPA').value = 351.5
+
+    assert received == ['351.5'], 'the subscription should outlive garbage collection'
+
+
+def test_subscribe_monitors_and_needs_a_reply(fake_telescope):
+    poco = NickelPoco()
+    secpd = fake_telescope.keyword('nickelpoco', 'POCSECPD')
+    secpd.responsive = False
+
+    with pytest.raises(KTLTimeoutError):
+        poco.subscribe(['POCSECPD'], lambda *args: None)
+    assert secpd.monitored, 'a subscribed keyword should be monitored'
+
+
+def test_read_only_service_can_subscribe(fake_telescope):
+    received = []
+    NickelPoco(read_only=True).subscribe(['POCOT'], lambda *args: received.append(args))
+    assert received == [('nickelpoco', 'POCOT', '0')], 'subscribing only reads'
+    assert fake_telescope.ktl.writes == [], 'subscribing should write nothing'

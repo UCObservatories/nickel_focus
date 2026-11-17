@@ -25,8 +25,10 @@ This validates the *software logic* built on the keyword protocol -- it cannot
 validate the real services' behavior, which can only be checked at the
 telescope (see the ``ktl_live`` tests).
 """
+import inspect
 import operator
 import threading
+import weakref
 
 from astropy.coordinates import Angle
 from astropy.io import fits
@@ -58,6 +60,16 @@ def _evaluate(value, expression):
         return compare(str(value).strip().lower(), operand.lower())
 
 
+class _Update:
+    """What a fake callback receives: a frozen copy whose read() returns its value."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def read(self, binary=False, both=False, wait=True, timeout=None):
+        return self._value if binary else str(self._value)
+
+
 class FakeKeyword:
     """
     One fake keyword.
@@ -66,7 +78,8 @@ class FakeKeyword:
     ----------
     value
         The current value.  ``read()`` returns it as a string (the ascii
-        value) unless ``binary=True``.
+        value) unless ``binary=True``.  Setting it, while the keyword is
+        monitored, "broadcasts" it: every callback is called.
     pending : :obj:`list`
         Values the keyword will take later, in order: each ``waitFor`` steps
         through them (as if time were passing) until its expression holds or
@@ -78,19 +91,50 @@ class FakeKeyword:
         The ``timeout`` of each read, and the value of each write.
     monitored : :obj:`bool`
         Whether ``monitor()`` has been called.
+
+    Like :mod:`ktl`'s, callbacks are held only weakly, are called (with a
+    frozen copy of the keyword) after every broadcast and every completed
+    read, and any exception they raise is swallowed.  Unlike :mod:`ktl`'s,
+    they're called on the thread that changed or read the value, not a
+    dedicated callback thread.
     """
 
     def __init__(self, fake_ktl, service, name, value, on_write=None):
         self._ktl = fake_ktl
         self.service = service
         self.name = name
-        self.value = value
+        self._value = value
         self.pending = []
         self.responsive = True
         self.on_write = on_write
         self.reads = []
         self.writes = []
         self.monitored = False
+        self._callbacks = []
+        self.callback_errors = []
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        with self._ktl.lock:
+            self._value = value
+            if self.monitored:
+                self._propagate()
+
+    def _propagate(self):
+        update = _Update(self._value)
+        for reference in list(self._callbacks):
+            function = reference()
+            if function is None:
+                self._callbacks.remove(reference)
+                continue
+            try:
+                function(update)
+            except Exception as e:  # ktl logs these; it never raises them
+                self.callback_errors.append(e)
 
     def read(self, binary=False, both=False, wait=True, timeout=None):
         with self._ktl.lock:
@@ -102,14 +146,15 @@ class FakeKeyword:
                         'forever on an unresponsive service'
                     )
                 raise TimeoutException(f'{self.service}.{self.name}: no reply within {timeout} s')
-            return self.value if binary else str(self.value)
+            self._propagate()
+            return self._value if binary else str(self._value)
 
     def write(self, value, wait=True, binary=False, timeout=None):
         with self._ktl.lock:
             self.writes.append(value)
             self._ktl.writes.append((self.service, self.name, value))
-            self.value = value
             self.pending = []
+            self.value = value
             if self.on_write is not None:
                 self.on_write(value)
 
@@ -117,12 +162,20 @@ class FakeKeyword:
         with self._ktl.lock:
             self.monitored = start
 
+    def callback(self, function, remove=False, preferred=False):
+        with self._ktl.lock:
+            if remove:
+                self._callbacks = [r for r in self._callbacks if r() is not function]
+                return
+            make_ref = weakref.WeakMethod if inspect.ismethod(function) else weakref.ref
+            self._callbacks.append(make_ref(function))
+
     def waitFor(self, expression, timeout=None, case=False):  # noqa: N802 (ktl's name)
         with self._ktl.lock:
             self.monitored = True
             if not self.responsive:
                 return False
-            while not _evaluate(self.value, expression):
+            while not _evaluate(self._value, expression):
                 if not self.pending:
                     return False
                 self.value = self.pending.pop(0)
