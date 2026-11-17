@@ -2,7 +2,7 @@
 Tests for the ktl-free part of :mod:`slew`: :func:`slew.find_nearest_target`.
 
 :class:`slew.NickelTelescopePointing` is not tested directly here, for
-the same reason :class:`focus.Focus`/:class:`focus.Exposure` aren't (see
+the same reason :class:`focus.Focus`/:class:`exposure.Exposure` aren't (see
 ``fake_hardware.py``): it talks to real ``ktl`` keywords, which can only
 be validated at the telescope. It's replaced wholesale by
 ``fake_hardware.FakeTelescopePointing`` wherever it's needed --

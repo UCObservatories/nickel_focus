@@ -6,6 +6,7 @@ import types
 import numpy as np
 import pytest
 
+from nickel_focus import exposure
 from nickel_focus import focus
 from nickel_focus import log
 from nickel_focus import slew
@@ -94,7 +95,7 @@ def test_archive_sequence_never_constructs_hardware(qapp, focus_sweep, monkeypat
 
     monkeypatch.setattr(focus, 'ktl', object())
     monkeypatch.setattr(focus, 'Focus', no_hardware)
-    monkeypatch.setattr(focus, 'Exposure', no_hardware)
+    monkeypatch.setattr(exposure, 'Exposure', no_hardware)
     window, controller = _make_controller(focus_sweep)
 
     controller.start_focus_sequence()
@@ -848,3 +849,73 @@ def test_quit_is_disabled_while_a_slew_runs(qapp, fake_telescope):
     _wait_for_slew_worker(controller)
     assert window.status_bar.quit_button.isEnabled(), \
         'Quit should be re-enabled once the slew finishes'
+
+
+# -- exposure settings initialized from the camera ----------------------------
+
+def _exposure_hardware_reporting(settings):
+    """A stand-in `Exposure` whose `cfg.current_settings()` returns ``settings``."""
+    return types.SimpleNamespace(cfg=types.SimpleNamespace(current_settings=lambda: settings))
+
+
+def test_exposure_fields_keep_their_defaults_without_ktl(qapp):
+    reference_window = MainWindow()  # kept alive so its widgets aren't deleted
+    defaults = reference_window.control_panel
+    defaults.tabs.setCurrentWidget(defaults.single_tab)
+    window = MainWindow()
+    Controller(window)
+
+    panel = window.control_panel
+    panel.tabs.setCurrentWidget(panel.single_tab)
+    assert panel.get_exposure_config() == defaults.get_exposure_config()
+
+
+def test_exposure_fields_start_at_the_camera_settings(qapp, caplog):
+    window = MainWindow()
+    controller = Controller(window)
+    controller.exposure_hardware = _exposure_hardware_reporting(
+        {'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'})
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller._initialize_exposure_config()
+
+    panel = window.control_panel
+    for tab in (panel.single_tab, panel.grid_tab, panel.auto_tab):
+        panel.tabs.setCurrentWidget(tab)
+        assert panel.get_exposure_config() == {'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'}
+    assert any('initialized from the camera' in r.getMessage() for r in caplog.records)
+
+
+def test_unknown_camera_setting_is_logged_and_left_at_default(qapp, caplog):
+    window = MainWindow()
+    controller = Controller(window)
+    controller.exposure_hardware = _exposure_hardware_reporting(
+        {'exptime': 30.0, 'speed': '0.5MHz', 'binning': '1,1'})
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller._initialize_exposure_config()
+
+    assert any(
+        r.levelname == 'WARNING' and "'0.5MHz'" in r.getMessage() for r in caplog.records
+    ), 'an unknown speed should be reported'
+    panel = window.control_panel
+    panel.tabs.setCurrentWidget(panel.single_tab)
+    assert panel.get_exposure_config()['exptime'] == 30.0, 'the other settings still apply'
+
+
+def test_failed_camera_settings_read_is_logged(qapp, caplog):
+    def fail():
+        raise RuntimeError('keyword read failed')
+
+    window = MainWindow()
+    controller = Controller(window)
+    controller.exposure_hardware = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(current_settings=fail))
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller._initialize_exposure_config()
+
+    assert any(
+        r.levelname == 'WARNING' and 'current exposure settings' in r.getMessage()
+        for r in caplog.records
+    )

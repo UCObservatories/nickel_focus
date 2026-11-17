@@ -2,7 +2,7 @@
 Tests for the ktl-free parts of :mod:`focus`: the
 :func:`focus.FocusSequence.step`/:func:`focus.FocusSequence.execute`
 sequence-stepping engine, exercised via :class:`focus.ArchiveFocusSequence`
-so no :class:`focus.Focus`/:class:`focus.Exposure` hardware objects are
+so no :class:`focus.Focus`/:class:`exposure.Exposure` hardware objects are
 ever constructed.
 """
 from pathlib import Path

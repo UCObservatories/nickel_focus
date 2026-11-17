@@ -12,7 +12,7 @@ since the ``gui`` extra requires it), :mod:`ktl` being unavailable is not an
 error here: ``scripts/``'s archive/replay CLI paths and
 :class:`~nickel_focus.focus.ArchiveFocusSequence` must keep working with no live
 :mod:`ktl` connection at all.  Code that actually talks to hardware
-(:class:`~nickel_focus.focus.Focus`, :class:`~nickel_focus.focus.Exposure`,
+(:class:`~nickel_focus.focus.Focus`, :class:`~nickel_focus.exposure.Exposure`,
 :class:`~nickel_focus.slew.NickelTelescopePointing`) checks ``ktl is None``
 itself and raises :class:`RuntimeError` there instead.
 """

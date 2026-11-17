@@ -3,7 +3,7 @@ The :class:`PySide6.QtCore.QThread` engine that drives a
 :class:`~nickel_focus.focus.FocusSequence` off the GUI thread.
 
 Every hardware call made by :class:`~nickel_focus.focus.Focus` and
-:class:`~nickel_focus.focus.Exposure` is blocking, and a real exposure takes
+:class:`~nickel_focus.exposure.Exposure` is blocking, and a real exposure takes
 seconds to tens of seconds, so running a sequence directly on the GUI's
 event-loop thread would freeze the whole interface.
 :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` runs it here instead
@@ -50,7 +50,7 @@ class FocusWorker(QtCore.QThread):
         default) or any other focus value the user enters.
     exp_kwargs : :obj:`dict`, optional
         Exposure settings (``record``, ``speed``, ``binning``, ``exptime``)
-        applied via :meth:`~nickel_focus.focus.ExposureConfig.configure` before
+        applied via :meth:`~nickel_focus.exposure.ExposureConfig.configure` before
         stepping, matching
         :meth:`~nickel_focus.focus.FocusSequence.execute`.  Meaningful for
         ``mode='step'``/``'single'`` against a sequence with real (or fake)

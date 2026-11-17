@@ -7,7 +7,7 @@ in :mod:`fake_hardware` (see the ``fake_hardware`` fixture in
 This is the first automated coverage either of these two classes has
 had: :mod:`test_focus_sequence` only exercises
 :class:`focus.ArchiveFocusSequence`, which never touches
-:class:`focus.Focus`/:class:`focus.Exposure` at all. These tests
+:class:`focus.Focus`/:class:`exposure.Exposure` at all. These tests
 validate the *software logic* -- stepping, focus-range checks, the
 adaptive curve-following algorithm -- not the real KTL keyword protocol,
 which can only be checked at the telescope.

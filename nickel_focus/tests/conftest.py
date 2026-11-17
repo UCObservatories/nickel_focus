@@ -10,8 +10,8 @@ Per the project's testing strategy, this suite must never touch real
 telescope/camera hardware via ``ktl``, regardless of whether the ``ktl``
 package happens to be installed in the environment running the tests --
 see the autouse :func:`no_ktl` fixture below, which forces
-:mod:`nickel_focus.focus`/:mod:`nickel_focus.slew`'s ``ktl`` references to
-``None`` for every test unless overridden by :func:`fake_hardware`/
+:mod:`nickel_focus.focus`/:mod:`nickel_focus.exposure`/:mod:`nickel_focus.slew`'s
+``ktl`` references to ``None`` for every test unless overridden by :func:`fake_hardware`/
 :func:`fake_telescope`.
 """
 import matplotlib
@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
+from nickel_focus import exposure
 from nickel_focus import focus
 from nickel_focus import slew
 from nickel_focus.tests.fake_hardware import FakeExposure, FakeFocus, FakeTelescopePointing
@@ -29,11 +30,11 @@ from nickel_focus.tests.fake_hardware import FakeExposure, FakeFocus, FakeTelesc
 @pytest.fixture(autouse=True)
 def no_ktl(monkeypatch):
     """
-    Force ``focus.ktl``/``slew.ktl`` to ``None`` for every test, regardless
-    of whether the real ``ktl`` package happens to be importable in the
-    environment running the suite.
+    Force ``focus.ktl``/``exposure.ktl``/``slew.ktl`` to ``None`` for every
+    test, regardless of whether the real ``ktl`` package happens to be
+    importable in the environment running the suite.
 
-    ``focus.Focus``/``focus.Exposure``/``slew.NickelTelescopePointing`` all
+    ``focus.Focus``/``exposure.Exposure``/``slew.NickelTelescopePointing`` all
     check ``ktl is None`` in their constructors and raise ``RuntimeError``
     before ever calling ``ktl.cache(...)``, so patching it to ``None`` here
     guarantees no test can reach real hardware -- not just the tests that
@@ -49,6 +50,7 @@ def no_ktl(monkeypatch):
     inject fake hardware instead.
     """
     monkeypatch.setattr(focus, 'ktl', None)
+    monkeypatch.setattr(exposure, 'ktl', None)
     monkeypatch.setattr(slew, 'ktl', None)
 
 
@@ -154,7 +156,7 @@ def focus_sweep(tmp_path):
 @pytest.fixture
 def fake_hardware(tmp_path, monkeypatch):
     """
-    Monkeypatch ``focus.ktl``, ``focus.Focus``, and ``focus.Exposure`` so
+    Monkeypatch ``focus.ktl``, ``focus.Focus``, and ``exposure.Exposure`` so
     that live (:class:`focus.GridFocusSequence`/
     :class:`focus.AutomatedFocusSequence`) sequences can be constructed
     and stepped with no real ``ktl`` connection or hardware. Each
@@ -190,7 +192,7 @@ def fake_hardware(tmp_path, monkeypatch):
 
     monkeypatch.setattr(focus, 'ktl', object())  # anything not None
     monkeypatch.setattr(focus, 'Focus', lambda: fake_focus)
-    monkeypatch.setattr(focus, 'Exposure', lambda: fake_exposure)
+    monkeypatch.setattr(exposure, 'Exposure', lambda: fake_exposure)
 
     return {
         'best_focus': best_focus,

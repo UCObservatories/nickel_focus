@@ -13,6 +13,7 @@ import logging
 
 from astropy.coordinates import SkyCoord
 
+from nickel_focus import exposure
 from nickel_focus import focus
 from nickel_focus import log
 from nickel_focus import slew
@@ -125,7 +126,8 @@ class Controller(QtCore.QObject):
         # exposure (sequences and single exposures construct their own,
         # via `focus.FocusSequence`). `None` without a ktl connection.
         self.focus_hardware = self._connect_status_handle(focus.Focus, 'focus')
-        self.exposure_hardware = self._connect_status_handle(focus.Exposure, 'exposure')
+        self.exposure_hardware = self._connect_status_handle(exposure.Exposure, 'exposure')
+        self._initialize_exposure_config()
 
         # `focus.ktl` and `slew.ktl` are the same object in normal
         # operation (see `nickel_focus/pkg/ktl.py`), so checking one is
@@ -610,7 +612,7 @@ class Controller(QtCore.QObject):
         ----------
         handle_class : :obj:`type`
             :class:`~nickel_focus.focus.Focus` or
-            :class:`~nickel_focus.focus.Exposure`.
+            :class:`~nickel_focus.exposure.Exposure`.
         description : :obj:`str`
             Short name for the handle, used in the warning message.
         """
@@ -621,6 +623,39 @@ class Controller(QtCore.QObject):
         except Exception as e:
             log.warning(f'Could not connect to the {description} status keywords: {e}', exc_info=e)
             return None
+
+    def _initialize_exposure_config(self):
+        """
+        Start the Single/Grid/Auto tabs' exposure fields (exposure time, speed,
+        binning) at the camera's current settings, read via
+        :meth:`~nickel_focus.exposure.ExposureConfig.current_settings`.
+
+        Without a ``ktl`` connection
+        (:attr:`~nickel_focus.gui.controller.Controller.exposure_hardware` is
+        ``None``), the fields keep their built-in defaults.  Called after the
+        window has restored any saved settings, so the camera's current values
+        take precedence over remembered ones.  A failed read, or a value the
+        fields can't show, is logged as a warning and leaves those fields
+        unchanged.
+        """
+        if self.exposure_hardware is None:
+            return
+        try:
+            config = self.exposure_hardware.cfg.current_settings()
+        except Exception as e:
+            log.warning(f'Could not read the current exposure settings: {e}', exc_info=e)
+            return
+        if not config:
+            return
+        unmatched = self.window.control_panel.set_exposure_config(config)
+        for key in unmatched:
+            log.warning(
+                f'Current exposure {key} ({config[key]!r}) is not one of the GUI options; '
+                f'leaving the default.'
+            )
+        applied = ', '.join(f'{key}={value}' for key, value in config.items() if key not in unmatched)
+        if applied:
+            log.info(f'Exposure settings initialized from the camera: {applied}')
 
     def _poll_hardware(self):
         """

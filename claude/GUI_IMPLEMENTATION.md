@@ -2590,3 +2590,62 @@ key `'target'`); the keys, and so the Controller's mappings, are
 unchanged. Updated the Controller docstring, Help tab text, test, and
 `GUI_REFERENCE.md` to match. Also removed the circles' thin dark outline,
 per request.
+
+## Exposure control moved to `exposure.py` (2026-11-16)
+
+Per request, the camera/exposure KTL wrappers -- `ExposurePath`,
+`ExposureConfig`, `Exposure` -- moved unchanged from `focus.py` into a new
+`nickel_focus/exposure.py`; `focus.py` keeps `Focus` (which still reads
+`EXPSTATE` itself, to refuse a focus move mid-exposure), the sequences,
+`FocusPlot`, and `StepResult`.
+
+- `focus.py` imports the module (`from nickel_focus import exposure`) and
+  constructs `exposure.Exposure()` in `FocusSequence.__init__`, so the
+  class has exactly one patchable home. Two local variables in
+  `FocusSequence.reanalyze`/`take_single_exposure` that were named
+  `exposure` (a FITS path) became `exposure_file`, so they don't shadow
+  the module.
+- The Controller's status-indicator handle uses `exposure.Exposure`.
+- Tests: `no_ktl` now also sets `exposure.ktl` to `None` (`Exposure`
+  checks its own module's `ktl`; without this, a machine with real `ktl`
+  could construct a real camera handle in a test). `fake_hardware` and
+  `test_archive_sequence_never_constructs_hardware` patch
+  `exposure.Exposure` instead of `focus.Exposure`. New
+  `tests/test_exposure.py` checks `Exposure` refuses to construct without
+  `ktl`.
+- Cross-references in docstrings (`focus_worker.py`,
+  `focus_control_panel.py`, `controller.py`, `pkg/ktl.py`, test
+  docstrings) and `GUI_REFERENCE.md` updated. Lick's `Makefile`
+  (`$(wildcard *.py)`) and `pyproject.toml` (package discovery) pick up
+  the new module automatically.
+
+Full suite: `256 passed`.
+
+## Exposure fields initialized from the camera (2026-11-16)
+
+Per request, the Single/Grid/Auto tabs' exposure time, speed, and binning
+now start at the camera's current values instead of fixed defaults, which
+remain only when there's no `ktl` connection (i.e. only seen with
+`--test`). Not testable against real hardware here; covered with
+stand-in keyword objects.
+
+- **Model:** `ExposureConfig.current_settings()` reads `EXPOSURE`
+  (→ `float`), `AMPCONF`, and `BINNING`, translating the `AMPCONF` value
+  back through `speed_aliases` (e.g. `1.0MHz` → `Fast`) so the result uses
+  the same names `configure()` accepts; an unaliased value passes through
+  as-is. `FakeExposureConfig.current_settings()` returns only what's been
+  configured (nothing, initially), so the fake-hardware tests' fields are
+  untouched.
+- **View:** `FocusControlPanel.set_exposure_config(config)` applies any
+  subset of `exptime`/`speed`/`binning` to all three tabs and returns the
+  keys whose value isn't a drop-down option (those fields are left alone;
+  an out-of-range exposure time is clamped by the spin box).
+- **Controller:** `_initialize_exposure_config()`, called in `__init__`
+  right after the hardware handles are built -- after `MainWindow` has
+  restored saved settings, so the camera's values win. Logs the applied
+  settings at INFO; a failed read or unmatched value is a warning.
+- **To verify at the telescope:** the exact `AMPCONF`/`BINNING` strings
+  (the binning options assume `'1,1'`-style values, as
+  `ExposureConfig.expbin_options` already does).
+
+Full suite: `264 passed`.

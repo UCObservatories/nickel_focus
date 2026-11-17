@@ -1,5 +1,5 @@
 """
-Lightweight stand-ins for :class:`focus.Focus`/:class:`focus.Exposure` and
+Lightweight stand-ins for :class:`focus.Focus`/:class:`exposure.Exposure` and
 :class:`slew.NickelTelescopePointing`, used to test the sequences/scripts
 built on top of them without any real ``ktl`` connection or
 telescope/camera hardware.
@@ -7,7 +7,7 @@ telescope/camera hardware.
 Without these, live sequences can't be run or tested at all on a machine
 with no hardware access, since ``self._focus``/``self._exposure`` would
 just be ``None``. These fakes are injected by monkeypatching
-``focus.Focus``/``focus.Exposure``/``focus.ktl``/``slew.NickelTelescopePointing``
+``focus.Focus``/``exposure.Exposure``/``focus.ktl``/``slew.NickelTelescopePointing``
 directly (see the ``fake_hardware``/``fake_telescope`` fixtures in
 ``conftest.py``), not through constructor parameters on
 :class:`focus.FocusSequence` -- deliberately, so that it needs no
@@ -34,14 +34,14 @@ class FakeFocus:
 
 
 class FakeExposurePath:
-    """Stand-in for :class:`focus.ExposurePath`."""
+    """Stand-in for :class:`exposure.ExposurePath`."""
 
     def __init__(self):
         self.previous = None
 
 
 class FakeExposureConfig:
-    """Stand-in for :class:`focus.ExposureConfig`; just records what it's told."""
+    """Stand-in for :class:`exposure.ExposureConfig`; just records what it's told."""
 
     def __init__(self):
         self.record = None
@@ -59,10 +59,15 @@ class FakeExposureConfig:
         if exptime is not None:
             self.exptime = exptime
 
+    def current_settings(self):
+        """Whatever has been configured so far (nothing, initially)."""
+        settings = {'exptime': self.exptime, 'speed': self.speed, 'binning': self.binning}
+        return {key: value for key, value in settings.items() if value is not None}
+
 
 class FakeExposure:
     """
-    Stand-in for :class:`focus.Exposure`. Instead of talking to real
+    Stand-in for :class:`exposure.Exposure`. Instead of talking to real
     camera hardware, :func:`expose` synthesizes a FITS frame for whatever
     focus value ``focus_obj.current`` holds at the time it's called, via
     ``make_frame``, and writes it to ``directory``.

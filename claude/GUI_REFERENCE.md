@@ -23,8 +23,8 @@ curve, and replay/reanalyze previously collected exposures from disk --
 all without using the `focus.py`/`slew_to_nearest.py` CLIs directly.
 
 The GUI is strictly a View+Controller layer on top of the existing Model
-code in `nickel_focus/` (`focus.py`, `slew.py`, `starlist.py`,
-`photometry.py`, `quadratic.py`). It adds no new domain logic of its own;
+code in `nickel_focus/` (`focus.py`, `exposure.py`, `slew.py`,
+`starlist.py`, `photometry.py`, `quadratic.py`). It adds no new domain logic of its own;
 every hardware call, exposure, slew, fit, and sequence rule lives in that
 Model code, which is independently usable from the CLI
 (`nickel_focus/scripts/`) with no Qt installed at all.
@@ -59,7 +59,7 @@ gui/
 This is a fairly conventional Model-View-Controller split, with one Qt-
 specific wrinkle:
 
-- **Model** is `focus.py`/`slew.py` and friends -- reused as-is, not
+- **Model** is `focus.py`/`exposure.py`/`slew.py` and friends -- reused as-is, not
   reimplemented. `gui/model/focus_worker.py` and `gui/model/slew_worker.py`
   aren't domain logic; they're the adapters that run the Model's blocking,
   synchronous methods (`FocusSequence.step`/`.reanalyze`/
@@ -78,8 +78,9 @@ specific wrinkle:
 - **Controller** (`gui/controller.py`) is the only module that imports
   both the views and the model. It owns the currently active
   `focus.FocusSequence`/`FocusWorker`, the `slew.NickelTelescopePointing`
-  handle/`SlewWorker` (if any), read-only `focus.Focus`/`focus.Exposure`
-  handles for the status indicators, connects each view's signals to its own
+  handle/`SlewWorker` (if any), read-only `focus.Focus`/`exposure.Exposure`
+  handles for the status indicators and the initial exposure settings,
+  connects each view's signals to its own
   handler methods, and implements the "hardware exclusivity" rule: only
   one operation (a running sequence, a single exposure, or a slew) may be
   active at a time. Finding the nearest target is exempt from that rule --
@@ -97,10 +98,20 @@ itself -- so a developer with no `ktl` connection can still see and click
 through them; it's wired to `nickel_focus_gui`'s suppressed `--test` flag
 (§4), never set any other way.
 
+At construction, the Controller also starts the Single/Grid/Auto tabs'
+exposure fields (exposure time, speed, binning) at the camera's current
+settings, read via `exposure.ExposureConfig.current_settings()` (which
+reports the speed by its GUI name, e.g. `Fast`) and applied with
+`FocusControlPanel.set_exposure_config`. This runs after `MainWindow`
+restores any saved settings, so the camera's values take precedence. A
+failed read, or a speed/binning that isn't one of the drop-down options,
+is logged as a warning and leaves those fields unchanged. Without `ktl`
+the fields keep their built-in defaults (visible only with `--test`).
+
 `gui/qt.py` exists so exactly one module fails, with one clear message, if
 PySide6 isn't installed -- every other `gui` module imports Qt classes from
-here (`from gui.qt import QtWidgets`) rather than importing PySide6
-directly. `scripts/` never imports `gui.qt` and must never need to:
+here (`from nickel_focus.gui.qt import QtWidgets`) rather than importing
+PySide6 directly. `scripts/` never imports `gui.qt` and must never need to:
 installing the base package is enough to run the CLI with no Qt involved,
 and the `gui` extra in `pyproject.toml` adds the one extra dependency the
 GUI needs.
@@ -119,7 +130,7 @@ whereas `pkg/ktl.py` *soft*-fails -- it warns once, at most, and sets
 not an error: the CLI's archive/replay path and
 `focus.ArchiveFocusSequence` must keep working with no live `ktl`
 connection at all. Code that actually needs `ktl` (`focus.Focus`,
-`focus.Exposure`, `slew.NickelTelescopePointing`, and, in turn, the
+`exposure.Exposure`, `slew.NickelTelescopePointing`, and, in turn, the
 Controller that constructs them) checks `ktl is None` itself and reports a
 clear failure instead of crashing.
 
@@ -287,9 +298,9 @@ matter which is true:
   the offscreen Qt platform plugin so whatever GUI tests do run never need
   a real display.
 - `tests/conftest.py`'s autouse `no_ktl` fixture forces `focus.ktl`/
-  `slew.ktl` to `None` before every test, regardless of whether the real
-  `ktl` package happens to be importable in the environment running the
-  suite. Since `focus.Focus`/`focus.Exposure`/
+  `exposure.ktl`/`slew.ktl` to `None` before every test, regardless of
+  whether the real `ktl` package happens to be importable in the
+  environment running the suite. Since `focus.Focus`/`exposure.Exposure`/
   `slew.NickelTelescopePointing` all raise `RuntimeError` in their
   constructors whenever `ktl is None`, this guarantees no test -- not just
   the ones that explicitly check "no ktl connection" behavior, but also,
@@ -299,7 +310,7 @@ matter which is true:
   `GridFocusSequence`/`AutomatedFocusSequence`, taking a single exposure,
   slewing) request the `fake_hardware`/`fake_telescope` fixtures instead.
   These run after `no_ktl` and override it: they monkeypatch
-  `focus.Focus`/`focus.Exposure`/`slew.NickelTelescopePointing` to
+  `focus.Focus`/`exposure.Exposure`/`slew.NickelTelescopePointing` to
   lightweight in-memory stand-ins (`tests/fake_hardware.py`) that
   synthesize FITS frames and record commanded focus/pointing values,
   rather than ever talking to a real KTL keyword.
@@ -322,4 +333,5 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `1e47148` | 2026-09-01 | Documented that the Slew/Single/Grid/Auto tabs gray out (and the window opens on Replay) with no live `ktl` connection, and the suppressed `nickel_focus_gui --test` flag that overrides it for development. |
 | `73141ca` | 2026-09-01 | Documented that the Log tab is now driven by real `nickel_focus.log` output via `gui/log_handler.py`'s `QtLogHandler`, rather than by view methods appending text directly; see `claude/GUI_LOGGING_PLAN.md` for the full logging-integration design and phased implementation history. |
 | `034a374` | 2026-11-16 | Status text built once in the Controller (`show_status`); 'm'-key selection and curve-panel API corrected; install/testing now point to `README.md`. |
-| *pending* | 2026-11-16 | Added `StatusBar` (Quit + Slew/Track/On Target/Focus/Exp colored-circle indicators) above the image panel (Quit disabled while running); image anchored to the top of its canvas; Fusion style forced on all platforms. |
+| `33f7060` | 2026-11-16 | Added `StatusBar` (Quit + Slew/Track/On Target/Focus/Exp colored-circle indicators) above the image panel (Quit disabled while running); image anchored to the top of its canvas; Fusion style forced on all platforms. |
+| *pending* | 2026-11-16 | Exposure control (`ExposurePath`/`ExposureConfig`/`Exposure`) moved from `focus.py` to its own `exposure.py` module; exposure fields start at the camera's current settings. |

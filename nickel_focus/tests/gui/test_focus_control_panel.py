@@ -498,3 +498,28 @@ def test_set_settings_state_ignores_unknown_and_missing_keys(qapp):
         if key == 'grid/start':
             continue
         assert updated[key] == value, f'{key} should be untouched by an unrelated/partial update'
+
+
+def test_set_exposure_config_sets_every_exposure_tab(qapp):
+    panel = FocusControlPanel()
+
+    unmatched = panel.set_exposure_config({'exptime': 12.5, 'speed': 'Fast', 'binning': '1,1'})
+
+    assert unmatched == []
+    for tab in (panel.single_tab, panel.grid_tab, panel.auto_tab):
+        panel.tabs.setCurrentWidget(tab)
+        assert panel.get_exposure_config() == {'exptime': 12.5, 'speed': 'Fast', 'binning': '1,1'}
+
+
+def test_set_exposure_config_reports_and_skips_unknown_options(qapp):
+    panel = FocusControlPanel()
+    panel.tabs.setCurrentWidget(panel.single_tab)
+    before = panel.get_exposure_config()
+
+    unmatched = panel.set_exposure_config({'exptime': 7.0, 'binning': '3,3'})
+
+    assert unmatched == ['binning']
+    after = panel.get_exposure_config()
+    assert after['exptime'] == 7.0, 'a valid exposure time should still be applied'
+    assert after['binning'] == before['binning'], 'an unknown binning should leave the field alone'
+    assert after['speed'] == before['speed'], 'a missing key should leave the field alone'

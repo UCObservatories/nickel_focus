@@ -848,7 +848,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         """
         Return the currently active tab's exposure settings as a :obj:`dict`
         with keys ``exptime`` (:obj:`float`), ``speed``, ``binning``
-        (:obj:`str`) -- passed to `ExposureConfig.configure` before a live
+        (:obj:`str`) -- passed to
+        :meth:`~nickel_focus.exposure.ExposureConfig.configure` before a live
         exposure.  Empty for any tab other than Single, Grid, or Auto, since
         those are the only ones that take new exposures.
         """
@@ -871,6 +872,45 @@ class FocusControlPanel(QtWidgets.QWidget):
             'exptime': exptime.value(), 'speed': speed.currentText(),
             'binning': binning.currentText()
         }
+
+    def set_exposure_config(self, config):
+        """
+        Set the exposure fields on every tab that takes exposures (Single, Grid,
+        Auto) -- e.g. to the camera's current settings at startup.
+
+        Parameters
+        ----------
+        config : :obj:`dict`
+            Any subset of the keys returned by
+            :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.get_exposure_config`:
+            ``exptime`` (:obj:`float`), ``speed``, ``binning`` (:obj:`str`).
+            Missing keys are left unchanged.
+
+        Returns
+        -------
+        :obj:`list`
+            The keys whose value couldn't be shown because it isn't one of the
+            drop-down's options (``speed``/``binning``); those fields are left
+            unchanged.  An ``exptime`` outside the field's range is clamped to
+            it rather than reported.
+        """
+        exposure_widgets = (
+            (self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo),
+            (self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo),
+            (self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo),
+        )
+        unmatched = []
+        for key, index in (('speed', 1), ('binning', 2)):
+            if key in config and exposure_widgets[0][index].findText(config[key]) < 0:
+                unmatched.append(key)
+        for exptime_spin, speed_combo, binning_combo in exposure_widgets:
+            if 'exptime' in config:
+                exptime_spin.setValue(config['exptime'])
+            if 'speed' in config and 'speed' not in unmatched:
+                speed_combo.setCurrentText(config['speed'])
+            if 'binning' in config and 'binning' not in unmatched:
+                binning_combo.setCurrentText(config['binning'])
+        return unmatched
 
     def get_settings_state(self):
         """
