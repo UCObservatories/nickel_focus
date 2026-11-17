@@ -12,9 +12,9 @@ public methods (`ktl.cache` and the calls in §3). It never reaches into
 lower-level objects such as `keyword.ktlc` or the Usher, and it
 deliberately avoids `ktl`'s dictionary-style keyword access
 (`keyword['ascii']` etc.) as well, even though `ktl` treats that as public
--- see §3.8 for why. Every option in §5 stays within these limits. Needs
-the named methods don't meet are proposed as new methods in
-`claude/KTL_SUGGESTIONS.md`.
+-- see §3.8 for why. Needs the named methods don't meet are proposed as
+new methods in `claude/KTL_SUGGESTIONS.md`; planned changes to how we use
+`ktl` are in `claude/ktl_interface_refactor.md`.
 
 **Uncertainty markers.** The Python layer is a wrapper around a compiled C
 extension, `ktlc`, which in turn calls the KTL C library and a per-service
@@ -23,7 +23,7 @@ client library. Anything decided below the Python layer is marked
 not what it does. Where the services' keyword help (§1, §4.1) answers such a
 question, it's marked **[help]** instead; those answers come from the
 services' own documentation rather than from code, so they're likely but
-still worth confirming once at the telescope (see the end of §5).
+still worth confirming once at the telescope.
 
 ## 1. Provenance
 
@@ -230,8 +230,8 @@ waitFor(expression, timeout=None, case=False)   # e.g. kw.waitFor('== allowed', 
   service actually broadcasts, though it does evaluate every broadcast it
   receives, not just the latest. If a state passes too quickly to be
   broadcast, a wait for it never succeeds **[C-layer: whether the service
-  broadcasts every transition]** -- relevant to `Exposure.expose`'s wait
-  for `EXPSTATE == Start` (§4.1).
+  broadcasts every transition]**. `Exposure.expose` waits for one such
+  state, `EXPSTATE == Start` (§4.1).
 - **Timeout can overshoot.** The loop waits up to the *full* timeout after
   each broadcast that doesn't satisfy the expression
   (`Expression.wait`, `Expression.py:690`), so a keyword that keeps
@@ -384,120 +384,9 @@ dispatcher has finished supplementing the FITS header; the help says it is
 "the keyword that other applications should track and use".
 `nscicam.FILENAME`, by contrast, is set when the exposure begins.
 
-## 5. Implications and open questions
-
-Not acted on yet; each is a candidate change, to be weighed against what's
-confirmed at the telescope. Roughly in order of consequence.
-
-1. **Slew targets are written as ascii decimal numbers to sexagesimal
-   keywords.** `slew_to` writes `ra.to('hourangle').value` and
-   `dec.to('deg').value` (e.g. `5.5`) to `POCORAD`/`POCODECD` as ascii,
-   but those keywords' ascii form is sexagesimal (`05:30:00.00`), and how
-   the service parses a decimal ascii value is **[C-layer]** (§3.2). If it
-   misreads it, the telescope slews to the wrong place. *Option:* write
-   the binary value in radians (`write(ra.radian, binary=True)`), which is
-   the keywords' native unit **[help]**.
-2. **`EXPRESULT` isn't a reliable file path.** `ExposurePath.previous`
-   (used by `FocusSequence.take_exposure` for every exposure) is
-   `Path(EXPRESULT.read())`. On an error, `EXPRESULT` holds the filename
-   *plus a message*, which would silently become a bogus path; and on
-   success the help doesn't say whether it's a full path. Reading it as
-   soon as `EXPSTATE` returns to `Ready` may also be before the dispatcher
-   has finished the FITS header. *Option:* use `FITSFILE` -- the full path,
-   set only once the file is complete, and the keyword the camera's help
-   says applications should track (§4.1) -- e.g. wait for it to update
-   after the exposure, and treat `EXPSTATE == Error` as a failure.
-3. **Reading the current Dec from ascii.** `NickelTelescopePointing.current`
-   parses `POCODECA`'s ascii text. Its format has no explicit sign field,
-   so whether a Dec between 0° and −1° keeps its minus sign is
-   **[C-layer]** (§4.1). *Option:* read `binary=True` (radians) for both
-   `POCORAA` and `POCODECA`.
-4. **First-use false negatives from short `waitFor`s.** `Focus.set_to` and
-   `NickelTelescopePointing.slew_to` use 0.5 s `waitFor`s on `POCSTOP`,
-   `EXPSTATE`, `POCTRCK`, `POCOT`. If a keyword isn't monitored yet, the
-   first call must receive its priming value within 0.5 s or the check
-   fails ("Telescope movement is disabled!") even when the condition is
-   true (§3.4). In practice `EXPSTATE` is usually already monitored (by
-   `Exposure`), but `POCSTOP`/`POCTRCK`/`POCOT` may not be. *Option:*
-   `monitor()` (blocking priming read) these keywords in the constructors,
-   as `Exposure` already does for `EXPSTATE`; and, when a check does fail,
-   follow up with a short `read(timeout=...)` so a non-responding service
-   is reported as such rather than as, e.g., "movement is disabled" (§3.4).
-   (`KTL_SUGGESTIONS.md` §1 and §3 propose fixing both in `waitFor`
-   itself.)
-5. **`EXPSTATE == Start` may be too brief to see.** `Exposure.expose` writes
-   `EXPOSE = Go`, then waits up to 30 s for `EXPSTATE == Start` before
-   waiting for `Ready`. `Start` corresponds to the acquisition's starting
-   phase and is probably short; if the service doesn't broadcast it, or
-   the exposure moves on before the broadcast is processed, the wait times
-   out and the exposure is reported as failed even though it ran (§3.4).
-   *Option:* wait for `EXPSTATE != Ready` (any of `Start`/`Exposing`/
-   `Readout`) instead, then for `Ready`.
-6. **GUI polling waits on the service from the GUI thread.** Every 1 Hz
-   poll makes 8 `read()`s from the GUI thread. Because both services
-   support notify reads and writes **[help]**, these don't sit behind a
-   worker's writes in the Usher (§2.2), but each still waits for the
-   service's reply, with no timeout (§3.1) -- so a slow or unresponsive
-   service still freezes the GUI. *Option:* pass a short `timeout` (known
-   to be honored for our services), catching `TimeoutException` and showing
-   the indicator as unavailable. Reading monitored keywords' cached values
-   instead -- no round trip at all -- would need the named method proposed
-   in `KTL_SUGGESTIONS.md` §4.
-7. **The Exp indicator shows `Error` as yellow.** Any `EXPSTATE` other than
-   `Ready` is currently yellow, including `Error` (and `Unknown`).
-   *Option:* show `Error` (and perhaps `Unknown`) red.
-8. **Never write `POCSTOP` from our code.** Writing it stops all motion,
-   and a negative value cuts motor power (§4.1). Our code only reads it
-   and should stay that way; worth a comment in `focus.py`/`slew.py`.
-9. **Read-speed names.** Our `Fast`/`Slow` aliases map to `1.0MHz`/
-   `0.05MHz`, but the help doesn't list `AMPCONFLIST`'s actual values, so
-   these are unconfirmed. If they're wrong, `configure(speed=...)` raises
-   (it checks against `AMPCONFLIST`), and the GUI's startup read of the
-   current speed logs a warning and keeps its default.
-10. **Hidden KTL warnings.** KTL's own log level is `ERROR` (§3.7), so its
-    warnings never appear. Raising it (or routing it into
-    `nickel_focus.log` via `ktl.logger(...)`, which accepts any object with
-    a `.write()` method) during commissioning would surface them.
-11. **Stale data after a dispatcher restart.** No heartbeats are configured
-    (§3.6). If monitoring is adopted (item 6), consider
-    `service.heartbeat(...)` on a regularly broadcasting keyword, so a
-    dispatcher restart is detected and monitoring restored.
-
-**Resolved by the help files:**
-
-- **`POCOT` is an integer** (`0`/`1`/`-1`), so both `waitFor('== 0')` and
-  the GUI's On Target indicator (which parses the ascii value as an
-  integer) work as written.
-- **Text values match our comparisons exactly:** `allowed`/`disabled`,
-  `on`/`off`, `Ready`, and `Yes`/`No` are the enumerator names, so
-  `RECORD == 'Yes'` (case-sensitive) and the GUI's case-insensitive
-  indicator mappings are both correct as written.
-- **Binning values** (`1,1`, `2,2`, `4,4`) match the code and GUI.
-- **Notify support:** every keyword we use supports notify reads and
-  writes and broadcasts, so read/write timeouts are honored and our writes
-  don't block the Usher (§3.1, §3.2).
-
-### Facts still to confirm at the telescope
-
-- **Ascii writes of decimal RA/Dec** (item 1): what `POCORAD`/`POCODECD`
-  do with a value like `5.5`.
-- **`EXPRESULT` contents** (item 2): full path or bare filename, and the
-  exact error form; and when `FITSFILE` updates relative to
-  `EXPSTATE == Ready`.
-- **Negative Dec in ascii** (item 3): e.g. read `POCODECA` while pointed
-  between 0° and −1°.
-- **Whether `EXPSTATE == Start` is reliably broadcast** (item 5).
-- **`AMPCONFLIST`'s values** (item 9).
-- **What write "completion" means** for `POCSECPD`, `POCORAD`/`POCODECD`,
-  and `EXPOSE` (§3.2) -- e.g. accepted vs. finished moving.
-- **One-line confirmation** that the help's notify flags are what the
-  Python layer sees: in an interactive session (a diagnostic, not
-  `nickel_focus` code), check `keyword['notify_reads']`/`['notify_writes']`
-  for one keyword per service -- or simply that a `read(timeout=0.001)`
-  raises `TimeoutException` rather than blocking.
-
-## 6. Version history
+## 5. Version history
 
 | Version | Date | Summary |
 | --- | --- | --- |
-| *pending* | 2026-11-17 | Initial reference, from KTL Python 5.2 (`ktl_python/`) and the `nickelpoco`/`nscicam` keyword help; dictionary-style access documented and excluded from our use. |
+| `a33f3dd` | 2026-11-17 | Initial reference, from KTL Python 5.2 (`ktl_python/`) and the `nickelpoco`/`nscicam` keyword help; dictionary-style access documented and excluded from our use. |
+| *pending* | 2026-11-17 | Moved the former §5 ("Implications and open questions") into `claude/ktl_interface_refactor.md`; this document now covers only current use and reference material. |
