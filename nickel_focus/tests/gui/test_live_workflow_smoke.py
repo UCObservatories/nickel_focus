@@ -20,6 +20,7 @@ from nickel_focus import focus
 from nickel_focus.gui.qt import QtCore
 from nickel_focus.gui.views.main_window import MainWindow
 from nickel_focus.gui.controller import Controller
+from nickel_focus.tests.gui.keyboard import type_and_enter
 
 
 def _wait_for_focus_worker(controller, timeout_ms=5000):
@@ -66,7 +67,7 @@ def test_full_live_workflow(qapp, fake_hardware):
     panel.grid_start_spin.setValue(340)
     panel.grid_step_spin.setValue(5)
     panel.grid_nstep_spin.setValue(5)
-    panel.grid_exptime_spin.setValue(5.0)
+    type_and_enter(panel.grid_exptime_spin, '5')
     panel.grid_acquire_button.click()
     _wait_for_focus_worker(controller)
 

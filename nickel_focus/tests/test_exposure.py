@@ -8,6 +8,7 @@ import pytest
 
 from nickel_focus import exposure
 from nickel_focus.services import KTLTimeoutError, KTLUnavailableError, NSciCam
+from nickel_focus.services.nscicam import ExposureConfig
 
 
 def test_camera_requires_ktl():
@@ -95,3 +96,20 @@ def test_next_path_follows_record(fake_hardware, tmp_path):
     sim.keyword('nscicam', 'RECORD').value = 'No'
     assert path.next == tmp_path / 'scratch' / 'fake12.fits', \
         'with RECORD = No, the next file should be in SCRATCHDIR'
+
+
+@pytest.mark.parametrize('key, ascii_value, expected', [
+    ('exptime', '12.500', 12.5),
+    ('speed', '1.0MHz', 'Fast'),
+    ('speed', '0.05MHz ', 'Slow'),
+    ('speed', '0.5MHz', '0.5MHz'),
+    ('binning', ' 2,2', '2,2'),
+])
+def test_setting_value_converts_keyword_values(key, ascii_value, expected):
+    assert ExposureConfig.setting_value(key, ascii_value) == expected, \
+        f'{key} {ascii_value!r} should convert to {expected!r}'
+
+
+def test_setting_value_rejects_a_non_numeric_exposure_time():
+    with pytest.raises(ValueError):
+        ExposureConfig.setting_value('exptime', 'garbage')

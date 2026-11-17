@@ -106,13 +106,37 @@ itself -- so a developer with no `ktl` connection can still see and click
 through them; it's wired to `nickel_focus_gui`'s suppressed `--test` flag
 (§4), never set any other way.
 
-At construction, the Controller also starts the Single/Grid/Auto tabs'
-exposure fields (exposure time, speed, binning) at the camera's current
-settings, read via `cam.cfg.current_settings()` (`services.nscicam.ExposureConfig`, which
-reports the speed by its GUI name, e.g. `Fast`) and applied with
-`FocusControlPanel.set_exposure_config`. A failed read, or a speed/binning that isn't one of the drop-down options,
-is logged as a warning and leaves those fields unchanged. Without the camera
-service the fields keep their built-in defaults (visible only with `--test`).
+The Single/Grid/Auto tabs' exposure fields (exposure time, speed, binning)
+follow the camera, both ways, and the three tabs always show the same
+values:
+
+- **Camera → fields.** The Controller subscribes to `EXPOSURE`, `AMPCONF`,
+  and `BINNING` along with the status keywords (see "KTL → Controller"
+  below); `Controller._on_exposure_keyword` converts each value with
+  `ExposureConfig.setting_value` (which names the speed by its GUI name,
+  e.g. `Fast`) and shows it on all three tabs with
+  `FocusControlPanel.set_exposure_config` -- only if it differs from what's
+  shown, so the broadcast confirming the user's own edit is a no-op. The
+  first value is logged as the camera's setting, later ones as changes
+  made on the camera (e.g. from another GUI, or the camera adjusting a
+  requested exposure time). A speed or binning that isn't a drop-down
+  option is added to the options, with a warning.
+- **Fields → camera.** Choosing a speed or binning, or entering an exposure
+  time, emits `FocusControlPanel.exposureSettingEdited(key, value)`. The
+  exposure time is an `ExposureTimeSpinBox`: like the data-acquisition GUI,
+  an edit turns it light red and takes effect only when Enter is pressed;
+  until then `get_exposure_config` reports the previous (committed) value.
+  `Controller._on_exposure_setting_edited` shows the new value on all three
+  tabs and writes it with `cam.cfg.configure(...)` **on the GUI thread**
+  (deliberately: settings changes are quick, and blocking the GUI while a
+  slow or unresponsive camera finishes is acceptable). A rejected write is
+  reported via `_fail`, and the fields go back to the camera's value.
+- Acquire still applies the fields with `configure()` before exposing, as a
+  safeguard (normally a no-op). Fields are disabled while anything runs, but
+  broadcasts still update them.
+- Without the camera service the fields are plain inputs with their
+  built-in defaults (visible only with `--test`); an edit still syncs the
+  three tabs.
 
 `gui/qt.py` exists so exactly one module fails, with one clear message, if
 PySide6 isn't installed -- every other `gui` module imports Qt classes from
@@ -272,13 +296,15 @@ implementation history.
   `quitRequested` signal the Controller connects to `quit()` (closing the
   window); `Controller._set_running` disables Quit, along with the action
   buttons, while anything is running.
-- **KTL → Controller (status bar and current position)**: no polling. The
-  Controller subscribes (`KTLService.subscribe`) to the keywords behind the
-  status indicators (`POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK` plus the
-  focus value `POCSECPA`, `EXPSTATE`) and the Slew tab's live position
-  display (`POCORAA`, `POCODECA`). `ktl` calls back on its own thread with
-  each broadcast (and each completed read, which also delivers the current
-  values at startup); `gui/ktl_bridge.py`'s `KTLBridge.relay` re-emits it as
+- **KTL → Controller (status bar, current position, exposure fields)**: no
+  polling. The Controller subscribes (`KTLService.subscribe`) to the
+  keywords behind the status indicators (`POCSTOP`, `POCTRCK`, `POCOT`,
+  `POCSECLK` plus the focus value `POCSECPA`, `EXPSTATE`), the Slew tab's
+  live position display (`POCORAA`, `POCODECA`), and the exposure fields
+  (`EXPOSURE`, `AMPCONF`, `BINNING`; see above). `ktl` calls back on its
+  own thread with each broadcast (and each completed read, which also
+  delivers the current values at startup);
+  `gui/ktl_bridge.py`'s `KTLBridge.relay` re-emits it as
   `keywordChanged(service, keyword, value)`, connected with a *queued*
   connection to `Controller._on_keyword_changed`, which runs on the GUI
   thread. That records the value and updates the affected indicator --
@@ -390,4 +416,5 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `e560841` | 2026-11-17 | Removed the Options tab and settings persistence. |
 | `4a21d56` | 2026-11-17 | KTL access moved into `services/` (`NickelPoco`/`NSciCam` on `KTLService`, the only `ktl` import; 1 s read timeouts); Controller shares one service of each; tests run on a keyword-level fake `ktl`; `--ktl-live` tests. |
 | `6227274` | 2026-11-17 | Services monitor their status/display keywords and register heartbeats at construction; checks distinguish "condition false" from "no reply" (`check`/`require`); live heartbeat test. |
-| *pending* | 2026-11-17 | Status indicators and current position follow keyword broadcasts (`KTLService.subscribe` → `gui/ktl_bridge.py` → queued signal), replacing the 1 Hz poll; position redraws limited to every 200 ms. |
+| `a37e42c` | 2026-11-17 | Status indicators and current position follow keyword broadcasts (`KTLService.subscribe` → `gui/ktl_bridge.py` → queued signal), replacing the 1 Hz poll; position redraws limited to every 200 ms. |
+| *pending* | 2026-11-17 | Exposure fields follow the camera both ways: broadcasts update all three tabs (outside changes logged); edits write to the camera at once, with the exposure time light red until Enter; unknown speed/binning values added to the options. |

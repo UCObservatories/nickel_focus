@@ -366,7 +366,7 @@ and one `NSciCam` and share them.
 | `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`) | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
 | `services.NSciCam` | `EXPSTATE`, `EXPOSE`, `DISP0CLK`; plus its helpers' keywords | `exposure_state()`, `exposure_state_is(state, timeout)` (`check`), `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE`, `EXPOSURE`, `AMPCONF`, `BINNING`; heartbeat `DISP0CLK`. |
 | `services.nscicam.ExposurePath` (`NSciCam.path`) | `RECORD`, `EXPRESULT`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous`, `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
-| `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `configure`, `exptime`, `current_settings` | Reads `AMPCONFLIST` at construction. |
+| `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `configure`, `exptime`, `current_settings`; `setting_value(key, ascii)` (class method) converts a broadcast value | Reads `AMPCONFLIST` at construction. `keywords` maps each setting to its keyword. |
 
 | Where | Uses | Notes |
 | --- | --- | --- |
@@ -375,7 +375,7 @@ and one `NSciCam` and share them.
 | `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, writes `Go`, then waits for `Start` (30 s) and `Ready` (exposure time + 90 s). |
 | `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target (ascii decimal hours/degrees), then `on_target(300)`. |
 | GUI `Controller` (subscriptions) | both | Status indicators and position display: `subscribe`s to `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`, `EXPSTATE`; values reach the GUI thread through a queued Qt signal (`gui/ktl_bridge.py`). No polling. |
-| GUI `Controller` (GUI thread, once at startup) | `NSciCam.cfg` | `current_settings()` seeds the Single/Grid/Auto exposure fields. |
+| GUI `Controller` (exposure fields) | `NSciCam` | `subscribe`s to `EXPOSURE`, `AMPCONF`, `BINNING`, so the Single/Grid/Auto fields follow the camera; a committed edit is written at once with `cfg.configure(...)`, on the GUI thread (no timeout). |
 
 The same usage, by keyword. "Controller" means the GUI's subscriptions. Every
 keyword that is checked with `waitFor` or displayed is also monitored (see
@@ -406,10 +406,10 @@ object (§2.1).
 | `nscicam.SCRATCHDIR` | `ExposurePath` | Read to build a file path. |
 | `nscicam.FITSPREFIX` | `ExposurePath` | Read to build a file path. |
 | `nscicam.FITSSUFFIX` | `ExposurePath` | Read to build a file path. |
-| `nscicam.EXPOSURE` | `ExposureConfig`, Controller | Read/written as the exposure time; read once at GUI startup to seed the exposure fields. |
-| `nscicam.AMPCONF` | `ExposureConfig`, Controller | Read/written as the read speed; read once at GUI startup. |
+| `nscicam.EXPOSURE` | `ExposureConfig`, Controller | Read/written as the exposure time; subscribed to for the exposure fields, and written when one is entered. |
+| `nscicam.AMPCONF` | `ExposureConfig`, Controller | Read/written as the read speed; subscribed to for the exposure fields, and written when a speed is chosen. |
 | `nscicam.AMPCONFLIST` | `ExposureConfig` | Read once, when `NSciCam` is constructed, for the valid read speeds. |
-| `nscicam.BINNING` | `ExposureConfig`, Controller | Read/written as the binning; read once at GUI startup. |
+| `nscicam.BINNING` | `ExposureConfig`, Controller | Read/written as the binning; subscribed to for the exposure fields, and written when a binning is chosen. |
 
 ### 4.1 What the services' help says about these keywords
 
@@ -457,4 +457,5 @@ dispatcher has finished supplementing the FITS header; the help says it is
 | `b247c45` | 2026-11-17 | Moved the former §5 ("Implications and open questions") into `claude/ktl_interface_refactor.md`; this document now covers only current use and reference material. |
 | `4a21d56` | 2026-11-17 | §1, §3.1, §3.2, §4 updated for the `services/` layer: the only `ktl` import (now catching any `ImportError`), 1 s read timeouts, timed priming reads, and the per-class usage tables. |
 | `6227274` | 2026-11-17 | §3.4, §3.6, §4: keywords monitored at construction, heartbeats (`POCHEART`, `DISP0CLK`, provisional 30 s), `check`/`require`/`heartbeat_alive`. |
-| *pending* | 2026-11-17 | §3.1, §3.3, §4: callbacks (clones, delivery after reads), `KTLService.subscribe`, and the GUI's subscriptions replacing its 1 Hz poll. |
+| `a37e42c` | 2026-11-17 | §3.1, §3.3, §4: callbacks (clones, delivery after reads), `KTLService.subscribe`, and the GUI's subscriptions replacing its 1 Hz poll; §3.6: heartbeat state and `isAlive()`. |
+| *pending* | 2026-11-17 | §4: the exposure fields' subscriptions and writes; `ExposureConfig.setting_value`/`keywords`. |

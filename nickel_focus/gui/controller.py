@@ -17,6 +17,7 @@ from nickel_focus import focus
 from nickel_focus import log
 from nickel_focus import slew
 from nickel_focus.services import NickelPoco, NSciCam, ktl_available
+from nickel_focus.services.nscicam import ExposureConfig
 from nickel_focus.gui.ktl_bridge import KTLBridge
 from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.model.focus_worker import FocusWorker
@@ -70,6 +71,12 @@ class Controller(QtCore.QObject):
     :attr:`~nickel_focus.gui.controller.Controller.POSITION_REDRAW_MS`
     milliseconds.  The status bar's Quit button closes the window; like the
     action buttons, it's disabled while anything is running.
+
+    The Single/Grid/Auto tabs' exposure fields follow the camera the same way
+    (``EXPOSURE``, ``AMPCONF``, ``BINNING``; see
+    :meth:`~nickel_focus.gui.controller.Controller._on_exposure_keyword`), and
+    a setting the user commits there is written to the camera at once (see
+    :meth:`~nickel_focus.gui.controller.Controller._on_exposure_setting_edited`).
 
     Without a live ``ktl`` connection, the Slew/Single/Grid/Auto tabs can't do
     anything but fail -- see
@@ -141,7 +148,6 @@ class Controller(QtCore.QObject):
         self.telescope = (
             None if self.poco is None else slew.NickelTelescopePointing(self.poco)
         )
-        self._initialize_exposure_config()
 
         # Whether ktl itself is available; `force_enable_hardware_tabs`
         # overrides only the View-level graying-out below, not this flag.
@@ -167,12 +173,17 @@ class Controller(QtCore.QObject):
         window.control_panel.findNearestFocusRequested.connect(self.find_nearest_focus)
         window.image_panel.sourceSelected.connect(self._on_source_selected)
         window.status_bar.quitRequested.connect(self.quit)
+        window.control_panel.exposureSettingEdited.connect(self._on_exposure_setting_edited)
 
         # The status indicators and current position follow the keywords'
         # broadcasts. ktl delivers each new value on its own callback
         # thread; the bridge re-emits it as a Qt signal, and the queued
         # connection runs `_on_keyword_changed` on the GUI thread.
         self._latest = {}  # (service, keyword) -> the latest value received
+        # The exposure settings as the camera last reported them, and as the
+        # exposure fields show them (key -> value, in ExposureConfig's form).
+        self._camera_exposure = {}
+        self._shown_exposure = {}
         self._bad_position_logged = False
         # Position broadcasts may be frequent: redraw at most once per
         # POSITION_REDRAW_MS (a QTimer interval is in ms, not seconds).
@@ -640,36 +651,78 @@ class Controller(QtCore.QObject):
             )
             return None
 
-    def _initialize_exposure_config(self):
+    def _on_exposure_keyword(self, key, value):
         """
-        Start the Single/Grid/Auto tabs' exposure fields (exposure time, speed,
-        binning) at the camera's current settings, read via
-        :meth:`~nickel_focus.services.nscicam.ExposureConfig.current_settings`.
+        Show a camera exposure setting (from its keyword's broadcast, or the
+        value delivered when subscribing) on the Single/Grid/Auto tabs.
 
-        Without the camera service
-        (:attr:`~nickel_focus.gui.controller.Controller.cam` is ``None``), the
-        fields keep their built-in defaults.  A failed read, or
-        a value the fields can't show, is logged as a warning and leaves those
-        fields unchanged.
+        Only a value that differs from what the fields already show is
+        applied and logged -- as the camera's initial setting the first time,
+        and as a change made elsewhere (e.g. another GUI, or the camera
+        adjusting a requested exposure time) after that.  The broadcast that
+        confirms the user's own edit therefore isn't logged.
+
+        Parameters
+        ----------
+        key : :obj:`str`
+            ``'exptime'``, ``'speed'``, or ``'binning'``.
+        value : :obj:`str`
+            The keyword's ascii value.
         """
+        try:
+            setting = ExposureConfig.setting_value(key, value)
+        except ValueError as e:
+            log.warning(f'Could not read the camera exposure {key} ({value!r}): {e}', exc_info=e)
+            return
+        self._camera_exposure[key] = setting
+        previous = self._shown_exposure.get(key)
+        if setting == previous:
+            return
+        self._show_exposure_settings({key: setting})
+        if previous is None:
+            log.info(f'Exposure {key} from the camera: {setting}')
+        else:
+            log.info(f'Exposure {key} changed on the camera: {previous} -> {setting}')
+
+    def _on_exposure_setting_edited(self, key, value):
+        """
+        Slot for
+        :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.exposureSettingEdited`:
+        show the edited setting on all three exposure tabs, then write it to
+        the camera (see
+        :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure`).
+
+        The write runs on the GUI thread and waits for the camera to finish
+        it, so a slow camera holds up the GUI meanwhile.  The camera's
+        broadcast of the new value then confirms it.  A rejected write is
+        reported as a failure, and the fields go back to the camera's
+        setting.  Without the camera service, the edit only syncs the tabs.
+        """
+        self._show_exposure_settings({key: value})
         if self.cam is None:
             return
         try:
-            config = self.cam.cfg.current_settings()
+            self.cam.cfg.configure(**{key: value})
         except Exception as e:
-            log.warning(f'Could not read the current exposure settings: {e}', exc_info=e)
+            self._fail(f'Could not set the exposure {key} to {value}: {e}', e)
+            if key in self._camera_exposure:
+                self._show_exposure_settings({key: self._camera_exposure[key]})
             return
-        if not config:
-            return
-        unmatched = self.window.control_panel.set_exposure_config(config)
-        for key in unmatched:
+        log.info(f'Exposure {key} set to {value}')
+
+    def _show_exposure_settings(self, config):
+        """
+        Show ``config`` (exposure ``key`` -> value) on the Single/Grid/Auto
+        tabs and remember it as shown.  A speed or binning that isn't one of
+        the drop-down's options is added to it, with a warning.
+        """
+        added = self.window.control_panel.set_exposure_config(config)
+        self._shown_exposure.update(config)
+        for key in added:
             log.warning(
-                f'Current exposure {key} ({config[key]!r}) is not one of the GUI options; '
-                f'leaving the default.'
+                f'Exposure {key} {config[key]!r} is not one of the GUI options; added it to '
+                f'the {key} list.'
             )
-        applied = ', '.join(f'{key}={value}' for key, value in config.items() if key not in unmatched)
-        if applied:
-            log.info(f'Exposure settings initialized from the camera: {applied}')
 
     def _subscribe(self, service, names):
         """
@@ -691,9 +744,13 @@ class Controller(QtCore.QObject):
         """
         Slot for :attr:`~nickel_focus.gui.ktl_bridge.KTLBridge.keywordChanged`
         (on the GUI thread): record ``value`` and update whatever shows it --
-        a status indicator, or (rate-limited) the Slew tab's current position.
+        a status indicator, (rate-limited) the Slew tab's current position, or
+        the exposure fields.
         """
         self._latest[service, keyword] = value
+        if (service, keyword) in _EXPOSURE_KEYWORDS:
+            self._on_exposure_keyword(_EXPOSURE_KEYWORDS[service, keyword], value)
+            return
         if (service, keyword) in _POSITION_KEYWORDS:
             if not self._position_timer.isActive():
                 self._position_timer.start()
@@ -833,8 +890,13 @@ _INDICATOR_KEYWORDS['nickelpoco', 'POCSECPA'] = ('focus',)
 # The Slew tab's current position.
 _POSITION_KEYWORDS = {('nickelpoco', 'POCORAA'), ('nickelpoco', 'POCODECA')}
 
+# The exposure fields: keyword -> ExposureConfig setting key.
+_EXPOSURE_KEYWORDS = {
+    ('nscicam', keyword): key for key, keyword in ExposureConfig.keywords.items()
+}
+
 # Every keyword the Controller subscribes to (all of the above), by service.
 _POCO_DISPLAY_KEYWORDS = (
     'POCSTOP', 'POCTRCK', 'POCOT', 'POCSECLK', 'POCSECPA', 'POCORAA', 'POCODECA',
 )
-_CAM_DISPLAY_KEYWORDS = ('EXPSTATE',)
+_CAM_DISPLAY_KEYWORDS = ('EXPSTATE', 'EXPOSURE', 'AMPCONF', 'BINNING')

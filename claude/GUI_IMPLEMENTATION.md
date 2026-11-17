@@ -2812,3 +2812,60 @@ changes made from other GUIs appear as soon as they're broadcast.
 Known limitation (plan §4.3): if a service stops broadcasting entirely, the
 indicators keep their last values rather than turning red. Full suite:
 `310 passed, 8 skipped` (the live tests).
+
+## KTL interface refactor, phase 4: exposure fields follow the camera, both ways (2026-11-17)
+
+Final phase of `claude/ktl_interface_refactor.md` (design choices and details
+in its §4.4). Completes Goal 2: the Single/Grid/Auto exposure fields always
+show the camera's settings, and editing them changes the camera.
+
+- View (`focus_control_panel.py`): new `ExposureTimeSpinBox`, which commits
+  only on Enter and is light red while an edit is pending, as in the
+  data-acquisition GUI; new `exposureSettingEdited(key, value)` signal
+  (Enter on an exposure time, or a drop-down choice); `get_exposure_config`
+  reports the committed exposure time; `set_exposure_config` commits the
+  exposure time and adds unrecognized speed/binning values to the options
+  (returning the keys added, rather than skipping them). Help text updated.
+- `ExposureConfig.keywords`/`setting_value` (`services/nscicam.py`), shared
+  by `current_settings` and the Controller.
+- Controller: the camera subscription now includes `EXPOSURE`, `AMPCONF`,
+  `BINNING` (`_on_exposure_keyword` applies and logs values that differ from
+  what's shown); edits are synced across the three tabs and written at once
+  on the GUI thread (`_on_exposure_setting_edited`), with a rejected write
+  reported and reverted. `_initialize_exposure_config` was removed.
+- Tests: `tests/gui/keyboard.py` (real key events), and new panel and
+  Controller tests for the behavior above; the startup-read tests became
+  broadcast tests. An offscreen render confirmed the pending field is
+  drawn light red under Fusion.
+- Docs: `GUI_REFERENCE.md` (§2), `KTL_REFERENCE.md` (§4), the user manual
+  (`docs/html/focusGUI.html`, the Grid/Auto/Single section), and the plan
+  (status, §4.4).
+
+Full suite: `326 passed, 8 skipped` (the live tests). The screenshots in the
+user manual predate this and the Options-tab removal.
+
+## `KTL_SUGGESTIONS.md` reviewed against the refactored code (2026-11-17)
+
+The follow-up to phase 4 (plan §4, phase 4). Each proposal's interim
+approach now describes the code as it stands: §1, monitoring and priming
+at service construction; §2, which of our waits can overshoot; §3, the
+implemented `KTLService.check`/`services.require`; §4, restated now that
+the GUI's polling is gone (lower priority: the Controller's own `_latest`
+copy of subscribed values, on-demand round trips for monitored keywords,
+and stale-data detection); §5, noting that the heartbeats are registered.
+The proposals themselves are unchanged.
+
+## Refactor plan: decisions folded in, remaining issues consolidated (2026-11-17)
+
+`claude/ktl_interface_refactor.md` was tidied now that all phases are done.
+The decisions from its former §6 now appear only in the design sections
+they belong to (§3.1 timeouts, §3.2 import, §3.4 heartbeat periods, §3.6
+the exposure fields as built, §3.9 the heartbeat test), without the record
+of alternatives considered. The former §5 ("Not addressed by this plan"),
+§5.1 ("Facts to confirm at the telescope"), §6 ("Decisions"), and Appendix A
+(issues moved from `KTL_REFERENCE.md`) became a single §5, "Remaining
+issues": possible defects (§5.1), settings and assumptions to confirm at the
+telescope (§5.2), and possible later improvements (§5.3). Issues the
+refactor resolved were dropped: first-use `waitFor` false negatives, the
+GUI-thread poll, stale data after a dispatcher restart, and the `POCSTOP`
+comment (now in `NickelPoco`'s docstring).

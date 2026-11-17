@@ -122,6 +122,43 @@ class ExposureConfig:
         'Slow': '0.05MHz',
         }
 
+    keywords = {'exptime': 'EXPOSURE', 'speed': 'AMPCONF', 'binning': 'BINNING'}
+    """The keyword behind each setting :meth:`current_settings` reports."""
+
+    @classmethod
+    def setting_value(cls, key, value):
+        """
+        Convert a setting's keyword value (ascii, as read or broadcast) to the
+        form :meth:`configure` and :meth:`current_settings` use.
+
+        Parameters
+        ----------
+        key : :obj:`str`
+            ``'exptime'``, ``'speed'``, or ``'binning'`` (see :attr:`keywords`).
+        value : :obj:`str`
+            The keyword's ascii value.
+
+        Returns
+        -------
+        :obj:`float` or :obj:`str`
+            The exposure time in seconds; the read speed by its user-facing
+            name (a key of :attr:`speed_aliases`, e.g. ``'Fast'``) if it has
+            one, otherwise the raw ``AMPCONF`` value; or the binning (e.g.
+            ``'2,2'``).
+
+        Raises
+        ------
+        ValueError
+            Raised if an exposure time isn't a number.
+        """
+        if key == 'exptime':
+            return float(value)
+        value = str(value).strip()
+        if key == 'speed':
+            speed_names = {alias: name for name, alias in cls.speed_aliases.items()}
+            return speed_names.get(value, value)
+        return value
+
     def __init__(self, cam):
         self.cam = cam
         self.expspeed_options = cam.read('AMPCONFLIST').split(',')
@@ -166,10 +203,8 @@ class ExposureConfig:
         """
         Read the camera's current exposure time, read speed, and binning.
 
-        The read speed is reported by its user-facing name (a key of
-        :attr:`speed_aliases`, e.g. ``'Fast'``) when the camera's ``AMPCONF``
-        value has one, so the result uses the same names :meth:`configure`
-        accepts; otherwise the raw ``AMPCONF`` value is returned.
+        Each is converted by :meth:`setting_value`, so the result uses the same
+        names :meth:`configure` accepts.
 
         Returns
         -------
@@ -177,12 +212,9 @@ class ExposureConfig:
             Keys ``exptime`` (:obj:`float`, seconds), ``speed``, and
             ``binning`` (:obj:`str`, e.g. ``'2,2'``).
         """
-        speed = self.cam.read('AMPCONF').strip()
-        speed_names = {value: name for name, value in self.speed_aliases.items()}
         return {
-            'exptime': float(self.cam.read('EXPOSURE')),
-            'speed': speed_names.get(speed, speed),
-            'binning': self.cam.read('BINNING').strip(),
+            key: self.setting_value(key, self.cam.read(keyword))
+            for key, keyword in self.keywords.items()
         }
 
     def __repr__(self):

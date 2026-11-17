@@ -1,8 +1,9 @@
 """Tests for :mod:`gui.views.focus_control_panel`."""
 from pathlib import Path
 
-from nickel_focus.gui.qt import QtWidgets
+from nickel_focus.gui.qt import QtCore, QtWidgets
 from nickel_focus.gui.views.focus_control_panel import FocusControlPanel
+from nickel_focus.tests.gui.keyboard import press, type_and_enter, type_text
 
 
 def test_tabs_exist_in_the_requested_order(qapp):
@@ -144,21 +145,21 @@ def test_get_exposure_config_for_single_grid_auto(qapp):
     panel = FocusControlPanel()
 
     panel.tabs.setCurrentWidget(panel.single_tab)
-    panel.single_exptime_spin.setValue(1.5)
+    type_and_enter(panel.single_exptime_spin, '1.5')
     panel.single_speed_combo.setCurrentText('Fast')
     panel.single_binning_combo.setCurrentText('2,2')
     assert panel.get_exposure_config() == {'exptime': 1.5, 'speed': 'Fast', 'binning': '2,2'}, \
         "the Single tab's exposure configuration should match its fields"
 
     panel.tabs.setCurrentWidget(panel.grid_tab)
-    panel.grid_exptime_spin.setValue(2.5)
+    type_and_enter(panel.grid_exptime_spin, '2.5')
     panel.grid_speed_combo.setCurrentText('Slow')
     panel.grid_binning_combo.setCurrentText('1,1')
     assert panel.get_exposure_config() == {'exptime': 2.5, 'speed': 'Slow', 'binning': '1,1'}, \
         "the Grid tab's exposure configuration should match its fields"
 
     panel.tabs.setCurrentWidget(panel.auto_tab)
-    panel.auto_exptime_spin.setValue(3.5)
+    type_and_enter(panel.auto_exptime_spin, '3.5')
     panel.auto_speed_combo.setCurrentText('Fast')
     panel.auto_binning_combo.setCurrentText('4,4')
     assert panel.get_exposure_config() == {'exptime': 3.5, 'speed': 'Fast', 'binning': '4,4'}, \
@@ -494,15 +495,94 @@ def test_set_exposure_config_sets_every_exposure_tab(qapp):
             'every exposure tab should show the given settings'
 
 
-def test_set_exposure_config_reports_and_skips_unknown_options(qapp):
+def test_set_exposure_config_adds_unknown_options(qapp):
     panel = FocusControlPanel()
     panel.tabs.setCurrentWidget(panel.single_tab)
     before = panel.get_exposure_config()
 
-    unmatched = panel.set_exposure_config({'exptime': 7.0, 'binning': '3,3'})
+    added = panel.set_exposure_config({'exptime': 7.0, 'binning': '3,3'})
 
-    assert unmatched == ['binning'], 'the unknown binning should be reported as unmatched'
+    assert added == ['binning'], 'the unknown binning should be reported as added'
     after = panel.get_exposure_config()
-    assert after['exptime'] == 7.0, 'a valid exposure time should still be applied'
-    assert after['binning'] == before['binning'], 'an unknown binning should leave the field alone'
+    assert after['exptime'] == 7.0, 'the exposure time should be applied'
+    assert after['binning'] == '3,3', 'an unknown binning should be added and shown'
     assert after['speed'] == before['speed'], 'a missing key should leave the field alone'
+    for combo in (panel.single_binning_combo, panel.grid_binning_combo, panel.auto_binning_combo):
+        assert combo.findText('3,3') >= 0, 'the new option should be added on every exposure tab'
+
+
+# -- exposure-time entry and exposure-setting edits ---------------------------
+
+def _pending(spin):
+    return spin.is_pending() and spin.styleSheet() == spin.PENDING_STYLE
+
+
+def test_exposure_time_edit_is_pending_until_enter(qapp):
+    panel = FocusControlPanel()
+    panel.tabs.setCurrentWidget(panel.single_tab)
+    spin = panel.single_exptime_spin
+    edits = []
+    panel.exposureSettingEdited.connect(lambda key, value: edits.append((key, value)))
+
+    type_text(spin, '12.5')
+
+    assert _pending(spin), 'an edited, unentered exposure time should be shown light red'
+    assert panel.get_exposure_config()['exptime'] == 5.0, \
+        'an unentered exposure time should not be used'
+    assert edits == [], 'nothing should be reported before Enter'
+
+    press(spin, QtCore.Qt.Key.Key_Return)
+
+    assert not _pending(spin), 'Enter should clear the light-red background'
+    assert panel.get_exposure_config()['exptime'] == 12.5, 'Enter should commit the new value'
+    assert edits == [('exptime', 12.5)], 'Enter should report the committed exposure time'
+
+
+def test_arrow_key_steps_are_pending_too(qapp):
+    panel = FocusControlPanel()
+    spin = panel.single_exptime_spin
+
+    press(spin, QtCore.Qt.Key.Key_Up)
+
+    assert _pending(spin), 'an arrow-key step is an edit, pending until Enter'
+
+
+def test_set_exposure_config_discards_a_pending_edit(qapp):
+    panel = FocusControlPanel()
+    panel.tabs.setCurrentWidget(panel.single_tab)
+    type_text(panel.single_exptime_spin, '99')
+
+    panel.set_exposure_config({'exptime': 30.0})
+
+    assert not _pending(panel.single_exptime_spin), \
+        'a value set by the program should clear the pending state'
+    assert panel.single_exptime_spin.value() == 30.0, 'the set value should be shown'
+
+
+def _choose(combo, text):
+    """Choose ``text`` in ``combo`` the way a user does: select it, then `activated`."""
+    index = combo.findText(text)
+    combo.setCurrentIndex(index)
+    combo.activated.emit(index)
+
+
+def test_choosing_a_speed_or_binning_is_reported_at_once(qapp):
+    panel = FocusControlPanel()
+    edits = []
+    panel.exposureSettingEdited.connect(lambda key, value: edits.append((key, value)))
+
+    _choose(panel.grid_speed_combo, 'Fast')
+    _choose(panel.auto_binning_combo, '4,4')
+
+    assert edits == [('speed', 'Fast'), ('binning', '4,4')], \
+        'choosing a speed or binning should report it immediately'
+
+
+def test_setting_fields_by_program_reports_nothing(qapp):
+    panel = FocusControlPanel()
+    edits = []
+    panel.exposureSettingEdited.connect(lambda key, value: edits.append((key, value)))
+
+    panel.set_exposure_config({'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'})
+
+    assert edits == [], 'only user edits should be reported, not values set by the program'

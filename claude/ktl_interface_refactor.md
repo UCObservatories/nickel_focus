@@ -1,7 +1,8 @@
 # KTL Interface Refactor -- Plan
 
-**Status:** phases 0-3 complete (2026-11-17); phase 4 not started.
-Remaining open items: §6. Phases 1-3 as built: §4.1-§4.3.
+**Status:** phases 0-4 complete (2026-11-17), followed by the review of
+`KTL_SUGGESTIONS.md` against the refactored code. Phases 1-4 as built:
+§4.1-§4.4. Issues that remain in the code after the refactor: §5.
 
 A plan to restructure how `nickel_focus` uses the `ktl` package, so that the
 focus GUI stays in step with the telescope and camera when observers change
@@ -73,16 +74,17 @@ outline:
 class KTLService:
     """One KTL service: its keyword handles and our ktl usage rules."""
     service = None      # e.g. 'nickelpoco'
-    monitored = ()      # keywords monitored, with a blocking priming read, at construction
+    monitored = ()      # keywords monitored at construction, primed with a timed read
     heartbeat = None    # keyword registered via Service.heartbeat
+    heartbeat_period = None
 
     def __init__(self, read_only=False): ...
         # KTLUnavailableError if no ktl (§3.2); monitor and prime the
         # monitored keywords; register the heartbeat. read_only: §3.9.
     def _keyword(self, name): ...   # ktl.cache(self.service, name); private (§3.2)
     def read(self, name, binary=False, timeout=DEFAULT_READ_TIMEOUT): ...
-    def write(self, name, value, binary=False, timeout=...): ...
-        # KTLReadOnlyError if read_only (§3.9); no timeout yet (below)
+    def write(self, name, value, binary=False): ...
+        # KTLReadOnlyError if read_only (§3.9); no timeout (below)
     def check(self, name, expression, timeout):
         """waitFor; on failure, a read(timeout=...) to tell 'false' from
         'no reply' (REF §3.4). Returns True, False, or None (no reply)."""
@@ -100,15 +102,15 @@ class NSciCam(KTLService):      # service = 'nscicam'
     # file-path helpers (today's ExposurePath) and settings (ExposureConfig)
 ```
 
-All reads go through `KTLService` with an explicit timeout, so nothing in
-`nickel_focus` waits on a reply indefinitely (REF §3.1); our services honor
-timeouts (REF §2.1, §3.1). Writes also go through `KTLService`, but
-**without a timeout for now**: they keep today's behavior (wait for the
-service to report completion), because what "completion" means for each
-written keyword -- e.g. whether a `POCSECPD` write completes when accepted
-or when the move finishes -- isn't known yet, and a timeout could abort a
-legitimately long write. Per-keyword write timeouts follow once that's
-confirmed at the telescope (§5.1).
+All reads go through `KTLService` with an explicit timeout -- by default
+`DEFAULT_READ_TIMEOUT`, 1 s -- so nothing in `nickel_focus` waits on a
+reply indefinitely (REF §3.1); our services honor timeouts (REF §2.1,
+§3.1). Writes also go through `KTLService`, but **without a timeout**: they
+wait for the service to report completion, because what "completion" means
+for each written keyword -- e.g. whether a `POCSECPD` write completes when
+accepted or when the move finishes -- isn't known yet, and a timeout could
+abort a legitimately long write. Both are to be confirmed at the telescope
+(§5.2).
 
 **Priming without hanging.** `Keyword.monitor()`'s own priming read has no
 timeout (REF §3.3), so construction instead calls
@@ -167,10 +169,8 @@ patches `focus.ktl`, `exposure.ktl`, and `slew.ktl` separately.
 - **Import timing.** Importing `ktl` starts its background threads
   (REF §2.2). Today that happens on any `import nickel_focus` -- even for
   replay-only CLI runs -- because of the package-level re-export. With the
-  re-export gone, `ktl` is imported only when `services.base` is -- i.e.
-  only by code that works with services. (Decided: no further deferral;
-  importing `ktl` lazily on first use was considered and judged not worth
-  the extra complexity.)
+  re-export gone, `ktl` is imported when `services.base` loads -- i.e. only
+  by code that works with services.
 - **Tests: one seam.** `no_ktl` patches only `services.base.ktl` to `None`.
   The keyword-level fake (§3.7) is installed the same way: by patching
   `services.base.ktl` with a fake module object whose `cache(service,
@@ -199,9 +199,10 @@ owner of its callbacks, heartbeat, and monitored state.
 
 ### 3.4 What to monitor
 
-Monitoring at construction (phase 2) fixes the first-use `waitFor` false
-negatives (Appendix A, item 4); together with callbacks (§3.5, phase 3) it
-replaces the GUI's 1 Hz polling.
+Monitoring at construction (phase 2) fixes `waitFor`'s first-use false
+negatives (a check on a keyword whose first value hasn't arrived yet fails
+even when the condition holds; REF §3.4); together with callbacks (§3.5,
+phase 3) it replaces the GUI's 1 Hz polling.
 
 | Keyword | Monitor | Purpose |
 | --- | --- | --- |
@@ -209,9 +210,9 @@ replaces the GUI's 1 Hz polling.
 | `POCSECPA` | Yes | Focus indicator text; current focus. |
 | `POCORAA`, `POCODECA` | Yes, display rate-limited | Slew tab's current position. Their broadcast rate is unknown and may be high; redraw at most a few times a second. |
 | `EXPOSURE`, `AMPCONF`, `BINNING` | Yes | Exposure fields follow the camera (§3.6). |
-| `POCHEART`, `DISP0CLK` | Heartbeats | `NickelPoco.heartbeat = 'POCHEART'` ("poco's heartbeat"); `NSciCam.heartbeat = 'DISP0CLK'` (dispatcher runtime clock). Lets `ktl` detect a dispatcher restart and restore monitoring (Appendix A, item 11). Periods to be set from their observed broadcast rates. |
+| `POCHEART`, `DISP0CLK` | Heartbeats | `NickelPoco.heartbeat = 'POCHEART'` ("poco's heartbeat"); `NSciCam.heartbeat = 'DISP0CLK'` (dispatcher runtime clock). Lets `ktl` detect a dispatcher restart and restore monitoring, rather than leaving monitored values silently stale (REF §3.6). Both use a provisional 30 s `heartbeat_period`, generous because too short a period makes `ktl` reconnect needlessly; to be set from their observed broadcast rates (§5.2). |
 | `POCSECPD`, `POCORAD`, `POCODECD`, `RECORD`, `OBSNUM`, `EXPRESULT`, `RECORDDIR`, `SCRATCHDIR`, `FITSPREFIX`, `FITSSUFFIX`, `AMPCONFLIST` | No | Written by us or not displayed; read (with timeout) at the moment of use. |
-| `EXPOSE` | No | Written to start an exposure; never read. `Exposure` monitors it today; phase 2 drops that, along with any other monitoring not in this table. |
+| `EXPOSE` | No | Written to start an exposure; never read. |
 
 ### 3.5 GUI binding: callbacks instead of polling
 
@@ -237,39 +238,44 @@ replaces the GUI's 1 Hz polling.
 - Position updates are coalesced (e.g. a short `QTimer` that redraws the
   latest value), so a fast-broadcasting `POCORAA`/`POCODECA` can't flood
   the GUI.
-- If a service is unavailable (no `ktl`, construction failed), its
-  indicators stay red as today.
+- If a service is unavailable (no `ktl`, construction failed) or a
+  subscription fails, its indicators stay red.
 
 ### 3.6 Exposure fields follow the camera, both ways
 
-- **Camera → GUI:** a broadcast of `EXPOSURE`, `AMPCONF`, or `BINNING`
-  updates the fields (replacing today's one-time
-  `_initialize_exposure_config()`), with signals blocked while setting them
-  so the update isn't mistaken for a user edit. A change that didn't come
-  from the focus GUI is noted in the Log.
-- **GUI → camera:** a user edit writes the keyword immediately
-  (`editingFinished` for the exposure time, `activated` for the combo
-  boxes) via `NSciCam`, rather than waiting for Acquire. The resulting
-  broadcast confirms it in every view, including other GUIs that track the
-  keyword. A rejected write is logged, and the field is put back to the
+- **Camera → GUI:** the Controller subscribes to `EXPOSURE`, `AMPCONF`, and
+  `BINNING` (§3.5). A value that differs from what the fields show is
+  applied to all three exposure tabs and logged -- the first as the
+  camera's setting, later ones as changes made on the camera (e.g. from
+  another GUI, or the camera adjusting a requested exposure time). The
+  broadcast that confirms the user's own edit equals what's already shown,
+  so it's neither applied again nor logged. A speed or binning that isn't a
+  drop-down option is added to the options (on all three tabs), with a
+  warning, so the field always shows the camera's actual setting.
+- **GUI → camera:** a committed edit is written to the camera immediately
+  via `NSciCam`, rather than waiting for Acquire. A drop-down choice commits
+  at once (`activated`, which fires only for the user's own choices). The
+  exposure time commits only on Enter, as in the data-acquisition GUI: an
+  edit turns the field light red until then, and Acquire uses the last
+  committed value. The write runs **on the GUI thread**: settings changes
+  are normally quick, and blocking the GUI while a slow camera finishes is
+  acceptable. A rejected write is reported, and the fields go back to the
   camera's value.
-- **Consequences to accept:**
-  - Single/Grid/Auto each have their own exposure fields today. With the
-    camera as the single source of truth they always show the same
-    values, so an edit on one tab appears on all three. Decided: keep the
-    three synchronized sets for now; merging them into one shared group is
-    a separate, later layout change.
+- **Consequences:**
+  - Single/Grid/Auto each keep their own exposure fields, kept in sync:
+    with the camera as the single source of truth they always show the
+    same values, and an edit on one tab appears on all three. Merging them
+    into one shared group would be a separate layout change (§5.3).
   - Nothing about the exposure fields is saved between sessions: the
     camera defines them. (Settings persistence is removed altogether, in
     phase 0; §3.8.)
   - Acquire still applies the fields via `configure()` before exposing, as
     a safeguard; with the fields in sync this is normally a no-op.
-  - Fields are already disabled while anything runs (`set_running`), so
-    user edits can't change the camera mid-sequence. Broadcasts still
-    update them.
+  - Fields are disabled while anything runs (`set_running`), so user edits
+    can't change the camera mid-sequence. Broadcasts still update them.
   - Without a camera connection (no `ktl`, e.g. under `--test`), the
-    fields are plain inputs with their built-in defaults, as today:
-    edits aren't written anywhere.
+    fields are plain inputs with their built-in defaults; an edit only
+    syncs the three tabs.
 
 ### 3.7 Testing
 
@@ -401,14 +407,12 @@ this plan.)
 - The device classes construct on those read-only services:
   `Focus`, `NickelTelescopePointing`, `Exposure` (and the `NSciCam` path and
   settings helpers).
-- **Each service has a viable heartbeat:** a `KTLService` method (proposed:
-  `heartbeat_alive(timeout)`) reads the heartbeat keyword, then waits with
+- **Each service has a viable heartbeat:** `KTLService.heartbeat_alive(timeout)`
+  reads the heartbeat keyword, then waits with
   `waitFor('!= <that value>', timeout)` for it to change -- a named-method
   check that the dispatcher is broadcasting. The test asserts it returns
-  true within a timeout of a few heartbeat periods. (`ktl`'s own
-  heartbeat state is only reachable through `Keyword.isAlive()` after its
-  background checker has run, which makes for a slower and less direct
-  test.)
+  true within two heartbeat periods (provisional, like the periods
+  themselves; §5.2).
 
 **Guarding the guard.** The ordinary suite (no `ktl` needed) gains tests
 that a read-only service raises `KTLReadOnlyError` from `write` without
@@ -438,12 +442,14 @@ fails the same way on a read-only service.
    switch `Focus`/`NickelTelescopePointing` checks to `KTLService.check`,
    with messages that distinguish "no reply" from "condition false".
    Register heartbeats, and add `heartbeat_alive()` with its live test
-   (§3.9). (Resolves Appendix A, items 4 and 11.)
+   (§3.9).
 3. **Callback-driven GUI.** The Qt bridge, callback-driven status
-   indicators and position display, removal of the 1 Hz poll (§3.5).
-   (Resolves Appendix A, item 6.)
+   indicators and position display, removal of the 1 Hz poll, whose reads
+   ran on the GUI thread (§3.5).
 4. **Two-way exposure fields** (§3.6), including the Help tab text that
-   describes them (§3.8).
+   describes them (§3.8). Afterwards, review `KTL_SUGGESTIONS.md` for text
+   that describes functionality the refactor has since changed (e.g. §4's
+   reference to the GUI's former 1 Hz poll).
 
 Each phase ends with the full suite passing, updated `GUI_REFERENCE.md`/
 `KTL_REFERENCE.md` (and the README where it describes something the phase
@@ -496,7 +502,7 @@ Done as described above, with these details and small departures:
   `ktl.cache(service).heartbeat(keyword, period)`. `POCHEART` and
   `DISP0CLK`, both with a **provisional 30 s period** -- deliberately
   generous, since a period shorter than the real broadcast interval makes
-  `ktl` reconnect needlessly (§5.1, §6).
+  `ktl` reconnect needlessly (§5.2).
 - **`check`** returns `True`/`False`/`None` (no reply), as designed in
   §3.1; its follow-up read uses the 1 s default timeout. All of
   `NickelPoco`'s conditions and `NSciCam.exposure_state_is` use it.
@@ -552,174 +558,158 @@ Done as described above, with these details and small departures:
   this matters in practice is unknown; `KTL_SUGGESTIONS.md` §5 proposes a
   heartbeat-state callback, marked as of unconfirmed usefulness.
 
-## 5. Not addressed by this plan
+### 4.4 Phase 4 as built
 
-These issues from Appendix A are outside the scope above. The refactor
-gives each an obvious home (noted in brackets), and most are small, but
-they need their own decisions and, in several cases, confirmation at the
-telescope first.
+Design choices made with the user (2026-11-17):
 
-1. **Slew targets written as ascii decimal numbers** (Appendix A, item 1)
-   [`NickelTelescopePointing.slew_to`].
-2. **`EXPRESULT` as the exposure's file path; `FITSFILE`** (item 2)
-   [`NSciCam` path helpers; `FITSFILE` would join the monitored set].
-3. **Current Dec read from ascii** (item 3) [`NickelPoco.pointing()`;
-   phase 3's callback code reads the position, so choosing `binary=True`
-   there would be cheap].
-4. **`EXPSTATE == Start` may be too brief to see** (item 5)
-   [`Exposure.expose`].
-5. **Exp indicator shows `Error` as yellow** (item 7) [the GUI's
-   `_expstate_state` mapping].
-6. **Never write `POCSTOP`** (item 8) [a docstring/comment on
-   `NickelPoco`].
-7. **Read-speed names `Fast`/`Slow`** (item 9) [`NSciCam` settings;
-   needs `AMPCONFLIST`'s values from the telescope].
-8. **Hidden KTL warnings** (item 10) [could be wired once, at
-   `KTLService`/startup, via `ktl.logger(...)`].
+- **Writes run on the GUI thread** (not a worker): settings changes are
+  normally quick, and blocking the GUI while a slow or unresponsive camera
+  finishes is acceptable -- arguably useful, since nothing else should
+  happen meanwhile. Writes still have no timeout (§3.1).
+- **An unrecognized speed/binning from the camera is added to that
+  drop-down's options** (on all three tabs), with a warning, so the field
+  always shows the camera's actual setting.
+- **Only a broadcast that differs from what the fields show is applied and
+  logged** -- the first value as the camera's setting, later ones as changes
+  on the camera. The broadcast confirming the user's own edit therefore
+  isn't logged, with no tracking of writes in flight. (The camera may
+  adjust a requested exposure time; that shows up, correctly, as a change.)
+- **The exposure time commits only on Enter**, mimicking the
+  data-acquisition GUI: an edit (typing, or an arrow-key/wheel step) turns
+  the field light red until Enter; `get_exposure_config` reports the last
+  committed value, so Acquire never uses an unentered one. A drop-down
+  choice takes effect at once.
+- **Acquire keeps the `configure()` safeguard.**
 
-### 5.1 Facts to confirm at the telescope
+As built:
 
-- **Ascii writes of decimal RA/Dec** (§5 item 1): what `POCORAD`/
-  `POCODECD` do with a value like `5.5`.
-- **`EXPRESULT` contents** (§5 item 2): full path or bare filename, and
-  the exact error form; when `FITSFILE` updates relative to
-  `EXPSTATE == Ready`.
-- **Negative Dec in ascii** (§5 item 3): read `POCODECA` while pointed
-  between 0° and −1°.
-- **Whether `EXPSTATE == Start` is reliably broadcast** (§5 item 4).
-- **`AMPCONFLIST`'s values** (§5 item 7).
-- **Startup time with every monitored keyword primed** (§4.2): roughly a
-  dozen reads at construction; each fails after 1 s if unanswered.
-- **The 1 s default read timeout** (§3.1, §6): that every service
-  answers a normal read well within it, including while busy (e.g. during
-  readout or a slew), and that it's short enough to keep the 1 Hz GUI poll
-  usable until phase 3 removes it (each read runs on the GUI thread).
-- **Broadcast rates** of `POCORAA`/`POCODECA` (display rate limit, §3.5)
-  and of `POCHEART`/`DISP0CLK` (heartbeat periods, §3.4).
-- **What write "completion" means** for `POCSECPD`, `POCORAD`/`POCODECD`,
-  `EXPOSE`, and the exposure settings (REF §3.2) -- needed to set the
-  per-keyword write timeouts deferred in §3.1.
-- **Notify flags as the Python layer sees them**: in an interactive
-  session (a diagnostic, not `nickel_focus` code), check
-  `keyword['notify_reads']`/`['notify_writes']` for one keyword per
-  service -- or that `read(timeout=0.001)` raises `TimeoutException`
-  rather than blocking.
-- **Whether the data-acquisition GUI tracks `EXPOSURE`/`AMPCONF`/
-  `BINNING`**, so Goal 2's "both ways" is visible there.
+- `focus_control_panel.ExposureTimeSpinBox` (light red `#ffcdd2` while
+  pending; `valueCommitted`, `committed_value`, `set_committed_value`), 3
+  decimals to match `EXPOSURE`'s `%.3f`, so the camera's value round-trips
+  exactly. New `FocusControlPanel.exposureSettingEdited(key, value)`;
+  `set_exposure_config` now commits the exposure time and returns the keys
+  whose value was *added* to a drop-down (it used to skip them). Help tab
+  and user manual describe the behavior.
+- `ExposureConfig.keywords` and `ExposureConfig.setting_value` (used by
+  `current_settings` too).
+- Controller: subscribes `cam` to `EXPOSURE`, `AMPCONF`, `BINNING` as well;
+  `_on_exposure_keyword`, `_on_exposure_setting_edited`,
+  `_show_exposure_settings`; `_initialize_exposure_config` is gone. Every
+  edit syncs the three tabs before writing; without the camera service,
+  that's all it does.
+- Tests: `tests/gui/keyboard.py` sends real key events (typing, Enter,
+  arrows). New tests for the pending/commit behavior, drop-down edits,
+  following camera changes, writes, rejected writes, unknown and unreadable
+  values, and `setting_value`.
 
-## 6. Decisions
+## 5. Remaining issues
 
-**Settled (2026-11-17):**
+Issues in the code as it stands after the refactor. References are to
+`KTL_REFERENCE.md` ("REF") unless noted. Several depend on facts that can
+only be checked at the telescope; the live tests (§3.9,
+`pytest nickel_focus/tests --ktl-live -m ktl_live`) are the first thing to
+run there.
 
-- **Layout:** a `nickel_focus/services/` package, with `KTLService`, our
-  exceptions, and `ktl_available()` in `services/base.py`, and one module
-  per service (`nickelpoco.py`, `nscicam.py`) (§3.1).
-- **Importing `ktl`:** the guarded import moves from `pkg/ktl.py` into
-  `services/base.py` (broadened to `ImportError`), and `pkg/ktl.py` is
-  removed; `ktl` is imported when `services.base` loads, with no further
-  deferral (§3.2).
-- **Exceptions:** `KTLUnavailableError` (a `RuntimeError`), `KTLError`,
-  `KTLTimeoutError`, and `KTLReadOnlyError`, all defined in
-  `services/base.py`, with `ktl`'s own exceptions caught and re-raised as
-  these at the service boundary (§3.2, §3.9).
-- **Write timeouts:** deferred. Writes keep today's behavior until what
-  write completion means is confirmed at the telescope (§3.1, §5.1).
-- **Exposure fields:** the Single/Grid/Auto tabs keep three synchronized
-  sets for now; merging them is a separate, later change (§3.6).
-- **Live tests:** the `--ktl-live` option and `ktl_live` marker as
-  proposed (§3.9). How to run them is documented in both the README and
-  `GUI_REFERENCE.md` (§3.9).
-- **Default read timeout:** 1 s (`services.base.DEFAULT_READ_TIMEOUT`),
-  pending testing at the telescope (§5.1).
-
-**Still open:**
-
-- **The heartbeat timeout** used by the live heartbeat test, and the
-  `Service.heartbeat` periods for `POCHEART`/`DISP0CLK` -- pending their
-  observed broadcast rates at the telescope (§3.4, §5.1). Provisionally
-  (phase 2): a 30 s period for both, and a live-test timeout of two
-  periods.
-
-## Appendix A. Issues extracted from `KTL_REFERENCE.md` §5
-
-Moved here from `KTL_REFERENCE.md` (2026-11-17), where they were recorded as
-"Implications and open questions". Section and item references below are
-to `KTL_REFERENCE.md` ("REF") unless noted. Resolution: items 4, 6, 11 by
-this plan (§4) -- items 4 and 11 done in phase 2, item 6 in phase 3 -- and
-the rest are in §5 above.
+### 5.1 Possible defects
 
 1. **Slew targets are written as ascii decimal numbers to sexagesimal
-   keywords.** `slew_to` writes `ra.to('hourangle').value` and
-   `dec.to('deg').value` (e.g. `5.5`) to `POCORAD`/`POCODECD` as ascii,
-   but those keywords' ascii form is sexagesimal (`05:30:00.00`), and how
-   the service parses a decimal ascii value is a C-layer question
-   (REF §3.2). If it misreads it, the telescope slews to the wrong place.
-   *Option:* write the binary value in radians
-   (`write(ra.radian, binary=True)`), which is the keywords' native unit
-   (REF §4.1).
+   keywords.** `NickelTelescopePointing.slew_to` passes
+   `ra.to('hourangle').value` and `dec.to('deg').value` (e.g. `5.5`) to
+   `NickelPoco.set_pointing_demand`, which writes them to `POCORAD`/
+   `POCODECD` as ascii. Those keywords' ascii form is sexagesimal
+   (`05:30:00.00`), and how the service parses a decimal ascii value is a
+   C-layer question (REF §3.2); if it misreads it, the telescope slews to
+   the wrong place. *To confirm:* what `POCORAD`/`POCODECD` do with `5.5`.
+   *Option:* write the binary value in radians (`binary=True`), the
+   keywords' native unit (REF §4.1).
 2. **`EXPRESULT` isn't a reliable file path.** `ExposurePath.previous`
    (used by `FocusSequence.take_exposure` for every exposure) is
-   `Path(EXPRESULT.read())`. On an error, `EXPRESULT` holds the filename
-   *plus a message*, which would silently become a bogus path; and on
-   success the help doesn't say whether it's a full path. Reading it as
-   soon as `EXPSTATE` returns to `Ready` may also be before the dispatcher
-   has finished the FITS header. *Option:* use `FITSFILE` -- the full path,
-   set only once the file is complete, and the keyword the camera's help
-   says applications should track (REF §4.1) -- e.g. wait for it to update
-   after the exposure, and treat `EXPSTATE == Error` as a failure.
-3. **Reading the current Dec from ascii.** `NickelTelescopePointing.current`
-   parses `POCODECA`'s ascii text. Its format has no explicit sign field,
-   so whether a Dec between 0° and −1° keeps its minus sign is a C-layer
-   question (REF §4.1). *Option:* read `binary=True` (radians) for both
-   `POCORAA` and `POCODECA`.
-4. **First-use false negatives from short `waitFor`s.** `Focus.set_to` and
-   `NickelTelescopePointing.slew_to` use 0.5 s `waitFor`s on `POCSTOP`,
-   `EXPSTATE`, `POCTRCK`, `POCOT`. If a keyword isn't monitored yet, the
-   first call must receive its priming value within 0.5 s or the check
-   fails ("Telescope movement is disabled!") even when the condition is
-   true (REF §3.4). *Option:* `monitor()` (blocking priming read) these
-   keywords at construction; and, when a check does fail, follow up with a
-   short `read(timeout=...)` so a non-responding service is reported as
-   such. (`KTL_SUGGESTIONS.md` §1 and §3 propose fixing both in `waitFor`
-   itself.) **→ Phase 2.**
-5. **`EXPSTATE == Start` may be too brief to see.** `Exposure.expose` writes
+   `Path(EXPRESULT)`. On an error, `EXPRESULT` holds the filename *plus a
+   message*, which would silently become a bogus path; on success the help
+   doesn't say whether it's a full path; and reading it as soon as
+   `EXPSTATE` returns to `Ready` may be before the dispatcher has finished
+   the FITS header. *To confirm:* `EXPRESULT`'s contents on success and on
+   error, and when `FITSFILE` updates relative to `EXPSTATE == Ready`.
+   *Option:* use `FITSFILE` -- the full path, set only once the file is
+   complete, and the keyword the camera's help says applications should
+   track (REF §4.1) -- e.g. wait for it to update after the exposure, and
+   treat `EXPSTATE == Error` as a failure.
+3. **The current Dec is parsed from ascii.** `NickelPoco.pointing()` (used
+   by "Find nearest ...") reads `POCODECA`'s ascii text, and the
+   Controller's position display parses the ascii values its subscription
+   delivers. The format has no explicit sign field, so whether a Dec
+   between 0° and −1° keeps its minus sign is a C-layer question (REF §4.1).
+   *To confirm:* read `POCODECA` while pointed between 0° and −1°.
+   *Option:* use the binary values (radians) for `POCORAA`/`POCODECA`;
+   for the display, `KTLService.subscribe` would need a way to deliver
+   binary values.
+4. **`EXPSTATE == Start` may be too brief to see.** `Exposure.expose` writes
    `EXPOSE = Go`, then waits up to 30 s for `EXPSTATE == Start` before
-   waiting for `Ready`. `Start` corresponds to the acquisition's starting
-   phase and is probably short; if the service doesn't broadcast it, or
-   the exposure moves on before the broadcast is processed, the wait times
-   out and the exposure is reported as failed even though it ran
-   (REF §3.4). *Option:* wait for `EXPSTATE != Ready` (any of `Start`/
+   waiting for `Ready`. `Start` is probably short; if the service doesn't
+   broadcast it, or the exposure moves on before the broadcast is
+   processed, the wait times out and the exposure is reported as failed
+   even though it ran (REF §3.4). *To confirm:* whether `Start` is reliably
+   broadcast. *Option:* wait for `EXPSTATE != Ready` (any of `Start`/
    `Exposing`/`Readout`) instead, then for `Ready`.
-6. **GUI polling waits on the service from the GUI thread.** Every 1 Hz
-   poll makes 8 `read()`s from the GUI thread, each waiting for the
-   service's reply with no timeout (REF §3.1), so a slow or unresponsive
-   service freezes the GUI. *Options:* a short `timeout`; or reading
-   monitored keywords' values without a round trip. **→ Phase 3** (callbacks
-   deliver values with no round trip; all remaining reads get timeouts in
-   phase 1).
-7. **The Exp indicator shows `Error` as yellow.** Any `EXPSTATE` other than
-   `Ready` is currently yellow, including `Error` (and `Unknown`).
-   *Option:* show `Error` (and perhaps `Unknown`) red.
-8. **Never write `POCSTOP` from our code.** Writing it stops all motion,
-   and a negative value cuts motor power (REF §4.1). Our code only reads
-   it and should stay that way; worth a comment where it's read.
-9. **Read-speed names.** Our `Fast`/`Slow` aliases map to `1.0MHz`/
-   `0.05MHz`, but the help doesn't list `AMPCONFLIST`'s actual values, so
-   these are unconfirmed. If they're wrong, `configure(speed=...)` raises
-   (it checks against `AMPCONFLIST`), and the GUI keeps its default speed
-   with a warning.
-10. **Hidden KTL warnings.** KTL's own log level is `ERROR` (REF §3.7), so
-    its warnings never appear. Raising it (or routing it into
-    `nickel_focus.log` via `ktl.logger(...)`, which accepts any object with
-    a `.write()` method) during commissioning would surface them.
-11. **Stale data after a dispatcher restart.** No heartbeats are configured
-    (REF §3.6). With monitoring, register `service.heartbeat(...)` on a
-    regularly broadcasting keyword, so a dispatcher restart is detected and
-    monitoring restored. **→ Phase 2** (`POCHEART`, `DISP0CLK`).
+5. **The Exp indicator shows `Error` as yellow.** The Controller's
+   `_expstate_state` maps any `EXPSTATE` other than `Ready` to yellow,
+   including `Error` (and `Unknown`). *Option:* show `Error` (and perhaps
+   `Unknown`) red.
+6. **Read-speed names are unconfirmed.** `ExposureConfig.speed_aliases`
+   maps `Fast`/`Slow` to `1.0MHz`/`0.05MHz`, but the help doesn't list
+   `AMPCONFLIST`'s values. If they're wrong, the camera's actual speed is
+   still shown (an unrecognized value is added to the drop-down), but
+   choosing `Fast` or `Slow` fails `configure`'s check against
+   `AMPCONFLIST`, and the GUI reports the error and reverts the field.
+   *To confirm:* `AMPCONFLIST`'s values.
+7. **Indicators go stale, not red, if a service stops broadcasting
+   entirely** (as opposed to restarting, which the heartbeat handles; §4.3).
+   They just stop changing. `ktl`'s heartbeat state would tell, but only by
+   polling `Keyword.isAlive()` (REF §3.6); `KTL_SUGGESTIONS.md` §5 proposes
+   a notification. Whether it matters in practice is unknown.
+8. **KTL's own warnings are hidden.** KTL logs at `ERROR` level by default
+   (REF §3.7), so its warnings -- e.g. a timeout it ignores -- never appear.
+   *Option:* raise the level, or route KTL's log into `nickel_focus.log`
+   with `ktl.logger(...)` (which accepts any object with a `.write()`
+   method), at least during commissioning.
 
-Also recorded in the former §5, and true of the current code: the help
-files confirmed that `POCOT` is an integer (so the On Target indicator
-works as written), that the text values `allowed`/`disabled`, `on`/`off`,
-`Ready`, and `Yes`/`No` match our comparisons exactly, that the binning
-values match the code and GUI, and that every keyword we use supports
-notify reads/writes and broadcasts (REF §4.1).
+### 5.2 Settings and assumptions to confirm at the telescope
+
+- **The 1 s default read timeout** (`DEFAULT_READ_TIMEOUT`, §3.1): that
+  every service answers a normal read well within it, including while busy
+  (e.g. during readout or a slew).
+- **Startup time:** constructing the services primes about a dozen
+  monitored keywords, and the Controller's subscriptions read each
+  subscribed keyword once more; an unanswered read fails only after 1 s.
+- **Heartbeat periods** (`POCHEART`, `DISP0CLK`; provisional 30 s, §3.4)
+  and the live heartbeat test's timeout (two periods, §3.9): set them from
+  the keywords' observed broadcast intervals.
+- **`POCORAA`/`POCODECA` broadcast rate**, against the position display's
+  200 ms redraw limit (`Controller.POSITION_REDRAW_MS`).
+- **What write "completion" means** for `POCSECPD`, `POCORAD`/`POCODECD`,
+  `EXPOSE`, and the exposure settings (REF §3.2), to set per-keyword write
+  timeouts (§3.1). Until then a write waits however long completion takes;
+  for the exposure settings that wait is on the GUI thread (§3.6).
+- **Notify flags as the Python layer sees them** (the read timeouts depend
+  on them, REF §3.1): in an interactive session (a diagnostic, not
+  `nickel_focus` code), check `keyword['notify_reads']`/`['notify_writes']`
+  for one keyword per service -- or that `read(timeout=0.001)` raises
+  `TimeoutException` rather than blocking.
+- **Callbacks on the real `ktl`:** that a subscription delivers values (the
+  `ktl_live` subscription test), since the fake `ktl` can't check `ktl`'s
+  own callback thread and clones.
+- **Whether the data-acquisition GUI tracks `EXPOSURE`/`AMPCONF`/
+  `BINNING`**, so that an edit made in the focus GUI shows up there
+  (Goal 2).
+
+### 5.3 Possible later improvements
+
+- **One shared group of exposure fields** instead of three synchronized
+  copies on Single/Grid/Auto (§3.6) -- a layout change.
+- **A "monitor only" GUI mode** backed by read-only services (§3.9).
+- **Simplifications that depend on `ktl` changes** proposed in
+  `KTL_SUGGESTIONS.md`: waiting for a keyword's first value in `waitFor`
+  (§1) would make listing every checked keyword in `monitored`
+  unnecessary; a distinct "no value" result (§3) would replace `check`'s
+  follow-up read; a cached-value method (§4) would replace the
+  Controller's own copy of subscribed values and some round trips.

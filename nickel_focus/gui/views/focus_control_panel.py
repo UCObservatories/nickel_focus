@@ -35,6 +35,72 @@ def _float_spin(minimum, maximum, value):
     return spin
 
 
+class ExposureTimeSpinBox(QtWidgets.QDoubleSpinBox):
+    """
+    An exposure-time field whose edits take effect only when Enter is pressed,
+    like the data-acquisition GUI's.
+
+    While the field holds an edit that hasn't been committed, its background is
+    light red.  Pressing Enter commits it: the background clears and
+    :attr:`valueCommitted` is emitted.  Values set by the program
+    (:meth:`set_committed_value`) are committed as they're set.  The committed
+    value -- not an uncommitted edit -- is what :meth:`committed_value`
+    returns.
+
+    Attributes
+    ----------
+    valueCommitted : :class:`PySide6.QtCore.Signal`
+        Emitted with the new value when the user presses Enter.
+    """
+    valueCommitted = QtCore.Signal(float)
+
+    PENDING_STYLE = 'QDoubleSpinBox { background-color: #ffcdd2; }'
+    """Style sheet for a field with an uncommitted edit (light red)."""
+
+    def __init__(self, minimum, maximum, value, parent=None):
+        super().__init__(parent)
+        self.setRange(minimum, maximum)
+        # The camera reports exposure times to the millisecond.
+        self.setDecimals(3)
+        self.setValue(value)
+        self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self._committed = self.value()
+        self._pending = False
+        self.lineEdit().textEdited.connect(lambda text: self._set_pending(True))
+
+    def committed_value(self):
+        """The last committed value (ignoring any uncommitted edit)."""
+        return self._committed
+
+    def is_pending(self):
+        """Whether the field holds an uncommitted edit."""
+        return self._pending
+
+    def set_committed_value(self, value):
+        """Show ``value`` as the committed value, discarding any uncommitted edit."""
+        self.setValue(value)
+        self._committed = self.value()
+        self._set_pending(False)
+
+    def stepBy(self, steps):
+        """Arrow-key/wheel steps are edits like any other: pending until Enter."""
+        super().stepBy(steps)
+        self._set_pending(True)
+
+    def keyPressEvent(self, event):
+        """Commit the edit on Enter/Return."""
+        if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+            self.interpretText()
+            self._committed = self.value()
+            self._set_pending(False)
+            self.valueCommitted.emit(self._committed)
+        super().keyPressEvent(event)
+
+    def _set_pending(self, pending):
+        self._pending = pending
+        self.setStyleSheet(self.PENDING_STYLE if pending else '')
+
+
 def _exposure_field_rows():
     """
     Build exposure-time/speed/binning fields, used identically by the Single,
@@ -45,9 +111,10 @@ def _exposure_field_rows():
     tuple
         ``(rows, exptime_spin, speed_combo, binning_combo)``, where ``rows`` is
         a list of ``(label, widget)`` pairs suitable for
-        :func:`~nickel_focus.gui.views.focus_control_panel._group_box`.
+        :func:`~nickel_focus.gui.views.focus_control_panel._group_box`, and
+        ``exptime_spin`` is an :class:`ExposureTimeSpinBox`.
     """
-    exptime_spin = _float_spin(0.1, 600., 5.)
+    exptime_spin = ExposureTimeSpinBox(0.1, 600., 5.)
     speed_combo = QtWidgets.QComboBox()
     speed_combo.addItems(['Slow', 'Fast'])
     binning_combo = QtWidgets.QComboBox()
@@ -230,6 +297,16 @@ class FocusControlPanel(QtWidgets.QWidget):
     :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.startRequested`
     means).
 
+    The Single, Grid, and Auto tabs each have the same exposure fields
+    (exposure time, speed, binning), which show -- and set -- the camera's
+    current settings.  Choosing a speed or binning, or entering an exposure
+    time and pressing Enter, emits
+    :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.exposureSettingEdited`;
+    an exposure time that's been edited but not entered is shown light red
+    (see :class:`ExposureTimeSpinBox`).  Keeping the three tabs in step, and
+    the camera in step with them, is the Controller's job (via
+    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.set_exposure_config`).
+
     The Single tab doubles as "move to best focus": its focus field defaults to
     the most recent fitted best focus (via
     :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_best_focus`),
@@ -278,6 +355,11 @@ class FocusControlPanel(QtWidgets.QWidget):
         Emitted when the Slew tab's "Find nearest focus star" is clicked; like
         ``findNearestPointingRequested``, but with
         ``obj_search_str='Focusing'``.
+    exposureSettingEdited : :class:`PySide6.QtCore.Signal`
+        Emitted with ``(key, value)`` when the user commits an exposure setting
+        on the Single, Grid, or Auto tab: ``('exptime', float)`` when an
+        exposure time is entered, or ``('speed', str)``/``('binning', str)``
+        when a drop-down entry is chosen.
     """
     startRequested = QtCore.Signal()
     stopRequested = QtCore.Signal()
@@ -286,6 +368,7 @@ class FocusControlPanel(QtWidgets.QWidget):
     findNearestObjectRequested = QtCore.Signal(str, str)
     findNearestPointingRequested = QtCore.Signal()
     findNearestFocusRequested = QtCore.Signal()
+    exposureSettingEdited = QtCore.Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -313,6 +396,23 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.tabs.addTab(self.replay_tab, 'Replay')
         self.tabs.addTab(self.log_tab, 'Log')
         self.tabs.addTab(self.help_tab, 'Help')
+
+        # Report committed exposure-setting edits from any of the three
+        # tabs that take exposures. `activated` (unlike
+        # `currentTextChanged`) fires only for the user's own choice, never
+        # for set_exposure_config.
+        for exptime_spin, speed_combo, binning_combo in self._exposure_widgets():
+            exptime_spin.valueCommitted.connect(
+                lambda value: self.exposureSettingEdited.emit('exptime', value)
+            )
+            speed_combo.activated.connect(
+                lambda index, combo=speed_combo:
+                    self.exposureSettingEdited.emit('speed', combo.currentText())
+            )
+            binning_combo.activated.connect(
+                lambda index, combo=binning_combo:
+                    self.exposureSettingEdited.emit('binning', combo.currentText())
+            )
 
         # Every input widget across the five actionable tabs, locked
         # uniformly while anything is running (hardware exclusivity:
@@ -687,6 +787,12 @@ class FocusControlPanel(QtWidgets.QWidget):
             'Defaults to the most recent fitted best focus, so acquiring '
             'it as-is moves to best focus; change the value first to '
             'test any other focus.<br><br>'
+            '<b>Exposure settings</b> (Single, Grid, Auto) — show the '
+            "camera's current settings, including changes made from other "
+            'programs, and are the same on all three tabs. Choosing a speed '
+            'or binning changes the camera immediately; a new exposure time '
+            'turns light red until you press Enter, which sends it to the '
+            'camera.<br><br>'
             '<b>Grid</b> — step through an evenly spaced focus grid.<br>'
             '<b>Auto</b> — adaptively search for the best focus.<br>'
             '<b>Replay</b> — reprocess an existing set of exposures from disk.<br>'
@@ -818,14 +924,23 @@ class FocusControlPanel(QtWidgets.QWidget):
             }
         return {}
 
+    def _exposure_widgets(self):
+        """The ``(exptime_spin, speed_combo, binning_combo)`` of Single, Grid, and Auto."""
+        return (
+            (self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo),
+            (self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo),
+            (self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo),
+        )
+
     def get_exposure_config(self):
         """
         Return the currently active tab's exposure settings as a :obj:`dict`
         with keys ``exptime`` (:obj:`float`), ``speed``, ``binning``
         (:obj:`str`) -- passed to
         :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure` before a live
-        exposure.  Empty for any tab other than Single, Grid, or Auto, since
-        those are the only ones that take new exposures.
+        exposure.  The exposure time is the committed one: an edit that hasn't
+        been entered is ignored.  Empty for any tab other than Single, Grid, or
+        Auto, since those are the only ones that take new exposures.
         """
         tab = self.tabs.currentWidget()
         if tab is self.single_tab:
@@ -843,14 +958,16 @@ class FocusControlPanel(QtWidgets.QWidget):
         else:
             return {}
         return {
-            'exptime': exptime.value(), 'speed': speed.currentText(),
+            'exptime': exptime.committed_value(), 'speed': speed.currentText(),
             'binning': binning.currentText()
         }
 
     def set_exposure_config(self, config):
         """
         Set the exposure fields on every tab that takes exposures (Single, Grid,
-        Auto) -- e.g. to the camera's current settings at startup.
+        Auto) -- e.g. to the camera's current settings.  An exposure time set
+        this way is committed (see :class:`ExposureTimeSpinBox`), discarding
+        any uncommitted edit.  Nothing is emitted.
 
         Parameters
         ----------
@@ -863,28 +980,25 @@ class FocusControlPanel(QtWidgets.QWidget):
         Returns
         -------
         :obj:`list`
-            The keys whose value couldn't be shown because it isn't one of the
-            drop-down's options (``speed``/``binning``); those fields are left
-            unchanged.  An ``exptime`` outside the field's range is clamped to
-            it rather than reported.
+            The keys (``speed``/``binning``) whose value wasn't one of the
+            drop-down's options, and so was added to it.  An ``exptime``
+            outside the field's range is clamped to it rather than reported.
         """
-        exposure_widgets = (
-            (self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo),
-            (self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo),
-            (self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo),
-        )
-        unmatched = []
+        exposure_widgets = self._exposure_widgets()
+        added = []
         for key, index in (('speed', 1), ('binning', 2)):
             if key in config and exposure_widgets[0][index].findText(config[key]) < 0:
-                unmatched.append(key)
+                added.append(key)
+                for widgets in exposure_widgets:
+                    widgets[index].addItem(config[key])
         for exptime_spin, speed_combo, binning_combo in exposure_widgets:
             if 'exptime' in config:
-                exptime_spin.setValue(config['exptime'])
-            if 'speed' in config and 'speed' not in unmatched:
+                exptime_spin.set_committed_value(config['exptime'])
+            if 'speed' in config:
                 speed_combo.setCurrentText(config['speed'])
-            if 'binning' in config and 'binning' not in unmatched:
+            if 'binning' in config:
                 binning_combo.setCurrentText(config['binning'])
-        return unmatched
+        return added
 
     def set_hardware_tabs_enabled(self, enabled):
         """

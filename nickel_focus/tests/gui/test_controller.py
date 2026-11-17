@@ -12,6 +12,7 @@ from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.qt import QtCore
 from nickel_focus.gui.views.main_window import MainWindow
 from nickel_focus.gui.controller import Controller
+from nickel_focus.tests.gui.keyboard import type_and_enter
 
 
 def _configure_replay_tab(panel, focus_sweep):
@@ -234,7 +235,7 @@ def test_start_focus_sequence_runs_grid_against_fake_hardware(qapp, fake_hardwar
     panel.grid_start_spin.setValue(340)
     panel.grid_step_spin.setValue(5)
     panel.grid_nstep_spin.setValue(5)
-    panel.grid_exptime_spin.setValue(7.5)
+    type_and_enter(panel.grid_exptime_spin, '7.5')
 
     controller.start_focus_sequence()
     _wait_for_focus_worker(controller)
@@ -313,7 +314,7 @@ def test_take_single_exposure_runs_against_fake_hardware(qapp, fake_hardware):
     controller = Controller(window)
     panel = window.control_panel
     panel.tabs.setCurrentWidget(panel.single_tab)
-    panel.single_exptime_spin.setValue(6.0)
+    type_and_enter(panel.single_exptime_spin, '6')
 
     panel.takeSingleExposureRequested.emit(345.)
     _wait_for_focus_worker(controller)
@@ -909,13 +910,26 @@ def test_quit_is_disabled_while_a_slew_runs(qapp, fake_telescope):
         'Quit should be re-enabled once the slew finishes'
 
 
-# -- exposure settings initialized from the camera ----------------------------
+# -- exposure fields follow the camera, both ways -----------------------------
 
 def _set_camera_settings(fake_hardware, exptime, ampconf, binning):
     sim = fake_hardware['sim']
     sim.keyword('nscicam', 'EXPOSURE').value = exptime
     sim.keyword('nscicam', 'AMPCONF').value = ampconf
     sim.keyword('nscicam', 'BINNING').value = binning
+
+
+def _exposure_configs(panel):
+    """The exposure configuration shown on each of Single, Grid, and Auto."""
+    configs = []
+    for tab in (panel.single_tab, panel.grid_tab, panel.auto_tab):
+        panel.tabs.setCurrentWidget(tab)
+        configs.append(panel.get_exposure_config())
+    return configs
+
+
+def _messages(caplog, level='INFO'):
+    return [r.getMessage() for r in caplog.records if r.levelname == level]
 
 
 def test_exposure_fields_keep_their_defaults_without_ktl(qapp):
@@ -932,49 +946,129 @@ def test_exposure_fields_keep_their_defaults_without_ktl(qapp):
 
 
 def test_exposure_fields_start_at_the_camera_settings(qapp, caplog, fake_hardware):
-    _set_camera_settings(fake_hardware, '30.0', '1.0MHz', '1,1')
+    _set_camera_settings(fake_hardware, '30.000', '1.0MHz', '1,1')
     window = MainWindow()
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        Controller(window)
+        controller = Controller(window)
+        _deliver_broadcasts(controller)
 
+    expected = {'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'}
+    assert _exposure_configs(window.control_panel) == [expected] * 3, \
+        'every exposure tab should show the camera settings'
+    assert 'Exposure exptime from the camera: 30.0' in _messages(caplog), \
+        "the camera's initial exposure time should be logged"
+
+
+def test_exposure_fields_follow_camera_changes(qapp, caplog, fake_hardware):
+    # E.g. the exposure time changed from the data-acquisition GUI.
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        fake_hardware['sim'].keyword('nscicam', 'EXPOSURE').value = '45.000'
+        _deliver_broadcasts(controller)
+
+    assert [c['exptime'] for c in _exposure_configs(window.control_panel)] == [45.0] * 3, \
+        'every exposure tab should follow the camera'
+    assert 'Exposure exptime changed on the camera: 5.0 -> 45.0' in _messages(caplog), \
+        'a change made elsewhere should be logged'
+
+
+def test_entered_exposure_time_is_written_to_the_camera(qapp, caplog, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
     panel = window.control_panel
-    for tab in (panel.single_tab, panel.grid_tab, panel.auto_tab):
-        panel.tabs.setCurrentWidget(tab)
-        assert panel.get_exposure_config() == {
-            'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'}, \
-            'every exposure tab should show the camera settings'
-    assert any('initialized from the camera' in r.getMessage() for r in caplog.records), \
-        'the initialization should be logged'
+    panel.tabs.setCurrentWidget(panel.grid_tab)
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        type_and_enter(panel.grid_exptime_spin, '12')
+        _deliver_broadcasts(controller)
+
+    assert fake_hardware['sim'].keyword('nscicam', 'EXPOSURE').writes == [12.0], \
+        'entering an exposure time should write it to the camera at once'
+    assert [c['exptime'] for c in _exposure_configs(panel)] == [12.0] * 3, \
+        'the other exposure tabs should show the new exposure time too'
+    assert 'Exposure exptime set to 12.0' in _messages(caplog), 'the change should be logged'
+    assert not any('changed on the camera' in m for m in _messages(caplog)), \
+        "the camera's confirmation of our own edit should not be logged as an outside change"
 
 
-def test_unknown_camera_setting_is_logged_and_left_at_default(qapp, caplog, fake_hardware):
+def test_chosen_speed_is_written_to_the_camera(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
+    combo = window.control_panel.single_speed_combo
+
+    index = combo.findText('Fast')
+    combo.setCurrentIndex(index)
+    combo.activated.emit(index)
+
+    assert fake_hardware['sim'].keyword('nscicam', 'AMPCONF').writes == ['1.0MHz'], \
+        'choosing a speed should write its AMPCONF value to the camera at once'
+
+
+def test_rejected_write_is_reported_and_reverted(qapp, fake_hardware, monkeypatch):
+    sim = fake_hardware['sim']
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
+
+    def reject(value, wait=True, binary=False, timeout=None):
+        raise sim.ktl.ktlError('KTL::-5::exposure time out of range')
+
+    monkeypatch.setattr(sim.keyword('nscicam', 'EXPOSURE'), 'write', reject)
+    panel = window.control_panel
+    panel.tabs.setCurrentWidget(panel.single_tab)
+    type_and_enter(panel.single_exptime_spin, '99')
+
+    assert 'Could not set the exposure exptime to 99.0' in panel.status_label.text(), \
+        'a rejected write should be reported'
+    assert [c['exptime'] for c in _exposure_configs(panel)] == [5.0] * 3, \
+        "the fields should go back to the camera's exposure time"
+
+
+def test_unknown_camera_setting_is_added_and_logged(qapp, caplog, fake_hardware):
     _set_camera_settings(fake_hardware, '30.0', '0.5MHz', '1,1')
     window = MainWindow()
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        Controller(window)
+        controller = Controller(window)
+        _deliver_broadcasts(controller)
 
-    assert any(
-        r.levelname == 'WARNING' and "'0.5MHz'" in r.getMessage() for r in caplog.records
-    ), 'an unknown speed should be reported'
-    panel = window.control_panel
-    panel.tabs.setCurrentWidget(panel.single_tab)
-    assert panel.get_exposure_config()['exptime'] == 30.0, 'the other settings still apply'
+    assert any("'0.5MHz'" in m for m in _messages(caplog, 'WARNING')), \
+        'an unknown speed should be reported'
+    assert [c['speed'] for c in _exposure_configs(window.control_panel)] == ['0.5MHz'] * 3, \
+        'an unknown speed should be added to the options and shown'
 
 
-def test_failed_camera_settings_read_is_logged(qapp, caplog, fake_hardware):
+def test_unreadable_camera_setting_is_logged(qapp, caplog, fake_hardware):
     window = MainWindow()
     controller = Controller(window)
-    fake_hardware['sim'].keyword('nscicam', 'EXPOSURE').responsive = False
+    _deliver_broadcasts(controller)
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        controller._initialize_exposure_config()
+        fake_hardware['sim'].keyword('nscicam', 'EXPOSURE').value = 'garbage'
+        _deliver_broadcasts(controller)
 
-    assert any(
-        r.levelname == 'WARNING' and 'current exposure settings' in r.getMessage()
-        for r in caplog.records
-    ), 'a failed settings read should be logged as a warning'
+    assert any('camera exposure exptime' in m for m in _messages(caplog, 'WARNING')), \
+        'an exposure time that is not a number should be logged as a warning'
+    assert [c['exptime'] for c in _exposure_configs(window.control_panel)] == [5.0] * 3, \
+        'an unreadable value should leave the fields alone'
+
+
+def test_edit_without_a_camera_only_syncs_the_tabs(qapp):
+    window = MainWindow()
+    controller = Controller(window, force_enable_hardware_tabs=True)  # noqa: F841 (kept alive)
+    panel = window.control_panel
+    panel.tabs.setCurrentWidget(panel.auto_tab)
+
+    type_and_enter(panel.auto_exptime_spin, '8')
+
+    assert [c['exptime'] for c in _exposure_configs(panel)] == [8.0] * 3, \
+        'without a camera, an entered exposure time should still appear on every tab'
 
 
 # -- the shared services --------------------------------------------------------

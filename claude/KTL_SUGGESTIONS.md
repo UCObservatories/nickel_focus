@@ -37,9 +37,16 @@ or *withdrawn*.
   otherwise performs (`Expression.py:418`). Until the priming value
   arrives, the expression evaluates to `None`, and if that takes longer
   than `timeout`, `waitFor` returns `False`.
-- **Interim approach:** call `keyword.monitor()` (blocking priming read)
-  once, when our class is constructed, before any `waitFor` -- as
-  `exposure.Exposure` already does for `EXPSTATE`.
+- **Interim approach (implemented):** every keyword we `waitFor` is
+  monitored and primed when its service object is constructed, before any
+  check runs: `KTLService` calls `keyword.monitor(prime=False)` and then
+  `keyword.read(timeout=1.0)` for each keyword in the service's `monitored`
+  list (`services/base.py`; `NickelPoco` monitors `POCSTOP`, `POCTRCK`,
+  `POCOT`, `POCSECLK`, ...; `NSciCam` monitors `EXPSTATE`, ...). Priming
+  with our own timed read, rather than `monitor()`'s untimed one, also means
+  an unresponsive service fails construction instead of hanging it. The
+  cost is that every keyword we might check has to be listed up front, and
+  the false negative remains for any keyword that isn't.
 - **Suggested change:** add a `prime` argument,
   `waitFor(expression, timeout=None, case=False, prime=True)`, which, when
   the keyword has no value yet, waits for the priming read (within
@@ -57,7 +64,12 @@ or *withdrawn*.
   elapsed time only when it wakes. A keyword that keeps updating without
   satisfying the expression can stretch the wait to nearly `2T`.
 - **Interim approach:** none needed for correctness; we just don't rely on
-  `waitFor` returning promptly at `T` (e.g. for user-facing timing).
+  `waitFor` returning promptly at `T`. All our waits go through
+  `KTLService.wait_for`/`check` (`services/base.py`). The short checks
+  (0.5 s) are on keywords that rarely update; the long waits -- `POCOT`
+  for up to 300 s after a slew, `EXPSTATE` for up to the exposure time plus
+  90 s -- are on keywords that update repeatedly while waiting, so they're
+  the ones that can overshoot, by up to their full timeout.
 - **Suggested change:** wait for the *remaining* time on each pass:
   `action.wait(remaining)` (with `remaining` computed before waiting), so
   the total never exceeds `timeout`.
@@ -67,18 +79,24 @@ or *withdrawn*.
 - **Status:** draft
 - **Need:** When a check like `waitFor('== allowed', timeout=0.5)` fails,
   we report it to the observer ("Telescope movement is disabled!"). That
-  message is wrong if the real cause is that the service never replied.
+  message is wrong if the real cause is that the service never replied, so
+  we need to tell the two apart.
 - **Current behavior:** `waitFor` returns `False` both when the keyword had
   a value that never satisfied the expression and when the keyword never
   had a value at all (`Expression.evaluate` returns `None` for an
   unpopulated keyword, `Expression.py:546`; `Expression.wait` treats
   anything but `True` as unsatisfied).
-- **Interim approach:** after a `False` result, follow up with a short
-  `keyword.read(timeout=...)`. Both our services honor read timeouts
-  (`KTL_REFERENCE.md` §3.1), so a `TimeoutException` means the service
-  isn't replying, while a returned value means the condition really was
-  false; report each accordingly. This costs one extra round trip, only on
-  the failure path.
+- **Interim approach (implemented):** `KTLService.check(name, expression,
+  timeout)` (`services/base.py`) calls `waitFor` and, on `False`, follows
+  up with `keyword.read(timeout=1.0)`. Both our services honor read
+  timeouts (`KTL_REFERENCE.md` §3.1), so a `TimeoutException` means the
+  service isn't replying (`check` returns `None`), while a returned value
+  means the condition really was false (`False`). `services.require` turns
+  these into a `KTLTimeoutError` ("No reply from nickelpoco.POCSTOP; ...")
+  or the usual `ValueError`. Every check in `Focus.set_to`,
+  `FocusSequence.set_focus`, `NickelTelescopePointing.slew_to`, and
+  `Exposure.expose` goes through it. This costs one extra round trip -- up to
+  1 s more -- only on the failure path.
 - **Suggested change:** either return a distinct value (e.g. `None`) when
   the timeout expires with no value ever received, or add a
   `raise_on_no_value=True` option that raises `ktl.TimeoutException` (or a
@@ -87,12 +105,16 @@ or *withdrawn*.
 
 ## 4. A named method for a monitored keyword's cached value
 
-- **Status:** draft
-- **Need:** The GUI polls eight keywords once a second to drive its status
-  indicators and position display. Each `read()` is a round trip to the
-  service; for keywords we monitor anyway, the latest value is already
-  held locally and could be shown with no I/O at all -- and so could never
-  freeze the GUI.
+- **Status:** draft -- **weaker need since the GUI moved to callbacks.**
+  Originally motivated by the GUI's 1 Hz polling, which is gone; what
+  remains is convenience and stale-data detection (below). Worth keeping
+  as a low-priority suggestion.
+- **Need:** For a keyword we monitor anyway, the latest value is already
+  held locally, and getting it should need no round trip to the service.
+  Today we work around the lack of such a method in two ways: the GUI keeps
+  its own copy of every value its subscriptions deliver, and some code
+  makes a round trip for a value `ktl` already has. Knowing *when* that
+  value arrived would also let a caller notice stale data (see also §5).
 - **Current behavior:** `Keyword.read()` (`Keyword.py:823`) always makes a
   round trip, even for a monitored keyword. The cached value is reachable
   only through dictionary-style access, `keyword['ascii']`/`['binary']`
@@ -100,10 +122,20 @@ or *withdrawn*.
   back to a *blocking* read if no value has arrived yet and re-raises a
   stored error, behaviors that aren't visible at the call site. Whether a
   value has arrived (`['populated']`) and when (`['timestamp']`) are
-  likewise only available that way.
-- **Interim approach:** `keyword.read(timeout=...)` with a short timeout,
-  treating a `TimeoutException` as "unavailable". Still a round trip per
-  keyword per poll, but it can no longer hang the GUI.
+  likewise only available that way. (Inside a callback, the clone `ktl`
+  passes in does return its value from `read()` without I/O
+  (`Keyword.py:846`) -- but only there.)
+- **Interim approach (implemented):**
+  - The GUI's status bar, position display, and exposure fields get their
+    values from `KTLService.subscribe` callbacks, and the Controller keeps
+    the latest value of each in its own `_latest` dictionary -- a
+    duplicate of what `ktl` already caches.
+  - Values needed on demand use `KTLService.read`, a round trip with a 1 s
+    timeout, even when the keyword is monitored: e.g. the current pointing
+    for "Find nearest ..." (on the GUI thread), `Focus.current`
+    (`POCSECPA`), and the follow-up read in `KTLService.check` (§3).
+  - Nothing detects stale data; an indicator just keeps the last value it
+    received.
 - **Suggested change:** a method that never does I/O, e.g.
 
   ```python
@@ -151,7 +183,9 @@ or *withdrawn*.
     lags by up to one heartbeat period.
 - **Interim approach:** none implemented; the indicators simply stop
   changing (a known limitation, noted in `ktl_interface_refactor.md`
-  §4.3). If needed before any `ktl` change, we could call `isAlive()` on
+  §4.3). The heartbeats themselves are registered (`POCHEART`, `DISP0CLK`,
+  provisional 30 s periods), so `ktl` already reconnects after a dispatcher
+  restart. If needed before any `ktl` change, we could call `isAlive()` on
   one keyword per service, once at startup on a non-GUI thread (to absorb
   its first-call round trip), and then poll it from a slow timer --
   named methods only, though polling is what the callback-driven design
