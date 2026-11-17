@@ -252,7 +252,7 @@ def test_every_stretch_option_renders_without_error(qapp, focus_sweep):
     for name in panel.STRETCHES:
         panel.stretch_combo.setCurrentText(name)
         panel.show_result(result)
-        assert panel._stretch_name == name
+        assert panel._stretch_name == name, f'the {name} stretch should be selected'
         assert panel.ax.get_images(), f'{name} should have actually drawn an image'
 
 
@@ -262,4 +262,4 @@ def test_image_is_anchored_to_the_top_of_the_canvas(qapp, focus_sweep):
     panel = ImagePanel()
     panel.add_result(_step_results(focus_sweep)[0])
 
-    assert panel.ax.get_anchor() == 'N'
+    assert panel.ax.get_anchor() == 'N', 'the image should be anchored to the top of the canvas'

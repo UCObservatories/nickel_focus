@@ -71,10 +71,12 @@ class NickelSlewToNearest(scriptbase.ScriptBase):
         """
         from nickel_focus import log
         from nickel_focus import slew
+        from nickel_focus.services import NickelPoco
 
         cls.init_log(args)
 
-        telescope = slew.NickelTelescopePointing()
+        # A dry run never moves the telescope, so its service is read-only.
+        telescope = slew.NickelTelescopePointing(NickelPoco(read_only=args.dry_run))
 
         target_name, target_ra, target_dec = slew.find_nearest_target(
             telescope.current, obj_search_str=args.search, file=args.starlist

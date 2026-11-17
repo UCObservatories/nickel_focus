@@ -13,10 +13,10 @@ import logging
 
 from astropy.coordinates import SkyCoord
 
-from nickel_focus import exposure
 from nickel_focus import focus
 from nickel_focus import log
 from nickel_focus import slew
+from nickel_focus.services import NickelPoco, NSciCam, ktl_available
 from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.model.focus_worker import FocusWorker
 from nickel_focus.gui.model.slew_worker import SlewWorker
@@ -40,8 +40,14 @@ class Controller(QtCore.QObject):
     :class:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel`) are
     wired up.
 
-    Also owns the :class:`~nickel_focus.slew.NickelTelescopePointing` handle
-    used by the Slew tab:
+    Also owns the two KTL service objects shared by everything that talks to
+    the hardware -- :attr:`~nickel_focus.gui.controller.Controller.poco`
+    (:class:`~nickel_focus.services.nickelpoco.NickelPoco`, the telescope) and
+    :attr:`~nickel_focus.gui.controller.Controller.cam`
+    (:class:`~nickel_focus.services.nscicam.NSciCam`, the camera) -- which it
+    passes to each sequence it builds, and the
+    :class:`~nickel_focus.slew.NickelTelescopePointing` handle used by the
+    Slew tab:
     :meth:`~nickel_focus.gui.controller.Controller.move_to_target` (a slew, via
     :class:`~nickel_focus.gui.model.slew_worker.SlewWorker`) participates in the
     same hardware-exclusivity state as a focus sequence -- the telescope
@@ -75,9 +81,9 @@ class Controller(QtCore.QObject):
         connection, so a developer can still see and click through them while
         working on the GUI. Every action on those tabs still fails exactly as it
         would otherwise (each checks
-        :attr:`~nickel_focus.gui.controller.Controller.telescope`/
-        :attr:`~nickel_focus.focus.ktl` itself) -- this only skips graying them
-        out.  Wired to the GUI script's suppressed ``--test`` flag; never set
+        :attr:`~nickel_focus.gui.controller.Controller.poco`/
+        :attr:`~nickel_focus.gui.controller.Controller.cam` itself) -- this only
+        skips graying them out.  Wired to the GUI script's suppressed ``--test`` flag; never set
         outside of that.
     """
 
@@ -110,31 +116,24 @@ class Controller(QtCore.QObject):
         # sequence is loaded.
         self._standalone_focus_sequence = None
 
-        # The telescope-pointing handle backing the Slew tab. Like
-        # `focus.FocusSequence`'s `_focus`/`_exposure`, this is `None`
-        # when no ktl connection is available (`NickelTelescopePointing`
-        # raises `RuntimeError` in that case) -- every method below that
-        # uses it checks for `None` first and reports a clear failure
-        # instead.
-        try:
-            self.telescope = slew.NickelTelescopePointing()
-        except RuntimeError:
-            self.telescope = None
+        # The telescope and camera services, shared by the status
+        # indicators, the Slew tab, and every sequence or single exposure.
+        # Each is `None` if it can't be used (no ktl, or the service didn't
+        # answer) -- every method below that needs one checks for `None`
+        # first and reports a clear failure instead.
+        self.poco = self._connect_service(NickelPoco)
+        self.cam = self._connect_service(NSciCam)
 
-        # Focus/exposure handles used only to read the keywords behind the
-        # status indicators -- never to move the focus or take an
-        # exposure (sequences and single exposures construct their own,
-        # via `focus.FocusSequence`). `None` without a ktl connection.
-        self.focus_hardware = self._connect_status_handle(focus.Focus, 'focus')
-        self.exposure_hardware = self._connect_status_handle(exposure.Exposure, 'exposure')
+        # The telescope-pointing handle backing the Slew tab; `None`
+        # without the telescope service.
+        self.telescope = (
+            None if self.poco is None else slew.NickelTelescopePointing(self.poco)
+        )
         self._initialize_exposure_config()
 
-        # `focus.ktl` and `slew.ktl` are the same object in normal
-        # operation (see `nickel_focus/pkg/ktl.py`), so checking one is
-        # enough to know whether any of the four ktl-driven tabs can do
-        # anything useful; `force_enable_hardware_tabs` overrides only
-        # the View-level graying-out below, not this flag itself.
-        self.ktl_available = focus.ktl is not None
+        # Whether ktl itself is available; `force_enable_hardware_tabs`
+        # overrides only the View-level graying-out below, not this flag.
+        self.ktl_available = ktl_available()
         window.control_panel.set_hardware_tabs_enabled(
             self.ktl_available or force_enable_hardware_tabs)
 
@@ -158,18 +157,17 @@ class Controller(QtCore.QObject):
         window.status_bar.quitRequested.connect(self.quit)
 
         # Milliseconds, not seconds: a `QTimer` interval is always in ms.
-        # Each poll is a handful of quick ktl reads, not a move -- safe
-        # (and useful) to keep polling no matter what else, if anything,
-        # is running.
+        # Each poll is a handful of ktl reads, not a move -- safe (and
+        # useful) to keep polling no matter what else, if anything, is
+        # running. The reads run on the GUI thread, so an unresponsive
+        # service stalls the GUI for up to each read's timeout
+        # (`services.base.DEFAULT_READ_TIMEOUT`) per poll.
         self._position_read_failed = False
         self._status_read_failed = set()  # indicator keys whose last read failed
         self._poll_timer = QtCore.QTimer(self)
         self._poll_timer.timeout.connect(self._poll_hardware)
         self._poll_hardware()
-        if any(
-            handle is not None
-            for handle in (self.telescope, self.focus_hardware, self.exposure_hardware)
-        ):
+        if self.poco is not None or self.cam is not None:
             self._poll_timer.start(1000)
 
         self._set_running(False)
@@ -191,11 +189,13 @@ class Controller(QtCore.QObject):
                 focus_sequence = self._build_archive_focus_sequence(config)
             elif focus_sequence_type == 'grid':
                 focus_sequence = focus.GridFocusSequence(
-                    config['start'], config['step'], nstep=config['nstep']
+                    config['start'], config['step'], nstep=config['nstep'], poco=self.poco,
+                    cam=self.cam
                 )
             else:
                 focus_sequence = focus.AutomatedFocusSequence(
-                    config['start'], config['step'], maxsteps=config['maxsteps']
+                    config['start'], config['step'], maxsteps=config['maxsteps'],
+                    poco=self.poco, cam=self.cam
                 )
         except Exception as e:
             self._fail(f'Could not start sequence: {e}', e)
@@ -229,11 +229,9 @@ class Controller(QtCore.QObject):
         """
         # GridFocusSequence is only used here for its focus-value
         # arithmetic (matches focus.py's own CLI archive-mode path), so
-        # it's built with connect=False to keep it from touching hardware
-        # even when ktl is available.
-        grid = focus.GridFocusSequence(
-            config['start'], config['step'], nstep=config['nstep'], connect=False
-        )
+        # it's built without the services, keeping it from touching
+        # hardware.
+        grid = focus.GridFocusSequence(config['start'], config['step'], nstep=config['nstep'])
         expected_files = [
             config['datadir'] / f"{config['prefix']}{config['obsnum'] + i}{config['suffix']}"
             for i in range(grid.nstep)
@@ -278,13 +276,13 @@ class Controller(QtCore.QObject):
         ``focus_value`` is left at its default (the most recent fitted best
         focus; see
         :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_best_focus`).
-        Uses a throwaway :class:`~nickel_focus.focus.FocusSequence` for its
-        hardware handles, independent of any loaded
-        :attr:`~nickel_focus.gui.controller.Controller.focus_sequence`.
+        Uses a throwaway :class:`~nickel_focus.focus.FocusSequence` (built on
+        the shared services) for its hardware handles, independent of any
+        loaded :attr:`~nickel_focus.gui.controller.Controller.focus_sequence`.
         """
         if self.focus_worker is not None or self.slew_worker is not None:
             return  # hardware exclusivity: something is already running
-        standalone = focus.FocusSequence()
+        standalone = focus.FocusSequence(poco=self.poco, cam=self.cam)
         if standalone._focus is None or standalone._exposure is None:
             self._fail('Could not take single exposure: no ktl connection is available.')
             return
@@ -398,8 +396,8 @@ class Controller(QtCore.QObject):
     def quit(self):
         """
         Handle the status bar's Quit button: close the window, exactly as its
-        own close button would (settings are saved, and the application exits
-        once its last window closes).
+        own close button would (the application exits once its last window
+        closes).
         """
         self.window.close()
 
@@ -594,52 +592,50 @@ class Controller(QtCore.QObject):
         self.slew_worker = None
         self._set_running(False)
 
-    def _connect_status_handle(self, handle_class, description):
+    def _connect_service(self, service_class):
         """
-        Construct one of the hardware handles used only to read the status
-        indicators' keywords
-        (:attr:`~nickel_focus.gui.controller.Controller.focus_hardware`/
-        :attr:`~nickel_focus.gui.controller.Controller.exposure_hardware`), or
-        return ``None`` if that's not possible.
+        Construct one of the shared KTL services
+        (:attr:`~nickel_focus.gui.controller.Controller.poco`/
+        :attr:`~nickel_focus.gui.controller.Controller.cam`), or return
+        ``None`` if that's not possible.
 
-        Without ``ktl``, ``handle_class`` raises :obj:`RuntimeError`, which is
-        expected and silent.  Any other failure (e.g., ``ktl`` is available but
-        a keyword can't be reached) is logged as a warning rather than
-        preventing the GUI from starting, since these handles only drive the
-        indicators.
+        Without ``ktl``, this returns ``None`` silently.  Any other failure
+        (e.g., ``ktl`` is available but the service doesn't answer) is logged
+        as a warning rather than preventing the GUI from starting; the
+        hardware tabs then report the missing connection when used.
 
         Parameters
         ----------
-        handle_class : :obj:`type`
-            :class:`~nickel_focus.focus.Focus` or
-            :class:`~nickel_focus.exposure.Exposure`.
-        description : :obj:`str`
-            Short name for the handle, used in the warning message.
+        service_class : :obj:`type`
+            :class:`~nickel_focus.services.nickelpoco.NickelPoco` or
+            :class:`~nickel_focus.services.nscicam.NSciCam`.
         """
-        if focus.ktl is None:
+        if not ktl_available():
             return None
         try:
-            return handle_class()
+            return service_class()
         except Exception as e:
-            log.warning(f'Could not connect to the {description} status keywords: {e}', exc_info=e)
+            log.warning(
+                f'Could not connect to the {service_class.service} service: {e}', exc_info=e
+            )
             return None
 
     def _initialize_exposure_config(self):
         """
         Start the Single/Grid/Auto tabs' exposure fields (exposure time, speed,
         binning) at the camera's current settings, read via
-        :meth:`~nickel_focus.exposure.ExposureConfig.current_settings`.
+        :meth:`~nickel_focus.services.nscicam.ExposureConfig.current_settings`.
 
-        Without a ``ktl`` connection
-        (:attr:`~nickel_focus.gui.controller.Controller.exposure_hardware` is
-        ``None``), the fields keep their built-in defaults.  A failed read, or
+        Without the camera service
+        (:attr:`~nickel_focus.gui.controller.Controller.cam` is ``None``), the
+        fields keep their built-in defaults.  A failed read, or
         a value the fields can't show, is logged as a warning and leaves those
         fields unchanged.
         """
-        if self.exposure_hardware is None:
+        if self.cam is None:
             return
         try:
-            config = self.exposure_hardware.cfg.current_settings()
+            config = self.cam.cfg.current_settings()
         except Exception as e:
             log.warning(f'Could not read the current exposure settings: {e}', exc_info=e)
             return
@@ -672,36 +668,34 @@ class Controller(QtCore.QObject):
         its color (see the module-level ``_*_state`` functions for each
         keyword's mapping):
 
-        - **Slew** -- ``NickelTelescopePointing.pocstop`` (telescope movement
-          allowed).
-        - **Track** -- ``NickelTelescopePointing.track``.
-        - **On Target** -- ``NickelTelescopePointing.target``.
-        - **Focus** -- ``Focus.seclk`` (the secondary's lock) sets the color;
-          the text is the current focus value (``Focus.current``).
-        - **Exp** -- ``Exposure.expstate``.
+        - **Slew** -- ``nickelpoco.POCSTOP`` (telescope movement allowed).
+        - **Track** -- ``nickelpoco.POCTRCK``.
+        - **On Target** -- ``nickelpoco.POCOT``.
+        - **Focus** -- ``nickelpoco.POCSECLK`` (the secondary's lock) sets the
+          color; the text is the current focus value
+          (:meth:`~nickel_focus.services.nickelpoco.NickelPoco.secondary_position`).
+        - **Exp** -- ``nscicam.EXPSTATE``.
 
-        An indicator whose hardware handle is ``None`` (no ``ktl`` connection),
-        or whose read fails, is shown red with its default text.  A failed read
-        is logged as a warning only on the first failure in a row for that
-        indicator, since this is polled every second.
+        An indicator whose service is ``None`` (no connection), or whose read
+        fails (including a read timeout), is shown red with its default text.
+        A failed read is logged as a warning only on the first failure in a
+        row for that indicator, since this is polled every second.
         """
-        telescope, focus_hw, exposure_hw = (
-            self.telescope, self.focus_hardware, self.exposure_hardware
-        )
-        # key: (hardware handle, function returning (state, text or None))
+        poco, cam = self.poco, self.cam
+        # key: (service, function returning (state, text or None))
         readers = {
-            'movement': (telescope, lambda: (_movement_state(telescope.pocstop.read()), None)),
-            'track': (telescope, lambda: (_track_state(telescope.track.read()), None)),
-            'target': (telescope, lambda: (_target_state(telescope.target.read()), None)),
+            'movement': (poco, lambda: (_movement_state(poco.read('POCSTOP')), None)),
+            'track': (poco, lambda: (_track_state(poco.read('POCTRCK')), None)),
+            'target': (poco, lambda: (_target_state(poco.read('POCOT')), None)),
             'focus': (
-                focus_hw,
-                lambda: (_seclk_state(focus_hw.seclk.read()), f'{focus_hw.current:.1f}')
+                poco,
+                lambda: (_seclk_state(poco.read('POCSECLK')), f'{poco.secondary_position():.1f}')
             ),
-            'exp': (exposure_hw, lambda: (_expstate_state(exposure_hw.expstate.read()), None)),
+            'exp': (cam, lambda: (_expstate_state(cam.exposure_state()), None)),
         }
         status_bar = self.window.status_bar
-        for key, (handle, read) in readers.items():
-            if handle is None:
+        for key, (service, read) in readers.items():
+            if service is None:
                 status_bar.set_indicator(key, 'error')
                 continue
             try:
@@ -720,7 +714,7 @@ class Controller(QtCore.QObject):
         Poll :attr:`~nickel_focus.slew.NickelTelescopePointing.current` and push
         the formatted result to the Slew tab's live "current position" display,
         or show "—" if :attr:`~nickel_focus.gui.controller.Controller.telescope`
-        is ``None`` (no ``ktl`` connection) or the read fails.
+        is ``None`` (no telescope connection) or the read fails.
         """
         if self.telescope is None:
             self.window.control_panel.set_current_position('—', '—')
@@ -751,7 +745,7 @@ class Controller(QtCore.QObject):
 
 # -- status-indicator state mappings ------------------------------------------
 #
-# Each function maps one KTL keyword's value (as returned by its `read()`) to a
+# Each function maps one KTL keyword's value (as returned by a service read) to a
 # StatusBar indicator state: 'ok' (green), 'warn' (yellow), or 'error' (red).
 # String values are compared case-insensitively, ignoring surrounding
 # whitespace.

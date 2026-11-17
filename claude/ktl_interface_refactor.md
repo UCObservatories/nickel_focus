@@ -1,7 +1,7 @@
 # KTL Interface Refactor -- Plan
 
-**Status:** phase 0 complete (2026-11-17); phases 1-4 not started.
-Remaining open items: §6.
+**Status:** phases 0 and 1 complete (2026-11-17); phases 2-4 not started.
+Remaining open items: §6. Phase 1 as built: §4.1.
 
 A plan to restructure how `nickel_focus` uses the `ktl` package, so that the
 focus GUI stays in step with the telescope and camera when observers change
@@ -449,6 +449,39 @@ Each phase ends with the full suite passing, updated `GUI_REFERENCE.md`/
 `KTL_REFERENCE.md` (and the README where it describes something the phase
 changes), and a `GUI_IMPLEMENTATION.md` entry.
 
+### 4.1 Phase 1 as built
+
+Done as described above, with these details and small departures:
+
+- **`KTLService.wait_for(name, expression, timeout)`** wraps `waitFor` with
+  today's semantics (`True`/`False`); every check uses it, through named
+  `NickelPoco`/`NSciCam` methods. Phase 2's `check` builds on it.
+- **Monitoring.** `EXPSTATE` and `EXPOSE`, which `Exposure` monitored
+  before, are now `NSciCam.monitored`, primed with a timed read at
+  construction (§3.1's approach, applied early). `NickelPoco` monitors
+  nothing yet. Phase 2 extends both lists to §3.4 (and drops `EXPOSE`).
+- **Exposure helpers.** `ExposurePath`/`ExposureConfig` moved into
+  `services/nscicam.py` as `NSciCam.path`/`.cfg`; `Exposure(cam)` keeps
+  `.path`/`.cfg` as references to them, and `exposure.py` holds only
+  `Exposure`. `ExposureConfig` reads `AMPCONFLIST` when `NSciCam` is
+  constructed.
+- **The `EXPSTATE` interlock** is `FocusSequence.set_focus(value)`, which
+  every focus move in a sequence goes through. It now runs before
+  `Focus.set_to`'s own range and `POCSTOP` checks, so when several fail,
+  a different message may be reported first.
+- **`FocusSequence(poco=None, cam=None)`** replaces `connect=`; hardware
+  handles are built only when both are given.
+- **Services keep their `ktl` module.** A service holds the `ktl` it was
+  constructed with, so patching `services.base.ktl` afterward (as tests do)
+  doesn't affect it.
+- **`slew_to_nearest --dry_run`** constructs its `NickelPoco` with
+  `read_only=True`.
+- **Without `ktl`,** the CLI's live modes now fail at once with
+  `KTLUnavailableError`, rather than failing later on a `None` handle.
+- **Live tests** (`tests/test_ktl_live.py`): construction of both services
+  and the device classes, plus plain reads of each service's values. Without
+  `ktl`, `--ktl-live` reports them as errors with a clear message.
+
 ## 5. Not addressed by this plan
 
 These issues from Appendix A are outside the scope above. The refactor
@@ -485,6 +518,10 @@ telescope first.
   between 0° and −1°.
 - **Whether `EXPSTATE == Start` is reliably broadcast** (§5 item 4).
 - **`AMPCONFLIST`'s values** (§5 item 7).
+- **The 1 s default read timeout** (§3.1, §6): that every service
+  answers a normal read well within it, including while busy (e.g. during
+  readout or a slew), and that it's short enough to keep the 1 Hz GUI poll
+  usable until phase 3 removes it (each read runs on the GUI thread).
 - **Broadcast rates** of `POCORAA`/`POCODECA` (display rate limit, §3.5)
   and of `POCHEART`/`DISP0CLK` (heartbeat periods, §3.4).
 - **What write "completion" means** for `POCSECPD`, `POCORAD`/`POCODECD`,
@@ -520,10 +557,11 @@ telescope first.
 - **Live tests:** the `--ktl-live` option and `ktl_live` marker as
   proposed (§3.9). How to run them is documented in both the README and
   `GUI_REFERENCE.md` (§3.9).
+- **Default read timeout:** 1 s (`services.base.DEFAULT_READ_TIMEOUT`),
+  pending testing at the telescope (§5.1).
 
 **Still open:**
 
-- **The default read timeout** for `KTLService` (§3.1).
 - **The heartbeat timeout** used by the live heartbeat test, and the
   `Service.heartbeat` periods for `POCHEART`/`DISP0CLK` -- pending their
   observed broadcast rates at the telescope (§3.4, §5.1).

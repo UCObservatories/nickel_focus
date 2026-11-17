@@ -1,9 +1,13 @@
 """Tests for :mod:`gui.model.slew_worker`."""
-from astropy.coordinates import Angle
+import types
 
+from astropy.coordinates import Angle
+import pytest
+
+from nickel_focus import slew
 from nickel_focus.gui.model.slew_worker import SlewWorker
 from nickel_focus.gui.qt import QtCore
-from nickel_focus.tests.fake_hardware import FakeTelescopePointing
+from nickel_focus.services import NickelPoco
 
 
 def _run_and_collect(worker, timeout_ms=5000):
@@ -28,20 +32,21 @@ def _run_and_collect(worker, timeout_ms=5000):
     return finished, failed
 
 
-def test_slew_finished_is_emitted_on_success(qapp):
-    telescope = FakeTelescopePointing()
+def test_slew_finished_is_emitted_on_success(qapp, fake_telescope):
+    telescope = slew.NickelTelescopePointing(NickelPoco())
     worker = SlewWorker(telescope, Angle(30., unit='deg'), Angle(10., unit='deg'))
 
     finished, failed = _run_and_collect(worker)
 
     assert finished == [True], 'a successful slew should emit slewFinished exactly once'
     assert failed == [], 'a successful slew should never emit slewFailed'
-    assert telescope.slew_calls == [(Angle(30., unit='deg'), Angle(10., unit='deg'))], \
-        'the worker should have called slew_to with the given ra/dec'
+    assert fake_telescope.slew_calls == [(pytest.approx(2.0), pytest.approx(10.0))], \
+        'the worker should have slewed to the given ra/dec (30 deg = 2 h)'
 
 
-def test_slew_failed_is_emitted_when_movement_is_disabled(qapp):
-    telescope = FakeTelescopePointing(movement_allowed=False)
+def test_slew_failed_is_emitted_when_movement_is_disabled(qapp, fake_telescope):
+    fake_telescope.movement_allowed = False
+    telescope = slew.NickelTelescopePointing(NickelPoco())
     worker = SlewWorker(telescope, Angle(30., unit='deg'), Angle(10., unit='deg'))
 
     finished, failed = _run_and_collect(worker)
@@ -52,11 +57,11 @@ def test_slew_failed_is_emitted_when_movement_is_disabled(qapp):
 
 
 def test_slew_failed_is_emitted_for_an_unexpected_error(qapp):
-    class BrokenTelescope(FakeTelescopePointing):
-        def slew_to(self, ra, dec):
-            raise RuntimeError('keyword write failed')
+    def slew_to(ra, dec):
+        raise RuntimeError('keyword write failed')
 
-    worker = SlewWorker(BrokenTelescope(), Angle(30., unit='deg'), Angle(10., unit='deg'))
+    broken = types.SimpleNamespace(slew_to=slew_to)
+    worker = SlewWorker(broken, Angle(30., unit='deg'), Angle(10., unit='deg'))
 
     finished, failed = _run_and_collect(worker)
 

@@ -1,7 +1,7 @@
 """
 End-to-end test of
 :class:`nickel_focus.scripts.slew_to_nearest.NickelSlewToNearest`,
-exercised without any ``ktl`` connection or telescope hardware (see the
+exercised over the fake ``ktl``'s simulated telescope (see the
 ``fake_telescope`` fixture in ``conftest.py``).
 """
 import logging
@@ -50,6 +50,7 @@ def test_cli_dry_run_does_not_move_the_telescope(fake_telescope, tmp_path, caplo
     assert any('Nearest object is: StarA' in m for m in messages), \
         'CLI should log the nearest target'
     assert fake_telescope.slew_calls == [], 'dry-run mode should never command a slew'
+    assert fake_telescope.ktl.writes == [], 'dry-run mode should never write any keyword'
 
 
 def test_cli_slews_to_the_nearest_target(fake_telescope, tmp_path):
@@ -66,11 +67,11 @@ def test_cli_slews_to_the_nearest_target(fake_telescope, tmp_path):
 
     assert len(fake_telescope.slew_calls) == 1, 'the telescope should be commanded to slew once'
     commanded_ra, commanded_dec = fake_telescope.slew_calls[0]
-    assert commanded_ra.deg == pytest.approx(expected_ra.deg, abs=1e-10), (
-        'the telescope should be commanded to the RA that find_nearest_target selected -- '
-        'regression check for the RA-degrees-vs-hours unit bug'
+    assert commanded_ra == pytest.approx(expected_ra.hour, abs=1e-10), (
+        'the telescope should be commanded to the RA (in hours) that find_nearest_target '
+        'selected -- regression check for the RA-degrees-vs-hours unit bug'
     )
-    assert commanded_dec.deg == pytest.approx(expected_dec.deg, abs=1e-10), (
+    assert commanded_dec == pytest.approx(expected_dec.deg, abs=1e-10), (
         'the telescope should be commanded to the Dec that find_nearest_target selected'
     )
 

@@ -6,15 +6,12 @@ import types
 import numpy as np
 import pytest
 
-from nickel_focus import exposure
 from nickel_focus import focus
 from nickel_focus import log
-from nickel_focus import slew
 from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.qt import QtCore
 from nickel_focus.gui.views.main_window import MainWindow
 from nickel_focus.gui.controller import Controller
-from nickel_focus.tests.fake_hardware import FakeTelescopePointing
 
 
 def _configure_replay_tab(panel, focus_sweep):
@@ -87,15 +84,9 @@ def test_start_focus_sequence_runs_to_completion_for_archive(qapp, focus_sweep):
         'the Single tab should default to the fitted best focus'
 
 
-def test_archive_sequence_never_constructs_hardware(qapp, focus_sweep, monkeypatch):
-    # Pretend ktl is available, as it is at the telescope: a Replay run
-    # must still never construct hardware handles.
-    def no_hardware():
-        raise AssertionError('Replay should never construct hardware handles')
-
-    monkeypatch.setattr(focus, 'ktl', object())
-    monkeypatch.setattr(focus, 'Focus', no_hardware)
-    monkeypatch.setattr(exposure, 'Exposure', no_hardware)
+def test_archive_sequence_never_uses_hardware(qapp, focus_sweep, fake_hardware):
+    # With the (fake) telescope and camera connected, as at the telescope, a
+    # Replay run must still never use them.
     window, controller = _make_controller(focus_sweep)
 
     controller.start_focus_sequence()
@@ -103,6 +94,10 @@ def test_archive_sequence_never_constructs_hardware(qapp, focus_sweep, monkeypat
 
     assert 'Could not start sequence' not in window.control_panel.status_label.text(), \
         'Replay should start even when ktl is available'
+    replay = controller.focus_sequence
+    assert replay._focus is None and replay._exposure is None, \
+        'a Replay sequence should have no hardware handles'
+    assert fake_hardware['sim'].ktl.writes == [], 'Replay should never write a keyword'
     assert len(window.curve_panel._results) == len(focus_sweep['files']), \
         'Replay should run to completion'
 
@@ -163,7 +158,8 @@ def test_stop_is_a_noop_with_nothing_running(qapp):
     window = MainWindow()
     controller = Controller(window)
     controller.stop()  # should not raise
-    assert window.control_panel.status_label.text() == ''
+    assert window.control_panel.status_label.text() == '', \
+        'stop() with nothing running should leave the status unchanged'
 
 
 def test_set_method_updates_state(qapp):
@@ -172,14 +168,15 @@ def test_set_method_updates_state(qapp):
 
     controller.set_method((123.4, 567.8))
 
-    assert controller.method == (123.4, 567.8)
+    assert controller.method == (123.4, 567.8), 'set_method should store the new photometry method'
 
 
 def test_reanalyze_is_a_noop_without_a_focus_sequence(qapp):
     window = MainWindow()
     controller = Controller(window)
     controller.reanalyze()
-    assert controller.focus_worker is None
+    assert controller.focus_worker is None, \
+        'reanalyze() with no sequence loaded should not start a worker'
 
 
 def test_source_selection_updates_measurements_in_place(qapp, focus_sweep):
@@ -235,9 +232,13 @@ def test_start_focus_sequence_runs_grid_against_fake_hardware(qapp, fake_hardwar
     assert len(window.image_panel._results) == 5, 'image panel should have one entry per exposure'
     assert panel.single_focus_spin.value() == pytest.approx(fake_hardware['best_focus'], abs=5), \
         'the Single tab should default to the fitted best focus'
-    assert fake_hardware['focus'].current == 360., 'the fake Focus should have been commanded'
-    assert controller.focus_sequence._exposure.cfg.exptime == 7.5, \
+    assert fake_hardware['sim'].focus == 360., 'the simulated focus should have been commanded'
+    assert fake_hardware['sim'].keyword('nscicam', 'EXPOSURE').value == 7.5, \
         'exposure settings from the control panel should have been applied'
+    assert controller.focus_sequence._focus.poco is controller.poco, \
+        'the sequence should use the shared telescope service'
+    assert controller.focus_sequence._exposure.cam is controller.cam, \
+        'the sequence should use the shared camera service'
 
 
 def test_start_focus_sequence_runs_automated_against_fake_hardware(qapp, fake_hardware):
@@ -252,7 +253,8 @@ def test_start_focus_sequence_runs_automated_against_fake_hardware(qapp, fake_ha
     controller.start_focus_sequence()
     _wait_for_focus_worker(controller)
 
-    assert isinstance(controller.focus_sequence, focus.AutomatedFocusSequence)
+    assert isinstance(controller.focus_sequence, focus.AutomatedFocusSequence), \
+        'the Auto tab should start an AutomatedFocusSequence'
     assert panel.single_focus_spin.value() == pytest.approx(fake_hardware['best_focus'], abs=5), \
         'the adaptive search should converge near the known best focus'
 
@@ -270,7 +272,8 @@ def test_start_focus_sequence_without_ktl_reports_clear_failure(qapp):
     controller.start_focus_sequence()
 
     assert controller.focus_worker is None, 'no worker should start without a ktl connection'
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower()
+    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+        'the failure should explain that there is no ktl connection'
 
 
 def test_take_single_exposure_is_a_noop_while_something_is_running(qapp):
@@ -291,7 +294,8 @@ def test_take_single_exposure_without_ktl_reports_clear_failure(qapp):
     controller.take_single_exposure(340.)
 
     assert controller.focus_worker is None, 'no worker should start without a ktl connection'
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower()
+    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+        'the failure should explain that there is no ktl connection'
 
 
 def test_take_single_exposure_runs_against_fake_hardware(qapp, fake_hardware):
@@ -305,7 +309,7 @@ def test_take_single_exposure_runs_against_fake_hardware(qapp, fake_hardware):
     _wait_for_focus_worker(controller)
 
     assert controller.focus_worker is None, 'worker should be cleared once the exposure finishes'
-    assert fake_hardware['focus'].current == 345., 'the fake Focus should have been commanded'
+    assert fake_hardware['sim'].focus == 345., 'the simulated focus should have been commanded'
     assert controller.focus_sequence is None, \
         'a standalone single exposure should not create/replace a loaded sequence'
     assert len(window.image_panel._results) == 1, \
@@ -363,8 +367,10 @@ def test_controller_without_ktl_shows_placeholder_current_position(qapp):
     controller = Controller(window)
 
     assert controller.telescope is None, 'setup: no ktl connection is available'
-    assert window.control_panel.slew_current_ra_label.text() == '—'
-    assert window.control_panel.slew_current_dec_label.text() == '—'
+    assert window.control_panel.slew_current_ra_label.text() == '—', \
+        'with no telescope, the current RA should show a placeholder'
+    assert window.control_panel.slew_current_dec_label.text() == '—', \
+        'with no telescope, the current Dec should show a placeholder'
 
 
 def test_hardware_tabs_disabled_without_ktl(qapp):
@@ -415,16 +421,12 @@ def test_controller_polls_current_position_from_fake_telescope(qapp, fake_telesc
 
     assert window.control_panel.slew_current_ra_label.text() == '05:30:00.00', \
         'the current-position display should be seeded from the telescope on construction'
-    assert window.control_panel.slew_current_dec_label.text() == '+30:15:00.00'
+    assert window.control_panel.slew_current_dec_label.text() == '+30:15:00.00', \
+        'the current-position display should show the telescope Dec'
 
 
-def test_current_position_read_failure_is_logged_once(qapp, caplog, monkeypatch):
-    class UnreadableTelescope(FakeTelescopePointing):
-        @property
-        def current(self):
-            raise RuntimeError('keyword read failed')
-
-    monkeypatch.setattr(slew, 'NickelTelescopePointing', UnreadableTelescope)
+def test_current_position_read_failure_is_logged_once(qapp, caplog, fake_telescope):
+    fake_telescope.keyword('nickelpoco', 'POCORAA').responsive = False
     window = MainWindow()
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
@@ -450,8 +452,8 @@ def test_move_to_target_runs_against_fake_telescope(qapp, fake_telescope):
     assert len(fake_telescope.slew_calls) == 1, \
         'the telescope should have been commanded to slew once'
     commanded_ra, commanded_dec = fake_telescope.slew_calls[0]
-    assert commanded_ra.to_string(unit='hourangle', sep=':') == '5:30:00', \
-        'the telescope should be commanded to the entered target RA'
+    assert commanded_ra == pytest.approx(5.5), \
+        'the telescope should be commanded to the entered target RA, in hours'
     assert 'complete' in window.control_panel.status_label.text().lower(), \
         'a successful move should be reported'
 
@@ -476,7 +478,8 @@ def test_move_to_target_reports_a_parse_failure_for_bad_coordinates(qapp, fake_t
     controller.move_to_target('not a coordinate', '+20:15:00')
 
     assert controller.slew_worker is None, 'a bad target should never start a slew worker'
-    assert 'Could not parse target coordinates' in window.control_panel.status_label.text()
+    assert 'Could not parse target coordinates' in window.control_panel.status_label.text(), \
+        'an unparseable target should be reported'
 
 
 def test_move_to_target_without_ktl_reports_clear_failure(qapp):
@@ -486,7 +489,8 @@ def test_move_to_target_without_ktl_reports_clear_failure(qapp):
     controller.move_to_target('05:30:00', '+20:15:00')
 
     assert controller.slew_worker is None, 'no worker should start without a ktl connection'
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower()
+    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+        'the failure should explain that there is no ktl connection'
 
 
 def test_move_to_target_is_a_noop_while_something_is_running(qapp, fake_telescope):
@@ -572,7 +576,8 @@ def test_find_nearest_object_reports_a_missing_file(qapp, fake_telescope):
 
     controller.find_nearest_object('/does/not/exist.txt', '')
 
-    assert 'Could not find nearest target' in window.control_panel.status_label.text()
+    assert 'Could not find nearest target' in window.control_panel.status_label.text(), \
+        'a missing starlist file should be reported'
 
 
 def test_find_nearest_without_ktl_reports_clear_failure(qapp):
@@ -581,7 +586,8 @@ def test_find_nearest_without_ktl_reports_clear_failure(qapp):
 
     controller.find_nearest_pointing()
 
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower()
+    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+        'the failure should explain that there is no ktl connection'
 
 
 def test_log_records_appear_in_log_tab(qapp):
@@ -727,18 +733,6 @@ def test_log_tab_reflects_worker_signal_end_to_end(qapp):
 
 # -- status indicators and Quit -----------------------------------------------
 
-def _keyword(value):
-    """A stand-in for a ktl keyword whose `read()` returns ``value``."""
-    return types.SimpleNamespace(read=lambda: value)
-
-
-def _unreadable_keyword():
-    """A stand-in for a ktl keyword whose `read()` always fails."""
-    def read():
-        raise RuntimeError('keyword read failed')
-    return types.SimpleNamespace(read=read)
-
-
 def _indicator_states(window):
     return {key: label.property('state') for key, label in window.status_bar.indicators.items()}
 
@@ -747,7 +741,8 @@ def test_status_indicators_are_red_without_ktl(qapp):
     window = MainWindow()
     controller = Controller(window)
 
-    assert controller.focus_hardware is None and controller.exposure_hardware is None
+    assert controller.poco is None and controller.cam is None, \
+        'without ktl, neither service should be connected'
     assert set(_indicator_states(window).values()) == {'error'}, \
         'every indicator should be red without a ktl connection'
     assert window.status_bar.indicators['focus'].text() == 'Focus', \
@@ -773,30 +768,33 @@ def test_status_indicators_are_red_without_ktl(qapp):
 ])
 def test_status_state_mappings(function, value, expected):
     from nickel_focus.gui import controller as controller_module
-    assert getattr(controller_module, function)(value) == expected
+    assert getattr(controller_module, function)(value) == expected, \
+        f'{function}({value!r}) should map to {expected!r}'
 
 
-def test_status_indicators_reflect_keyword_values(qapp):
+def test_status_indicators_reflect_keyword_values(qapp, fake_hardware):
     window = MainWindow()
     controller = Controller(window)
-    controller.telescope = types.SimpleNamespace(
-        pocstop=_keyword('allowed'), track=_keyword('off'), target=_keyword('1'))
-    controller.focus_hardware = types.SimpleNamespace(seclk=_keyword('on'), current=345.24)
-    controller.exposure_hardware = types.SimpleNamespace(expstate=_keyword('Exposing'))
+    sim = fake_hardware['sim']
+    sim.tracking_on = False
+    sim.ready = False
+    sim.keyword('nickelpoco', 'POCSECPA').value = 345.24
+    sim.keyword('nscicam', 'EXPSTATE').value = 'Exposing'
 
     controller._update_status_indicators()
 
     assert _indicator_states(window) == {
         'movement': 'ok', 'track': 'warn', 'target': 'warn', 'focus': 'ok', 'exp': 'warn',
-    }
+    }, 'each indicator should reflect its keyword value'
     assert window.status_bar.indicators['focus'].text() == '345.2', \
         'the Focus indicator should show the current focus value'
 
 
-def test_status_read_failure_is_red_and_logged_once(qapp, caplog):
+def test_status_read_failure_is_red_and_logged_once(qapp, caplog, fake_hardware):
     window = MainWindow()
     controller = Controller(window)
-    controller.exposure_hardware = types.SimpleNamespace(expstate=_unreadable_keyword())
+    expstate = fake_hardware['sim'].keyword('nscicam', 'EXPSTATE')
+    expstate.responsive = False
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
         controller._update_status_indicators()
@@ -806,7 +804,7 @@ def test_status_read_failure_is_red_and_logged_once(qapp, caplog):
     assert len(warnings) == 1, 'repeated read failures should be logged only once'
     assert _indicator_states(window)['exp'] == 'error', 'an unreadable keyword should show red'
 
-    controller.exposure_hardware = types.SimpleNamespace(expstate=_keyword('Ready'))
+    expstate.responsive = True
     controller._update_status_indicators()
     assert _indicator_states(window)['exp'] == 'ok', 'the indicator should recover'
     assert 'exp' not in controller._status_read_failed, \
@@ -820,7 +818,7 @@ def test_quit_closes_the_window(qapp):
 
     window.status_bar.quit_button.click()
 
-    assert not window.isVisible()
+    assert not window.isVisible(), 'Quit should close the window'
 
 
 def test_quit_is_disabled_while_a_sequence_runs(qapp, focus_sweep):
@@ -853,9 +851,11 @@ def test_quit_is_disabled_while_a_slew_runs(qapp, fake_telescope):
 
 # -- exposure settings initialized from the camera ----------------------------
 
-def _exposure_hardware_reporting(settings):
-    """A stand-in `Exposure` whose `cfg.current_settings()` returns ``settings``."""
-    return types.SimpleNamespace(cfg=types.SimpleNamespace(current_settings=lambda: settings))
+def _set_camera_settings(fake_hardware, exptime, ampconf, binning):
+    sim = fake_hardware['sim']
+    sim.keyword('nscicam', 'EXPOSURE').value = exptime
+    sim.keyword('nscicam', 'AMPCONF').value = ampconf
+    sim.keyword('nscicam', 'BINNING').value = binning
 
 
 def test_exposure_fields_keep_their_defaults_without_ktl(qapp):
@@ -867,33 +867,33 @@ def test_exposure_fields_keep_their_defaults_without_ktl(qapp):
 
     panel = window.control_panel
     panel.tabs.setCurrentWidget(panel.single_tab)
-    assert panel.get_exposure_config() == defaults.get_exposure_config()
+    assert panel.get_exposure_config() == defaults.get_exposure_config(), \
+        'without ktl, the exposure fields should keep their defaults'
 
 
-def test_exposure_fields_start_at_the_camera_settings(qapp, caplog):
+def test_exposure_fields_start_at_the_camera_settings(qapp, caplog, fake_hardware):
+    _set_camera_settings(fake_hardware, '30.0', '1.0MHz', '1,1')
     window = MainWindow()
-    controller = Controller(window)
-    controller.exposure_hardware = _exposure_hardware_reporting(
-        {'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'})
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        controller._initialize_exposure_config()
+        Controller(window)
 
     panel = window.control_panel
     for tab in (panel.single_tab, panel.grid_tab, panel.auto_tab):
         panel.tabs.setCurrentWidget(tab)
-        assert panel.get_exposure_config() == {'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'}
-    assert any('initialized from the camera' in r.getMessage() for r in caplog.records)
+        assert panel.get_exposure_config() == {
+            'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'}, \
+            'every exposure tab should show the camera settings'
+    assert any('initialized from the camera' in r.getMessage() for r in caplog.records), \
+        'the initialization should be logged'
 
 
-def test_unknown_camera_setting_is_logged_and_left_at_default(qapp, caplog):
+def test_unknown_camera_setting_is_logged_and_left_at_default(qapp, caplog, fake_hardware):
+    _set_camera_settings(fake_hardware, '30.0', '0.5MHz', '1,1')
     window = MainWindow()
-    controller = Controller(window)
-    controller.exposure_hardware = _exposure_hardware_reporting(
-        {'exptime': 30.0, 'speed': '0.5MHz', 'binning': '1,1'})
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
-        controller._initialize_exposure_config()
+        Controller(window)
 
     assert any(
         r.levelname == 'WARNING' and "'0.5MHz'" in r.getMessage() for r in caplog.records
@@ -903,14 +903,10 @@ def test_unknown_camera_setting_is_logged_and_left_at_default(qapp, caplog):
     assert panel.get_exposure_config()['exptime'] == 30.0, 'the other settings still apply'
 
 
-def test_failed_camera_settings_read_is_logged(qapp, caplog):
-    def fail():
-        raise RuntimeError('keyword read failed')
-
+def test_failed_camera_settings_read_is_logged(qapp, caplog, fake_hardware):
     window = MainWindow()
     controller = Controller(window)
-    controller.exposure_hardware = types.SimpleNamespace(
-        cfg=types.SimpleNamespace(current_settings=fail))
+    fake_hardware['sim'].keyword('nscicam', 'EXPOSURE').responsive = False
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
         controller._initialize_exposure_config()
@@ -918,4 +914,40 @@ def test_failed_camera_settings_read_is_logged(qapp, caplog):
     assert any(
         r.levelname == 'WARNING' and 'current exposure settings' in r.getMessage()
         for r in caplog.records
-    )
+    ), 'a failed settings read should be logged as a warning'
+
+
+# -- the shared services --------------------------------------------------------
+
+def test_controller_shares_one_service_per_ktl_service(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+
+    assert controller.poco is not None and controller.cam is not None, \
+        'both shared services should be connected'
+    assert controller.telescope.poco is controller.poco, \
+        'the Slew tab should use the shared telescope service'
+    controller.take_single_exposure(345.)
+    standalone = controller._standalone_focus_sequence
+    _wait_for_focus_worker(controller)
+    assert standalone._focus.poco is controller.poco, \
+        'a single exposure should use the shared telescope service'
+    assert standalone._exposure.cam is controller.cam, \
+        'a single exposure should use the shared camera service'
+
+
+def test_unresponsive_service_is_logged_and_left_unconnected(qapp, caplog, fake_hardware):
+    fake_hardware['sim'].keyword('nscicam', 'EXPSTATE').responsive = False
+    window = MainWindow()
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller = Controller(window)
+
+    assert controller.cam is None, 'the camera service should not be connected'
+    assert controller.poco is not None, 'the telescope service is unaffected'
+    assert any(
+        r.levelname == 'WARNING' and 'Could not connect to the nscicam service' in r.getMessage()
+        for r in caplog.records
+    ), 'the unresponsive service should be logged as a warning'
+    assert _indicator_states(window)['exp'] == 'error', \
+        'the Exp indicator should be red without the camera service'

@@ -118,30 +118,36 @@ def test_exp_kwargs_is_a_noop_for_archive_mode(focus_sweep, qapp):
     steps, finished, failed, single = _run_and_collect(worker)
 
     assert not failed, f'exp_kwargs should be harmless when there is no exposure hardware: {failed}'
-    assert len(finished) == 1
+    assert len(finished) == 1, 'the sequence should finish exactly once'
 
 
 def test_exp_kwargs_configures_the_exposure_before_stepping(fake_hardware, qapp):
-    seq = focus.GridFocusSequence(340., 5., nstep=5)
+    seq = focus.GridFocusSequence(340., 5., nstep=5, poco=fake_hardware['poco'],
+                                  cam=fake_hardware['cam'])
     worker = FocusWorker(seq, mode='step', exp_kwargs={'exptime': 12.5, 'speed': 'Fast'})
 
     steps, finished, failed, single = _run_and_collect(worker)
 
     assert not failed, f'sequence should not fail: {failed}'
-    assert seq._exposure.cfg.exptime == 12.5, 'exposure time should be configured before stepping'
-    assert seq._exposure.cfg.speed == 'Fast', 'speed should be configured before stepping'
+    sim = fake_hardware['sim']
+    assert sim.keyword('nscicam', 'EXPOSURE').value == 12.5, \
+        'exposure time should be configured before stepping'
+    assert sim.keyword('nscicam', 'AMPCONF').value == '1.0MHz', \
+        'speed should be configured before stepping'
 
 
 def test_exp_kwargs_are_ignored_in_reanalyze_mode(fake_hardware, qapp):
-    seq = focus.GridFocusSequence(340., 5., nstep=5)
+    seq = focus.GridFocusSequence(340., 5., nstep=5, poco=fake_hardware['poco'],
+                                  cam=fake_hardware['cam'])
     seq.execute(goto=False, plot=False, method='brightest')
-    assert seq._exposure.cfg.exptime is None, 'setup: nothing configured yet'
+    exposure_time = fake_hardware['sim'].keyword('nscicam', 'EXPOSURE')
+    assert exposure_time.writes == [], 'setup: nothing configured yet'
 
     worker = FocusWorker(seq, mode='reanalyze', exp_kwargs={'exptime': 12.5})
     steps, finished, failed, single = _run_and_collect(worker)
 
     assert not failed, f'reanalysis should not fail: {failed}'
-    assert seq._exposure.cfg.exptime is None, \
+    assert exposure_time.writes == [], \
         'reanalyze never takes new exposures, so exp_kwargs should be ignored'
 
 
@@ -152,7 +158,8 @@ def test_single_mode_requires_a_focus_value(focus_sweep):
 
 
 def test_single_mode_moves_and_exposes(fake_hardware, qapp):
-    seq = focus.GridFocusSequence(340., 5., nstep=5)
+    seq = focus.GridFocusSequence(340., 5., nstep=5, poco=fake_hardware['poco'],
+                                  cam=fake_hardware['cam'])
     worker = FocusWorker(seq, method='brightest', mode='single', focus_value=356.,
                           exp_kwargs={'exptime': 8.0})
 
@@ -164,7 +171,8 @@ def test_single_mode_moves_and_exposes(fake_hardware, qapp):
         'mode=single never fits a curve, so focusSequenceFinished should never fire'
     assert len(single) == 1, 'singleExposureFinished should fire exactly once'
     assert single[0].focus_value == 356., 'the fake hardware should have been moved to focus_value'
-    assert seq._exposure.cfg.exptime == 8.0, 'exp_kwargs should be applied before exposing'
+    assert fake_hardware['sim'].keyword('nscicam', 'EXPOSURE').writes == [8.0], \
+        'exp_kwargs should be applied before exposing'
 
 
 def test_single_mode_reports_failure_without_hardware(focus_sweep, qapp):
@@ -180,4 +188,5 @@ def test_single_mode_reports_failure_without_hardware(focus_sweep, qapp):
     assert len(failed) == 1, 'focusSequenceFailed should fire once'
     assert failed[0].startswith('Single exposure at focus 356 failed: '), \
         'failure message should name the action and focus value'
-    assert 'ktl not connected' in failed[0], 'failure message should include the underlying cause'
+    assert 'No telescope focus/exposure control' in failed[0], \
+        'failure message should include the underlying cause'

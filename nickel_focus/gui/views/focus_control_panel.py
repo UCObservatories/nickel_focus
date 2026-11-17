@@ -823,7 +823,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         Return the currently active tab's exposure settings as a :obj:`dict`
         with keys ``exptime`` (:obj:`float`), ``speed``, ``binning``
         (:obj:`str`) -- passed to
-        :meth:`~nickel_focus.exposure.ExposureConfig.configure` before a live
+        :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure` before a live
         exposure.  Empty for any tab other than Single, Grid, or Auto, since
         those are the only ones that take new exposures.
         """

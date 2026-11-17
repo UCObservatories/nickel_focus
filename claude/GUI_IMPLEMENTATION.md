@@ -2685,3 +2685,57 @@ that checkbox, so with the tab gone, all of it went:
 Observers' existing settings files (if they ever opted in) are left in
 place and are no longer read. Full suite: `255 passed` (264 minus the nine
 removed settings tests).
+
+## KTL interface refactor, phase 1: service classes (2026-11-17)
+
+Second phase of `claude/ktl_interface_refactor.md` (§4; details as built in
+its §4.1). Structural, and meant to change behavior only by adding read
+timeouts:
+
+- New package `nickel_focus/services/`: `base.py` (`KTLService`, the
+  exceptions `KTLError`/`KTLUnavailableError`/`KTLTimeoutError`/
+  `KTLReadOnlyError`, `ktl_available()`, and `DEFAULT_READ_TIMEOUT` = 1 s),
+  `nickelpoco.py` (`NickelPoco`), and `nscicam.py` (`NSciCam`, plus
+  `ExposurePath`/`ExposureConfig`, moved from `exposure.py`). `base.py` is
+  the only module that imports `ktl`; its guard now catches any
+  `ImportError`. `pkg/ktl.py` and the `nickel_focus.ktl` re-export were
+  removed. Added `services/Makefile` and `services` to the package
+  Makefile's `DIRS`.
+- `Focus(poco)`, `NickelTelescopePointing(poco)`, and `Exposure(cam)` take
+  service objects and use their named methods. The duplicated `POCSTOP`
+  check is `NickelPoco.movement_allowed`. `Focus` no longer reads
+  `EXPSTATE`: the camera-idle check is `FocusSequence.set_focus`.
+  `FocusSequence`/`GridFocusSequence`/`AutomatedFocusSequence` take
+  `poco=`/`cam=` instead of `connect=`.
+- Controller: one shared `poco`/`cam`, built by `_connect_service` (a
+  service that doesn't answer is logged and left `None`), passed to every
+  sequence and single exposure and used for the status indicators and
+  exposure-field initialization. `focus_hardware`/`exposure_hardware` and
+  `_connect_status_handle` are gone. Also fixed `quit()`'s docstring,
+  which still said settings are saved.
+- CLI: `focus.py` builds the services only for live runs (archive mode
+  never imports `services`, and so never `ktl`); `slew_to_nearest.py`
+  builds a read-only `NickelPoco` for `--dry_run`.
+- Tests: `tests/fake_hardware.py`'s whole-class fakes were replaced by a
+  keyword-level fake `ktl` (`tests/fake_ktl.py`, with a `Simulator` for
+  the telescope and camera), installed at `services.base.ktl`, so the real
+  `Focus.set_to`, `slew_to`, and `Exposure.expose` now run under test.
+  `no_ktl` patches only `services.base.ktl`. New: `test_services.py`
+  (timeouts, exception translation, monitoring, read-only guard, broken
+  `ktl` install), device tests in `test_focus.py`/`test_exposure.py`/
+  `test_slew.py`, CLI live-path tests, and Controller tests for the shared
+  services. Live tests: `--ktl-live`, the `ktl_live` marker, and
+  `tests/test_ktl_live.py`.
+- One fix needed along the way: a service holds on to the `ktl` module it
+  was constructed with. Without that, a Controller left over from an
+  earlier test (its 1 Hz poll timer still running) read through a
+  `services.base.ktl` that the next test had reset to `None`, and broke
+  later tests.
+- Docs: `GUI_REFERENCE.md` (§2, §3, §5 incl. live tests), `KTL_REFERENCE.md`
+  (§1, §3.1, §3.2, §4), README (testing), and the plan (status, §4.1, §5.1,
+  §6).
+
+The 1 s read timeout is untested at the telescope (plan §5.1). Until phase 3,
+the GUI's 1 Hz poll still reads on the GUI thread: an unresponsive service
+now stalls it for up to 1 s per read rather than indefinitely. Full suite:
+`290 passed, 5 skipped` (the live tests).

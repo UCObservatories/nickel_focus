@@ -50,7 +50,7 @@ class FocusWorker(QtCore.QThread):
         default) or any other focus value the user enters.
     exp_kwargs : :obj:`dict`, optional
         Exposure settings (``record``, ``speed``, ``binning``, ``exptime``)
-        applied via :meth:`~nickel_focus.exposure.ExposureConfig.configure` before
+        applied via :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure` before
         stepping, matching
         :meth:`~nickel_focus.focus.FocusSequence.execute`.  Meaningful for
         ``mode='step'``/``'single'`` against a sequence with real (or fake)

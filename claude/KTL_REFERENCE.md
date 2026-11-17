@@ -48,10 +48,10 @@ still worth confirming once at the telescope.
   `c-`, `C2`) whose meaning isn't documented in the files; the explicit
   `read=… ; broadcast=… ; write=…` part that follows is what this document
   relies on.
-- **How we import it:** only through `nickel_focus/pkg/ktl.py`, which sets
-  `ktl = None` if the import raises `ModuleNotFoundError`. Any other import
-  failure (e.g. a missing `py-util` module or client library) is *not* caught
-  there and would propagate.
+- **How we import it:** only in `nickel_focus/services/base.py`, which sets
+  `ktl = None` (with one warning) if the import raises any `ImportError` --
+  including a broken install, e.g. a missing `py-util` module or client
+  library -- so `nickel_focus` still imports without it.
 
 ## 2. Architecture
 
@@ -59,8 +59,8 @@ still worth confirming once at the telescope.
 
 - **`ktl.cache(service, keyword)`** (`Procedural.py:31`) is the entry point we
   use. It returns a **process-wide singleton** `Keyword` for that
-  service/keyword: every `ktl.cache('nickelpoco', 'POCSTOP')` call -- in
-  `focus.Focus`, `slew.NickelTelescopePointing`, any thread -- returns the
+  service/keyword: every `ktl.cache('nickelpoco', 'POCSTOP')` call -- from
+  any `NickelPoco` instance, any thread -- returns the
   *same* object, with the same cached value, monitoring state, and callbacks.
   The first `Service` instance for a name is cached forever
   (`Service.cached`, `Service.py:881`).
@@ -131,8 +131,8 @@ read(binary=False, both=False, wait=True, timeout=None)
   KTL's own log, §3.7) and the read blocks inside the Usher. With notify
   reads -- which every keyword we use supports **[help]** -- the read waits
   outside the Usher, and a timeout raises `ktl.TimeoutException`. **Without
-  a `timeout` argument (as all our reads are called), a read waits
-  indefinitely** for the service's reply.
+  a `timeout` argument, a read waits indefinitely** for the service's reply;
+  all our reads pass one (`KTLService.read`, default 1 s, §4).
 - Errors raise `ktl.ktlError` (or the original exception if it isn't a KTL
   error).
 - **No named method returns the cached value.** A monitored keyword keeps
@@ -173,7 +173,9 @@ write(value, wait=True, binary=False, timeout=None)
 - **[C-layer]** What "complete" means is defined by each service's
   dispatcher -- e.g. whether a `POCSECPD` write completes when the value
   is accepted or when the secondary has finished moving. Our code doesn't
-  rely on either: `Focus.set_to` waits for `POCSECLK` instead.
+  rely on either: `Focus.set_to` waits for `POCSECLK` instead. Our writes
+  (`KTLService.write`) pass no `timeout`, so they wait for completion
+  however long it takes.
 - Returns a positive sequence number (usable with `keyword.wait(sequence=...)`
   only for notify writes).
 
@@ -305,46 +307,71 @@ in `KTL_SUGGESTIONS.md`.
 
 ## 4. How `nickel_focus` uses KTL
 
-| Where | Keywords | Calls | Notes |
-| --- | --- | --- | --- |
-| `focus.Focus` | `nickelpoco.POCSTOP`, `POCSECPA`, `POCSECPD`, `POCSECLK`; `nscicam.EXPSTATE` | `read()`, `write()`, `waitFor()` | `set_to` checks `POCSTOP`/`EXPSTATE` with 0.5 s `waitFor`s, unlocks (`POCSECLK` → `off`), writes `POCSECPD`, then `waitFor('== on', 30)` on the lock. |
-| `exposure.ExposurePath` | `RECORD`, `EXPRESULT`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `read()` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
-| `exposure.ExposureConfig` | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `read()`, `write()` | Reads `AMPCONFLIST` at construction. `current_settings()` reads the three settings. |
-| `exposure.Exposure` | `EXPSTATE`, `EXPOSE` | `monitor()`, `write('Go')`, `waitFor()` | The only code that monitors explicitly (at construction, blocking priming read). |
-| `slew.NickelTelescopePointing` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCORAD`, `POCODECA`/`POCODECD` | `read()`, `write()`, `waitFor()` | `slew_to` checks three conditions with 0.5 s `waitFor`s, writes the target, then `waitFor('== 0', 300)` on `POCOT`. |
-| GUI `Controller` (GUI thread, 1 Hz) | `POCORAA`, `POCODECA`, `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `EXPSTATE` | `read()` | Position display and status indicators: 8 blocking round trips per second on the GUI thread. |
-| GUI `Controller` (GUI thread, once at startup) | `EXPOSURE`, `AMPCONF`, `BINNING` | `read()` (via `ExposureConfig.current_settings()`) | Seeds the Single/Grid/Auto exposure fields. |
+All `ktl` access goes through `nickel_focus/services/`. `services/base.py`
+is the only module that imports `ktl`; its `KTLService` wraps the named
+calls of §3 and every service class is built on it:
 
-The same usage, by keyword. "Controller" means the GUI's 1 Hz poll, which
-reads through the `NickelTelescopePointing`/`Focus`/`Exposure` handles it
-holds rather than calling `ktl.cache` itself. A keyword used by more than
-one class is still a single shared `Keyword` object (§2.1).
+| `KTLService` method | `ktl` call | Notes |
+| --- | --- | --- |
+| `read(name, binary=False, timeout=1.0)` | `ktl.cache(...).read(binary=..., timeout=...)` | Every read has a timeout (`DEFAULT_READ_TIMEOUT`, 1 s, to be confirmed at the telescope); `TimeoutException` → `KTLTimeoutError`. |
+| `write(name, value, binary=False)` | `.write(value, binary=...)` | No timeout (waits for completion). Raises `KTLReadOnlyError`, without calling `ktl`, on a `read_only=True` service. |
+| `wait_for(name, expression, timeout)` | `.waitFor(expression, timeout=...)` | Returns `True`/`False`, as `waitFor` does (§3.4). |
+| construction, for each keyword in `monitored` | `.monitor(prime=False)`, then `read(timeout=1.0)` | Primes with a timed read instead of `monitor()`'s own (untimed) one, so an unresponsive service fails construction with `KTLTimeoutError` rather than hanging. |
+
+`ktl.ktlError` (and `KeyError` from `ktl.cache`) become `KTLError`; each
+exception is chained to `ktl`'s original. Values cross the boundary as
+plain Python values; `Keyword` objects never leave `services/base.py`. A
+service holds on to the `ktl` module it was constructed with.
+
+The service classes and what uses them. The device classes take a service
+object; the GUI `Controller` and the CLI scripts construct one `NickelPoco`
+and one `NSciCam` and share them.
+
+| Class | Keywords | Methods | Notes |
+| --- | --- | --- | --- |
+| `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`wait_for`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`) | Nothing monitored at construction. Never writes `POCSTOP`. |
+| `services.NSciCam` | `EXPSTATE`, `EXPOSE`; plus its helpers' keywords | `exposure_state()`, `exposure_state_is(state, timeout)`, `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE` and `EXPOSE` at construction. |
+| `services.nscicam.ExposurePath` (`NSciCam.path`) | `RECORD`, `EXPRESULT`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous`, `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
+| `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `configure`, `exptime`, `current_settings` | Reads `AMPCONFLIST` at construction. |
+
+| Where | Uses | Notes |
+| --- | --- | --- |
+| `focus.Focus` | `NickelPoco` | `set_to` checks `movement_allowed(0.5)`, unlocks (`POCSECLK` → `off`), writes `POCSECPD`, then `secondary_locked(30)`. |
+| `focus.FocusSequence.set_focus` | `NSciCam` | `exposure_state_is('Ready', 0.5)` before every focus move a sequence makes, then `Focus.set_to`. |
+| `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, writes `Go`, then waits for `Start` (30 s) and `Ready` (exposure time + 90 s). |
+| `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target (ascii decimal hours/degrees), then `on_target(300)`. |
+| GUI `Controller` (GUI thread, 1 Hz) | both | Position display and status indicators: 8 reads per second on the GUI thread, each with a 1 s timeout. |
+| GUI `Controller` (GUI thread, once at startup) | `NSciCam.cfg` | `current_settings()` seeds the Single/Grid/Auto exposure fields. |
+
+The same usage, by keyword. "Controller" means the GUI's 1 Hz poll. A
+keyword used by more than one class is still a single shared `Keyword`
+object (§2.1).
 
 | Keyword | Used by | How |
 | --- | --- | --- |
 | `nickelpoco.POCSTOP` | `focus.Focus`, `slew.NickelTelescopePointing`, Controller | `waitFor('== allowed')` before moving the focus or slewing; read for the Slew indicator. |
 | `nickelpoco.POCTRCK` | `slew.NickelTelescopePointing`, Controller | `waitFor('== on')` before slewing; read for the Track indicator. |
 | `nickelpoco.POCOT` | `slew.NickelTelescopePointing`, Controller | `waitFor('== 0')` before and after slewing; read for the On Target indicator. |
-| `nickelpoco.POCORAA` | `slew.NickelTelescopePointing`, Controller | Read for the current RA (`.current`), incl. the Slew tab's position display. |
-| `nickelpoco.POCODECA` | `slew.NickelTelescopePointing`, Controller | Read for the current Dec (`.current`), likewise. |
+| `nickelpoco.POCORAA` | `slew.NickelTelescopePointing`, Controller | Read for the current RA (`NickelPoco.pointing()`), incl. the Slew tab's position display. |
+| `nickelpoco.POCODECA` | `slew.NickelTelescopePointing`, Controller | Read for the current Dec, likewise. |
 | `nickelpoco.POCORAD` | `slew.NickelTelescopePointing` | Written with the target RA. |
 | `nickelpoco.POCODECD` | `slew.NickelTelescopePointing` | Written with the target Dec. |
-| `nickelpoco.POCSECPA` | `focus.Focus`, Controller | Read for the current focus (`.current`), incl. the Focus indicator's text. |
+| `nickelpoco.POCSECPA` | `focus.Focus`, Controller | Read for the current focus, incl. the Focus indicator's text. |
 | `nickelpoco.POCSECPD` | `focus.Focus` | Read to skip a no-op move; written with the requested focus. |
 | `nickelpoco.POCSECLK` | `focus.Focus`, Controller | Written `off` to unlock; `waitFor('== on')` for the move to finish; read for the Focus indicator's color. |
-| `nscicam.EXPSTATE` | `focus.Focus`, `exposure.Exposure`, Controller | `waitFor('== Ready')` before a focus move or exposure, `== Start`/`== Ready` during one; monitored by `Exposure`; read for the Exp indicator. |
-| `nscicam.EXPOSE` | `exposure.Exposure` | Monitored; written `Go` to start an exposure. |
-| `nscicam.RECORD` | `exposure.ExposurePath`, `exposure.ExposureConfig` | Read to choose the record vs. scratch directory; written by `configure(record=...)`. |
-| `nscicam.EXPRESULT` | `exposure.ExposurePath` | Read for the last exposure's file path (`.previous`). |
-| `nscicam.OBSNUM` | `exposure.ExposurePath` | Read for the next observation number (`.next`). |
-| `nscicam.RECORDDIR` | `exposure.ExposurePath` | Read to build a file path. |
-| `nscicam.SCRATCHDIR` | `exposure.ExposurePath` | Read to build a file path. |
-| `nscicam.FITSPREFIX` | `exposure.ExposurePath` | Read to build a file path. |
-| `nscicam.FITSSUFFIX` | `exposure.ExposurePath` | Read to build a file path. |
-| `nscicam.EXPOSURE` | `exposure.ExposureConfig`, Controller | Read/written as the exposure time; read once at GUI startup to seed the exposure fields. |
-| `nscicam.AMPCONF` | `exposure.ExposureConfig`, Controller | Read/written as the read speed; read once at GUI startup. |
-| `nscicam.AMPCONFLIST` | `exposure.ExposureConfig` | Read once, at construction, for the valid read speeds. |
-| `nscicam.BINNING` | `exposure.ExposureConfig`, Controller | Read/written as the binning; read once at GUI startup. |
+| `nscicam.EXPSTATE` | `focus.FocusSequence`, `exposure.Exposure`, Controller | `waitFor('== Ready')` before a focus move or exposure, `== Start`/`== Ready` during one; monitored by `NSciCam`; read for the Exp indicator. |
+| `nscicam.EXPOSE` | `exposure.Exposure` | Monitored by `NSciCam`; written `Go` to start an exposure. |
+| `nscicam.RECORD` | `ExposurePath`, `ExposureConfig` | Read to choose the record vs. scratch directory; written by `configure(record=...)`. |
+| `nscicam.EXPRESULT` | `ExposurePath` | Read for the last exposure's file path (`.previous`). |
+| `nscicam.OBSNUM` | `ExposurePath` | Read for the next observation number (`.next`). |
+| `nscicam.RECORDDIR` | `ExposurePath` | Read to build a file path. |
+| `nscicam.SCRATCHDIR` | `ExposurePath` | Read to build a file path. |
+| `nscicam.FITSPREFIX` | `ExposurePath` | Read to build a file path. |
+| `nscicam.FITSSUFFIX` | `ExposurePath` | Read to build a file path. |
+| `nscicam.EXPOSURE` | `ExposureConfig`, Controller | Read/written as the exposure time; read once at GUI startup to seed the exposure fields. |
+| `nscicam.AMPCONF` | `ExposureConfig`, Controller | Read/written as the read speed; read once at GUI startup. |
+| `nscicam.AMPCONFLIST` | `ExposureConfig` | Read once, when `NSciCam` is constructed, for the valid read speeds. |
+| `nscicam.BINNING` | `ExposureConfig`, Controller | Read/written as the binning; read once at GUI startup. |
 
 ### 4.1 What the services' help says about these keywords
 
@@ -389,4 +416,5 @@ dispatcher has finished supplementing the FITS header; the help says it is
 | Version | Date | Summary |
 | --- | --- | --- |
 | `a33f3dd` | 2026-11-17 | Initial reference, from KTL Python 5.2 (`ktl_python/`) and the `nickelpoco`/`nscicam` keyword help; dictionary-style access documented and excluded from our use. |
-| *pending* | 2026-11-17 | Moved the former §5 ("Implications and open questions") into `claude/ktl_interface_refactor.md`; this document now covers only current use and reference material. |
+| `b247c45` | 2026-11-17 | Moved the former §5 ("Implications and open questions") into `claude/ktl_interface_refactor.md`; this document now covers only current use and reference material. |
+| *pending* | 2026-11-17 | §1, §3.1, §3.2, §4 updated for the `services/` layer: the only `ktl` import (now catching any `ImportError`), 1 s read timeouts, timed priming reads, and the per-class usage tables. |

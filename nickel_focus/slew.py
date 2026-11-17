@@ -1,6 +1,6 @@
 """
-Interface to the Nickel telescope's pointing/tracking hardware via KTL, plus a
-helper to locate the nearest known target in a starlist.
+Pointing the Nickel telescope (:class:`NickelTelescopePointing`), plus a helper
+to locate the nearest known target in a starlist.
 """
 
 from pathlib import Path
@@ -8,54 +8,34 @@ from pathlib import Path
 from astropy.coordinates import Angle, SkyCoord
 import numpy as np
 
-from nickel_focus import ktl
 from nickel_focus import log
 from nickel_focus import starlist
 
 
 class NickelTelescopePointing:
     """
-    KTL object used to manipulate the telescope pointing.
+    Read and command the telescope's pointing.
 
-    Raises
-    ------
-    RuntimeError
-        Raised if the :mod:`ktl` package is not available.
+    Parameters
+    ----------
+    poco : :class:`~nickel_focus.services.nickelpoco.NickelPoco`
+        The telescope service.
     """
-    def __init__(self):
-        if ktl is None:
-            raise RuntimeError(
-                'The ktl package is not available.  Controlling the telescope pointing requires a '
-                'kpython environment with ktl installed.'
-            )
-
-        # Controls overall movement of mechanisms
-        self.pocstop = ktl.cache('nickelpoco', 'POCSTOP')
-        # Indicates whether or not the telescope is tracking
-        self.track = ktl.cache('nickelpoco', 'POCTRCK')
-        # Indicates whether or not the telescope is ready to move to a target
-        self.target = ktl.cache('nickelpoco', 'POCOT')
-        # Provides the actual RA of the telescope pointing
-        self.raa = ktl.cache('nickelpoco', 'POCORAA')
-        # Sets the desired RA of the telescope pointing
-        self.rad = ktl.cache('nickelpoco', 'POCORAD')
-        # Provides the actual Dec of the telescope pointing
-        self.deca = ktl.cache('nickelpoco', 'POCODECA')
-        # Sets the desired Dec of the telescope pointing
-        self.decd = ktl.cache('nickelpoco', 'POCODECD')
+    def __init__(self, poco):
+        self.poco = poco
 
     @property
     def current(self):
         """
-        The telescope's current pointing, read live from the KTL
-        ``POCORAA``/``POCODECA`` keywords.
+        The telescope's current pointing (see
+        :meth:`~nickel_focus.services.nickelpoco.NickelPoco.pointing`).
 
         Returns
         -------
         astropy.coordinates.SkyCoord
             The current RA/Dec.
         """
-        return SkyCoord(ra=self.raa.read(), dec=self.deca.read(), unit=('hourangle', 'deg'))
+        return self.poco.pointing()
 
     def slew_to(self, ra, dec):
         """
@@ -80,13 +60,13 @@ class NickelTelescopePointing:
             telescope is not ready to move to a new target, or the telescope
             fails to reach the target within 5 minutes.
         """
-        if not self.pocstop.waitFor('== allowed', timeout=0.5):
+        if not self.poco.movement_allowed(timeout=0.5):
             raise ValueError('Telescope movement is disabled!')
 
-        if not self.track.waitFor('== on', timeout=0.5):
+        if not self.poco.tracking(timeout=0.5):
             raise ValueError('Tracking is disabled!')
 
-        if not self.target.waitFor('== 0', timeout=0.5):
+        if not self.poco.on_target(timeout=0.5):
             raise ValueError('Telescope is not ready to move to a new target!')
 
         # TODO: Need to add checks that the request is within the pointing
@@ -97,12 +77,13 @@ class NickelTelescopePointing:
         # in the ktl python package
         #   - try using modify with sexigesimal coordinates
 
-        self.rad.write(target_coo.ra.to('hourangle').value)
-        self.decd.write(target_coo.dec.to('deg').value)
+        self.poco.set_pointing_demand(
+            target_coo.ra.to('hourangle').value, target_coo.dec.to('deg').value
+        )
 
         # TODO: Need a better way to determine if the move fails!  Timeout
         # currently set at 5 min.
-        if not self.target.waitFor('== 0', timeout=300):
+        if not self.poco.on_target(timeout=300):
             # TODO: Is there a way to appropriately handle this?
             raise ValueError('Telescope failed to make it to target within 5 min.')
 

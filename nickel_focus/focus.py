@@ -8,7 +8,6 @@ from matplotlib import pyplot, patches
 import numpy as np
 
 from nickel_focus import exposure
-from nickel_focus import ktl
 from nickel_focus import log
 from nickel_focus.photometry import image_quality
 from nickel_focus import quadratic
@@ -16,42 +15,30 @@ from nickel_focus import quadratic
 
 class Focus:
     """
-    KTL object used to manipulate the telescope focus.
+    Read and set the telescope focus (the secondary-mirror position).
 
-    Attributes
+    Parameters
     ----------
-    pocstop : ktl.Keyword
-
+    poco : :class:`~nickel_focus.services.nickelpoco.NickelPoco`
+        The telescope service.
     """
-    def __init__(self):
-        if ktl is None:
-            raise RuntimeError(
-                'The ktl package is not available.  Controlling the telescope focus requires a '
-                'kpython environment with ktl installed.'
-            )
-        # Controls overall movement of mechanisms
-        self.pocstop = ktl.cache('nickelpoco', 'POCSTOP')
-        # Actual secondary position
-        self.secpa = ktl.cache('nickelpoco', 'POCSECPA')
-        # Desired secondary position
-        self.secpd = ktl.cache('nickelpoco', 'POCSECPD')
-        # Controls the secondary locking mechanism
-        self.seclk = ktl.cache('nickelpoco', 'POCSECLK')
-        # Provides the state of the exposures
-        self.expstate = ktl.cache('nscicam', 'EXPSTATE')
+    def __init__(self, poco):
+        self.poco = poco
 
     @property
     def current(self):
         """
         The current focus position (floating-point)
         """
-        return float(self.secpa.read())
+        return self.poco.secondary_position()
 
     def set_to(self, focus_value):
         """
         Set the focus to the provided value.
 
-        Movement must be enabled and there must not be an ongoing exposure.
+        Movement must be enabled.  This does not check the camera; see
+        :meth:`~nickel_focus.focus.FocusSequence.set_focus`, which also
+        requires that no exposure is in progress.
 
         Parameters
         ----------
@@ -64,8 +51,8 @@ class Focus:
         ------
         ValueError
             Raised if the focus value is outside the allowed range, if movement
-            is disabled, or if the exposure state is anything except that the
-            camera is ready for another exposure to begin.
+            is disabled, or if the secondary does not lock again within 30 s
+            of the move.
         """
 
         # Check that the requested focus value is valid
@@ -74,31 +61,26 @@ class Focus:
         
         # Make sure movement is enabled.  Do NOT enable movement via this
         # script!
-        if not self.pocstop.waitFor('== allowed', timeout=0.5):
+        if not self.poco.movement_allowed(timeout=0.5):
             raise ValueError('Telescope movement is disabled!')
 
-        # Check that an exposure isn't currently happening
-        if not self.expstate.waitFor('== Ready', timeout=0.5):
-            raise ValueError('Camera exposure state not ready. Cannot change focus.')
-
         # Check if the focus is already at the requested position.
-        if abs(float(self.secpd.read()) - focus_value) < .1:
+        if abs(self.poco.secondary_demand() - focus_value) < .1:
             log.info(f'POCSECPD already set to {focus_value}. No change needed.')
             return
 
         # Change the focus
         log.info('Unlocking secondary')
-        self.seclk.write('off')
-        self.seclk.read()
+        self.poco.set_secondary_lock(False)
+        self.poco.read('POCSECLK')
 
-        log.info(f'Actual position: {self.secpa.read()}')
-        self.secpd.write(focus_value)
-        log.info(f'Desired position: {self.secpd.read()}')
+        log.info(f'Actual position: {self.poco.secondary_position()}')
+        self.poco.set_secondary_demand(focus_value)
+        log.info(f'Desired position: {self.poco.secondary_demand()}')
 
-        if not self.seclk.waitFor('== on', timeout=30):
+        if not self.poco.secondary_locked(timeout=30):
             # TODO: Explicitly set the lock to on?
-#            self.seclk.write('on')
-#            self.seclk.read()
+#            self.poco.set_secondary_lock(True)
             raise ValueError("POCSECLK did not turn on. Focus change failed.")
 
         log.info(f"Successfully changed focus to {focus_value}")
@@ -276,21 +258,20 @@ class FocusSequence:
 
     Parameters
     ----------
-    connect : :obj:`bool`, optional
-        Construct the telescope/camera hardware handles (``_focus`` and
-        ``_exposure``).  Even when True, they are only constructed if ``ktl``
-        is available; otherwise both are None.  Set to False for sequences
-        that never touch hardware (e.g., replaying exposures already on disk),
-        so that they don't connect to it even when ``ktl`` is available.
+    poco : :class:`~nickel_focus.services.nickelpoco.NickelPoco`, optional
+        The telescope service, used to move the focus.
+    cam : :class:`~nickel_focus.services.nscicam.NSciCam`, optional
+        The camera service, used to take exposures.
+
+    The hardware handles ``_focus`` (:class:`~nickel_focus.focus.Focus`) and
+    ``_exposure`` (:class:`~nickel_focus.exposure.Exposure`) are built only if
+    both services are given; otherwise both are None, as for sequences that
+    never touch hardware (e.g., replaying exposures already on disk).
     """
-    def __init__(self, connect=True):
-        # `_focus` and `_exposure` control the telescope and camera hardware.
-        # They require a live ktl connection, which is not needed by
-        # sequences (e.g., ArchiveFocusSequence) that only reprocess
-        # exposures that already exist on disk.
-        connect = connect and ktl is not None
-        self._focus = Focus() if connect else None
-        self._exposure = exposure.Exposure() if connect else None
+    def __init__(self, poco=None, cam=None):
+        connect = poco is not None and cam is not None
+        self._focus = Focus(poco) if connect else None
+        self._exposure = exposure.Exposure(cam) if connect else None
         self.method = None
         self.reset()
 
@@ -301,6 +282,23 @@ class FocusSequence:
         self.step_iter = 0
         self.source_stamps = []
         self.centroids = []
+
+    def set_focus(self, focus_value):
+        """
+        Move the focus to ``focus_value``, once the camera is idle.
+
+        Every focus move a sequence makes goes through here, so the focus never
+        moves during an exposure.
+
+        Raises
+        ------
+        ValueError
+            Raised if the camera's exposure state isn't ``Ready`` within 0.5 s,
+            or if :meth:`~nickel_focus.focus.Focus.set_to` fails.
+        """
+        if not self._exposure.cam.exposure_state_is('Ready', timeout=0.5):
+            raise ValueError('Camera exposure state not ready. Cannot change focus.')
+        self._focus.set_to(focus_value)
 
     @property
     def expected_steps(self):
@@ -433,7 +431,7 @@ class FocusSequence:
             The photometry method passed to
             :func:`~nickel_focus.photometry.image_quality`.
         **exp_kwargs
-            Passed to :meth:`~nickel_focus.exposure.ExposureConfig.configure`
+            Passed to :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure`
             before exposing (``record``, ``speed``, ``binning``, ``exptime``).
 
         Returns
@@ -444,10 +442,10 @@ class FocusSequence:
         """
         if self._focus is None or self._exposure is None:
             raise ValueError(
-                'No telescope focus/exposure control is available (ktl not connected); cannot '
-                'take a single exposure.'
+                'No telescope focus/exposure control is available (no telescope/camera '
+                'connection); cannot take a single exposure.'
             )
-        self._focus.set_to(focus_value)
+        self.set_focus(focus_value)
         self._exposure.cfg.configure(**exp_kwargs)
         exposure_file = self.take_exposure()
         data, bkg, src_data, img_quality, source_stamp, coords \
@@ -514,9 +512,9 @@ class FocusSequence:
 
 
 class GridFocusSequence(FocusSequence):
-    def __init__(self, start, step, end=None, nstep=None, connect=True):
+    def __init__(self, start, step, end=None, nstep=None, poco=None, cam=None):
 
-        super().__init__(connect=connect)
+        super().__init__(poco=poco, cam=cam)
 
         if end is None and nstep is None:
             raise ValueError('Must provide either the ending value or the number of steps.')
@@ -532,17 +530,17 @@ class GridFocusSequence(FocusSequence):
         return self.step_iter < self.nstep
 
     def step_focus(self):
-        self._focus.set_to(self.target_focus[self.step_iter])
+        self.set_focus(self.target_focus[self.step_iter])
         return self._focus.current
 
 
 class AutomatedFocusSequence(FocusSequence):
-    def __init__(self, start, step, maxsteps=12):
+    def __init__(self, start, step, maxsteps=12, poco=None, cam=None):
 
         if maxsteps is None or maxsteps < 2:
             raise ValueError('maxsteps cannot be None and must be at least 2.')
 
-        super().__init__()
+        super().__init__(poco=poco, cam=cam)
 
         self.start = start
         # NOTE: Named `step_size`, not `step`, because `step` is the name
@@ -596,14 +594,14 @@ class AutomatedFocusSequence(FocusSequence):
             next_focus = self.observed_focus[-1] + self.direction * self.step_size
         else:
             next_focus = self.observed_focus[-1] + self.direction * self.step_size
-        self._focus.set_to(next_focus)
+        self.set_focus(next_focus)
         return self._focus.current
 
 
 class ArchiveFocusSequence(FocusSequence):
     def __init__(self, observed_focus, exposures):
         # Only replays exposures already on disk, so never needs hardware.
-        super().__init__(connect=False)
+        super().__init__()
 
         self._observed_focus = observed_focus
         self._exposures = exposures

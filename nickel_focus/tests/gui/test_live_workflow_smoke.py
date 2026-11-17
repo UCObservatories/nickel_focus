@@ -90,8 +90,8 @@ def test_full_live_workflow(qapp, fake_hardware):
     panel.single_acquire_button.click()
     _wait_for_focus_worker(controller)
 
-    assert fake_hardware['focus'].current == best_focus, \
-        'the fake Focus should have been commanded to the (rounded) fitted best focus'
+    assert fake_hardware['sim'].focus == best_focus, \
+        'the simulated focus should have been commanded to the (rounded) fitted best focus'
     assert len(window.image_panel._results) == 6, 'the confirmation exposure should be displayed'
     assert len(window.curve_panel._results) == 5, 'a confirmation exposure is not sequence data'
     assert f'{best_focus:.0f}' in panel.status_label.text(), \
@@ -104,7 +104,7 @@ def test_full_live_workflow(qapp, fake_hardware):
     controller._on_source_selected(55., 55.)
     _wait_for_focus_worker(controller)
 
-    assert controller.method == (55., 55.)
+    assert controller.method == (55., 55.), 'selecting a source should update the active method'
     assert len(controller.focus_sequence.exposures) == 5, \
         "reanalysis updates in place, doesn't add"
     assert len(window.curve_panel._results) == 5, 'the loaded sequence was reanalyzed, not added to'

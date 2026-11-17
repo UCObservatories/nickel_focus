@@ -25,8 +25,8 @@ def test_set_indicator_sets_state_color_and_text(qapp):
     bar.set_indicator('focus', 'ok', '345.2')
 
     label = bar.indicators['focus']
-    assert label.property('state') == 'ok'
-    assert label.text() == '345.2'
+    assert label.property('state') == 'ok', "the indicator's state should be set"
+    assert label.text() == '345.2', 'the indicator should show the given text'
     assert StatusBar.STATE_COLORS['ok'] in label.dot.styleSheet(), 'the circle should be green'
 
 
@@ -36,7 +36,8 @@ def test_set_indicator_without_text_restores_the_default(qapp):
 
     bar.set_indicator('focus', 'error')
 
-    assert bar.indicators['focus'].text() == 'Focus'
+    assert bar.indicators['focus'].text() == 'Focus', \
+        'with no text, the indicator should show its name'
 
 
 def test_quit_button_emits_quit_requested(qapp):
@@ -46,7 +47,7 @@ def test_quit_button_emits_quit_requested(qapp):
 
     bar.quit_button.click()
 
-    assert received == [True]
+    assert received == [True], 'Quit should emit quitRequested exactly once'
 
 
 def test_set_running_disables_and_reenables_quit(qapp):

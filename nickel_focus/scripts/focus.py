@@ -141,14 +141,20 @@ class NickelFocus(scriptbase.ScriptBase):
     
         # Check if output file exists
 
+        # Archive mode (obsnum given) only re-analyzes exposures on disk, so it
+        # never connects to the telescope or camera.
+        if args.obsnum is None:
+            from nickel_focus.services import NickelPoco, NSciCam
+            services = {'poco': NickelPoco(), 'cam': NSciCam()}
+        else:
+            services = {}
+
         if len(args.focus) == 3 or args.nstep is not None:
             # Perform a grid or archive sequence
             end = None if len(args.focus) == 2 else args.focus[2]
-            # Archive mode (obsnum given) only uses the grid for its focus
-            # values, so it shouldn't connect to the hardware.
+            # Archive mode only uses the grid for its focus values.
             seq = focus.GridFocusSequence(
-                args.focus[0], args.focus[1], end=end, nstep=args.nstep,
-                connect=args.obsnum is None
+                args.focus[0], args.focus[1], end=end, nstep=args.nstep, **services
             )
 
             if args.obsnum is not None:
@@ -170,7 +176,7 @@ class NickelFocus(scriptbase.ScriptBase):
                 seq = focus.ArchiveFocusSequence(seq.target_focus, expected_files)
         else:
             seq = focus.AutomatedFocusSequence(
-                args.focus[0], args.focus[1], maxsteps=args.maxsteps
+                args.focus[0], args.focus[1], maxsteps=args.maxsteps, **services
             )
 
         best_focus, best_img_quality = seq.execute(

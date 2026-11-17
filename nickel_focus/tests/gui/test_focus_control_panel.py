@@ -72,17 +72,20 @@ def test_get_focus_sequence_type(qapp):
     panel = FocusControlPanel()
 
     panel.tabs.setCurrentWidget(panel.single_tab)
-    assert panel.get_focus_sequence_type() is None
+    assert panel.get_focus_sequence_type() is None, 'the Single tab should have no sequence type'
     panel.tabs.setCurrentWidget(panel.grid_tab)
-    assert panel.get_focus_sequence_type() == 'grid'
+    assert panel.get_focus_sequence_type() == 'grid', \
+        "the Grid tab's sequence type should be 'grid'"
     panel.tabs.setCurrentWidget(panel.auto_tab)
-    assert panel.get_focus_sequence_type() == 'automated'
+    assert panel.get_focus_sequence_type() == 'automated', \
+        "the Auto tab's sequence type should be 'automated'"
     panel.tabs.setCurrentWidget(panel.replay_tab)
-    assert panel.get_focus_sequence_type() == 'archive'
+    assert panel.get_focus_sequence_type() == 'archive', \
+        "the Replay tab's sequence type should be 'archive'"
     panel.tabs.setCurrentWidget(panel.log_tab)
-    assert panel.get_focus_sequence_type() is None
+    assert panel.get_focus_sequence_type() is None, 'the Log tab should have no sequence type'
     panel.tabs.setCurrentWidget(panel.help_tab)
-    assert panel.get_focus_sequence_type() is None
+    assert panel.get_focus_sequence_type() is None, 'the Help tab should have no sequence type'
 
 
 def test_get_focus_sequence_config_for_grid(qapp):
@@ -92,7 +95,8 @@ def test_get_focus_sequence_config_for_grid(qapp):
     panel.grid_step_spin.setValue(2)
     panel.grid_nstep_spin.setValue(7)
 
-    assert panel.get_focus_sequence_config() == {'start': 300, 'step': 2, 'nstep': 7}
+    assert panel.get_focus_sequence_config() == {'start': 300, 'step': 2, 'nstep': 7}, \
+        "the Grid tab's configuration should match its fields"
 
 
 def test_get_focus_sequence_config_for_auto(qapp):
@@ -102,7 +106,8 @@ def test_get_focus_sequence_config_for_auto(qapp):
     panel.auto_step_spin.setValue(3)
     panel.auto_maxsteps_spin.setValue(9)
 
-    assert panel.get_focus_sequence_config() == {'start': 310, 'step': 3, 'maxsteps': 9}
+    assert panel.get_focus_sequence_config() == {'start': 310, 'step': 3, 'maxsteps': 9}, \
+        "the Auto tab's configuration should match its fields"
 
 
 def test_get_focus_sequence_config_for_replay(qapp):
@@ -124,14 +129,15 @@ def test_get_focus_sequence_config_for_replay(qapp):
         'start': 300,
         'step': 2,
         'nstep': 7,
-    }
+    }, "the Replay tab's configuration should match its fields"
 
 
 def test_get_focus_sequence_config_is_empty_outside_grid_auto_replay(qapp):
     panel = FocusControlPanel()
     for tab in (panel.single_tab, panel.log_tab, panel.help_tab):
         panel.tabs.setCurrentWidget(tab)
-        assert panel.get_focus_sequence_config() == {}
+        assert panel.get_focus_sequence_config() == {}, \
+            'only Grid/Auto/Replay should have a sequence configuration'
 
 
 def test_get_exposure_config_for_single_grid_auto(qapp):
@@ -141,26 +147,30 @@ def test_get_exposure_config_for_single_grid_auto(qapp):
     panel.single_exptime_spin.setValue(1.5)
     panel.single_speed_combo.setCurrentText('Fast')
     panel.single_binning_combo.setCurrentText('2,2')
-    assert panel.get_exposure_config() == {'exptime': 1.5, 'speed': 'Fast', 'binning': '2,2'}
+    assert panel.get_exposure_config() == {'exptime': 1.5, 'speed': 'Fast', 'binning': '2,2'}, \
+        "the Single tab's exposure configuration should match its fields"
 
     panel.tabs.setCurrentWidget(panel.grid_tab)
     panel.grid_exptime_spin.setValue(2.5)
     panel.grid_speed_combo.setCurrentText('Slow')
     panel.grid_binning_combo.setCurrentText('1,1')
-    assert panel.get_exposure_config() == {'exptime': 2.5, 'speed': 'Slow', 'binning': '1,1'}
+    assert panel.get_exposure_config() == {'exptime': 2.5, 'speed': 'Slow', 'binning': '1,1'}, \
+        "the Grid tab's exposure configuration should match its fields"
 
     panel.tabs.setCurrentWidget(panel.auto_tab)
     panel.auto_exptime_spin.setValue(3.5)
     panel.auto_speed_combo.setCurrentText('Fast')
     panel.auto_binning_combo.setCurrentText('4,4')
-    assert panel.get_exposure_config() == {'exptime': 3.5, 'speed': 'Fast', 'binning': '4,4'}
+    assert panel.get_exposure_config() == {'exptime': 3.5, 'speed': 'Fast', 'binning': '4,4'}, \
+        "the Auto tab's exposure configuration should match its fields"
 
 
 def test_get_exposure_config_is_empty_for_replay_log_help(qapp):
     panel = FocusControlPanel()
     for tab in (panel.replay_tab, panel.log_tab, panel.help_tab):
         panel.tabs.setCurrentWidget(tab)
-        assert panel.get_exposure_config() == {}
+        assert panel.get_exposure_config() == {}, \
+            'only Single/Grid/Auto should have an exposure configuration'
 
 
 def test_each_tab_has_the_requested_buttons(qapp):
@@ -172,14 +182,17 @@ def test_each_tab_has_the_requested_buttons(qapp):
     assert button_texts(panel.slew_tab) == sorted([
         'Browse…', 'Move to Target', 'Object', 'Pointing *', 'Focusing *',
     ]), 'the Slew tab should have its file-browse, move, and three find-nearest buttons'
-    assert button_texts(panel.single_tab) == ['Acquire']
-    assert button_texts(panel.grid_tab) == ['Acquire', 'Interrupt']
-    assert button_texts(panel.auto_tab) == ['Acquire', 'Interrupt']
+    assert button_texts(panel.single_tab) == ['Acquire'], 'the Single tab should have only Acquire'
+    assert button_texts(panel.grid_tab) == ['Acquire', 'Interrupt'], \
+        'the Grid tab should have Acquire and Interrupt'
+    assert button_texts(panel.auto_tab) == ['Acquire', 'Interrupt'], \
+        'the Auto tab should have Acquire and Interrupt'
     # Replay also has its pre-existing "Browse…" button, unrelated to
     # the acquisition action.
-    assert button_texts(panel.replay_tab) == ['Browse…', 'Load']
-    assert button_texts(panel.log_tab) == []
-    assert button_texts(panel.help_tab) == []
+    assert button_texts(panel.replay_tab) == ['Browse…', 'Load'], \
+        'the Replay tab should have Browse and Load'
+    assert button_texts(panel.log_tab) == [], 'the Log tab should have no buttons'
+    assert button_texts(panel.help_tab) == [], 'the Help tab should have no buttons'
 
 
 def test_single_tab_acquire_emits_take_single_exposure_requested(qapp):
@@ -325,7 +338,8 @@ def test_update_step_updates_label(qapp):
 
     panel.update_step('Step 2/5 — Focus 345')
 
-    assert panel.step_label.text() == 'Step 2/5 — Focus 345'
+    assert panel.step_label.text() == 'Step 2/5 — Focus 345', \
+        'update_step should show the given text'
 
 
 def test_show_best_focus_updates_status_and_single_tab_default(qapp):
@@ -333,7 +347,8 @@ def test_show_best_focus_updates_status_and_single_tab_default(qapp):
 
     panel.show_best_focus(356.6, 'Sequence finished')
 
-    assert panel.status_label.text() == 'Sequence finished'
+    assert panel.status_label.text() == 'Sequence finished', \
+        'show_best_focus should show the given text as the status'
     assert panel.single_focus_spin.value() == 357, \
         'the Single tab default should be the best focus, rounded to the nearest integer'
 
@@ -342,7 +357,8 @@ def test_show_status_updates_status(qapp):
     panel = FocusControlPanel()
     panel.show_status('Stopped early -- not enough points for a focus fit')
 
-    assert panel.status_label.text() == 'Stopped early -- not enough points for a focus fit'
+    assert panel.status_label.text() == 'Stopped early -- not enough points for a focus fit', \
+        'show_status should show the given text'
 
 
 def test_status_and_step_labels_wrap_instead_of_widening(qapp):
@@ -372,9 +388,9 @@ def test_reset_clears_status_and_log(qapp):
 
     panel.reset()
 
-    assert panel.step_label.text() == 'Step: —'
-    assert panel.status_label.text() == ''
-    assert panel.log_widget.toPlainText() == ''
+    assert panel.step_label.text() == 'Step: —', 'reset should restore the step placeholder'
+    assert panel.status_label.text() == '', 'reset should clear the status'
+    assert panel.log_widget.toPlainText() == '', 'reset should clear the Log tab'
 
 
 def test_reset_does_not_touch_the_single_tab_default(qapp):
@@ -393,7 +409,8 @@ def test_browse_button_updates_datadir(qapp, monkeypatch):
     monkeypatch.setattr(QtWidgets.QFileDialog, 'getExistingDirectory',
                          lambda *a, **k: '/some/chosen/dir')
     panel._on_browse_clicked()
-    assert panel.replay_datadir_edit.text() == '/some/chosen/dir'
+    assert panel.replay_datadir_edit.text() == '/some/chosen/dir', \
+        'Browse should put the chosen directory in the data-directory field'
 
     # Canceling the dialog (empty string) should leave the field alone.
     monkeypatch.setattr(QtWidgets.QFileDialog, 'getExistingDirectory', lambda *a, **k: '')
@@ -407,7 +424,8 @@ def test_slew_browse_button_updates_file_edit(qapp, monkeypatch):
     monkeypatch.setattr(QtWidgets.QFileDialog, 'getOpenFileName',
                          lambda *a, **k: ('/some/stars.txt', ''))
     panel._on_slew_browse_clicked()
-    assert panel.slew_file_edit.text() == '/some/stars.txt'
+    assert panel.slew_file_edit.text() == '/some/stars.txt', \
+        'Browse should put the chosen file in the starlist field'
 
     # Canceling the dialog (empty string) should leave the field alone.
     monkeypatch.setattr(QtWidgets.QFileDialog, 'getOpenFileName', lambda *a, **k: ('', ''))
@@ -435,7 +453,8 @@ def test_show_nearest_target_populates_target_fields_and_status(qapp):
         'the target RA field should be populated with the found target'
     assert panel.slew_target_dec_edit.text() == '+29:45:06.20', \
         'the target Dec field should be populated with the found target'
-    assert panel.status_label.text() == 'Nearest target: Pointing00'
+    assert panel.status_label.text() == 'Nearest target: Pointing00', \
+        'the found target should be reported as the status'
 
 
 def test_preferred_height_excluding_help_ignores_the_tallest_page(qapp):
@@ -467,10 +486,12 @@ def test_set_exposure_config_sets_every_exposure_tab(qapp):
 
     unmatched = panel.set_exposure_config({'exptime': 12.5, 'speed': 'Fast', 'binning': '1,1'})
 
-    assert unmatched == []
+    assert unmatched == [], 'every setting should match a GUI option'
     for tab in (panel.single_tab, panel.grid_tab, panel.auto_tab):
         panel.tabs.setCurrentWidget(tab)
-        assert panel.get_exposure_config() == {'exptime': 12.5, 'speed': 'Fast', 'binning': '1,1'}
+        assert panel.get_exposure_config() == {
+            'exptime': 12.5, 'speed': 'Fast', 'binning': '1,1'}, \
+            'every exposure tab should show the given settings'
 
 
 def test_set_exposure_config_reports_and_skips_unknown_options(qapp):
@@ -480,7 +501,7 @@ def test_set_exposure_config_reports_and_skips_unknown_options(qapp):
 
     unmatched = panel.set_exposure_config({'exptime': 7.0, 'binning': '3,3'})
 
-    assert unmatched == ['binning']
+    assert unmatched == ['binning'], 'the unknown binning should be reported as unmatched'
     after = panel.get_exposure_config()
     assert after['exptime'] == 7.0, 'a valid exposure time should still be applied'
     assert after['binning'] == before['binning'], 'an unknown binning should leave the field alone'

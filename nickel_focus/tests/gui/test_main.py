@@ -145,4 +145,5 @@ def test_status_bar_lines_up_with_and_sits_close_to_the_image_panel_rows(qapp):
 def test_build_app_uses_the_fusion_style(qapp):
     # Fusion is the default on Linux (where the GUI is deployed); forcing it
     # everywhere keeps the layout the same on other platforms, e.g. macOS.
-    assert launcher.build_app().style().name().lower() == 'fusion'
+    assert launcher.build_app().style().name().lower() == 'fusion', \
+        'the app should use the Fusion style'

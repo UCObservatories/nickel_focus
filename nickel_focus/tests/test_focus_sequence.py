@@ -98,7 +98,7 @@ def test_execute_with_plot_does_not_require_a_display(focus_sweep):
 
 def test_execute_with_goto_requires_hardware(focus_sweep):
     seq = _make_sequence(focus_sweep)
-    with pytest.raises(ValueError, match='ktl not connected'):
+    with pytest.raises(ValueError, match='No telescope focus/exposure control'):
         seq.execute(goto=True, plot=False)
 
 

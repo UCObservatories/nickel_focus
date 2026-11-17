@@ -197,10 +197,22 @@ or via `tox` (see `tox.ini` for the versions that are tested)
 tox -e 3.12-test-qt
 ```
 
-> **IMPORTANT**: None of the tests actually exercise the `ktl` connections
-> established to manipulate the telescope hardware.  All tests wire in fake
-> hardware for this purpose, but it represents a gap in actual, real-world
-> testing.
+> **IMPORTANT**: The normal test suite never connects to the telescope or
+> camera, whether or not `ktl` is installed.  It runs the real code on a fake
+> `ktl` (`nickel_focus/tests/fake_ktl.py`) with a simulated telescope and
+> camera, which checks our logic but not the real services' behavior.
+
+At the telescope, a small set of **live tests** checks the real `ktl`
+services.  They run only when requested with `--ktl-live`:
+
+```console
+pytest nickel_focus/tests --ktl-live               # normal suite plus the live tests
+pytest nickel_focus/tests --ktl-live -m ktl_live   # live tests only
+```
+
+They need a live `ktl` connection, and fail (rather than skip) without one.
+They **never change a keyword value**: every service they use is read-only,
+so any attempted write raises an error before it reaches `ktl`.
 
 ### Deployment
 

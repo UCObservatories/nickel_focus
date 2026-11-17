@@ -59,7 +59,8 @@ gui/
 This is a fairly conventional Model-View-Controller split, with one Qt-
 specific wrinkle:
 
-- **Model** is `focus.py`/`exposure.py`/`slew.py` and friends -- reused as-is, not
+- **Model** is `focus.py`/`exposure.py`/`slew.py` and friends, plus the KTL
+  service classes in `services/` they're built on -- reused as-is, not
   reimplemented. `gui/model/focus_worker.py` and `gui/model/slew_worker.py`
   aren't domain logic; they're the adapters that run the Model's blocking,
   synchronous methods (`FocusSequence.step`/`.reanalyze`/
@@ -76,35 +77,41 @@ specific wrinkle:
   they never import `focus`/`slew` or talk to `FocusWorker`/`SlewWorker`
   directly.
 - **Controller** (`gui/controller.py`) is the only module that imports
-  both the views and the model. It owns the currently active
-  `focus.FocusSequence`/`FocusWorker`, the `slew.NickelTelescopePointing`
-  handle/`SlewWorker` (if any), read-only `focus.Focus`/`exposure.Exposure`
-  handles for the status indicators and the initial exposure settings,
-  connects each view's signals to its own
+  both the views and the model. It owns one shared service object per KTL
+  service -- `poco` (`services.NickelPoco`, the telescope) and `cam`
+  (`services.NSciCam`, the camera) -- and passes them to every sequence or
+  single exposure it builds; it also owns the currently active
+  `focus.FocusSequence`/`FocusWorker` and the `slew.NickelTelescopePointing`
+  handle/`SlewWorker` (if any). It connects each view's signals to its own
   handler methods, and implements the "hardware exclusivity" rule: only
   one operation (a running sequence, a single exposure, or a slew) may be
   active at a time. Finding the nearest target is exempt from that rule --
   it's a fast, synchronous `ktl` read plus a starlist search, not a move.
 
+Each service is constructed once, at startup (`Controller._connect_service`):
+without `ktl` it is silently `None`; if `ktl` is available but the service
+can't be reached (e.g. a priming read times out), it is `None` and a
+warning is logged. Every action that needs one checks for `None` and reports
+a clear failure.
+
 The Controller also decides, once, at construction, whether the
 Slew/Single/Grid/Auto tabs are enabled at all: `self.ktl_available =
-focus.ktl is not None` (checking `focus.ktl` is enough, since `slew.ktl`
-is the same object -- see the `pkg/ktl.py` paragraph below), passed to
+services.ktl_available()`, passed to
 `FocusControlPanel.set_hardware_tabs_enabled`, which grays out those four
 tabs and switches to Replay when it's `False`. A `force_enable_hardware_tabs`
 constructor flag skips *only* that graying -- every action on those tabs
-still fails exactly as it would otherwise, checking `telescope`/`focus.ktl`
+still fails exactly as it would otherwise, checking `poco`/`cam`
 itself -- so a developer with no `ktl` connection can still see and click
 through them; it's wired to `nickel_focus_gui`'s suppressed `--test` flag
 (§4), never set any other way.
 
 At construction, the Controller also starts the Single/Grid/Auto tabs'
 exposure fields (exposure time, speed, binning) at the camera's current
-settings, read via `exposure.ExposureConfig.current_settings()` (which
+settings, read via `cam.cfg.current_settings()` (`services.nscicam.ExposureConfig`, which
 reports the speed by its GUI name, e.g. `Fast`) and applied with
 `FocusControlPanel.set_exposure_config`. A failed read, or a speed/binning that isn't one of the drop-down options,
-is logged as a warning and leaves those fields unchanged. Without `ktl`
-the fields keep their built-in defaults (visible only with `--test`).
+is logged as a warning and leaves those fields unchanged. Without the camera
+service the fields keep their built-in defaults (visible only with `--test`).
 
 `gui/qt.py` exists so exactly one module fails, with one clear message, if
 PySide6 isn't installed -- every other `gui` module imports Qt classes from
@@ -116,21 +123,30 @@ GUI needs.
 
 `ktl` (the KTL package used to talk to real telescope/camera hardware) gets
 the same single-entry-point treatment, but outside `gui/`, in
-`nickel_focus/pkg/ktl.py`, since it's needed by the Model layer
-(`focus.py`/`slew.py`) independent of whether the GUI is even installed.
-Every module that needs it does `from nickel_focus import ktl` rather than
-`import ktl` directly, mirroring `from gui.qt import QtWidgets`. The two
-entry points differ in how they treat their dependency being missing,
-though: `gui/qt.py` *hard*-fails (raises `ImportError` with a clear
-message), since the GUI extra requires PySide6 to do anything at all,
-whereas `pkg/ktl.py` *soft*-fails -- it warns once, at most, and sets
-`ktl = None` -- because `ktl` being unavailable is expected and supported,
-not an error: the CLI's archive/replay path and
-`focus.ArchiveFocusSequence` must keep working with no live `ktl`
-connection at all. Code that actually needs `ktl` (`focus.Focus`,
-`exposure.Exposure`, `slew.NickelTelescopePointing`, and, in turn, the
-Controller that constructs them) checks `ktl is None` itself and reports a
-clear failure instead of crashing.
+`nickel_focus/services/base.py`, since it's needed by the Model layer
+independent of whether the GUI is even installed. `services/base.py` is the
+only module that imports `ktl`; everything else uses the service classes
+built on its `KTLService` (`services/nickelpoco.py`'s `NickelPoco` and
+`services/nscicam.py`'s `NSciCam`, the latter with the camera's
+`ExposurePath`/`ExposureConfig` helpers), which take and return plain
+values and raise only `services/base.py`'s own exceptions (`KTLError`,
+`KTLTimeoutError`, `KTLReadOnlyError`, `KTLUnavailableError`). Every read
+has a timeout (`DEFAULT_READ_TIMEOUT`, 1 s; to be confirmed at the
+telescope); writes don't yet. The device classes (`focus.Focus`,
+`exposure.Exposure`, `slew.NickelTelescopePointing`) take a service
+object rather than touching keywords themselves; the "camera idle before a
+focus move" check lives in `FocusSequence.set_focus`, which holds both
+devices. The two entry points differ in how they treat their dependency
+being missing, though: `gui/qt.py` *hard*-fails (raises `ImportError` with
+a clear message), since the GUI extra requires PySide6 to do anything at
+all, whereas `services/base.py` *soft*-fails -- if `import ktl` raises any
+`ImportError` (not installed, or installed but broken) it warns once and
+sets `ktl = None` -- because `ktl` being unavailable is expected and
+supported: the CLI's archive/replay path and `focus.ArchiveFocusSequence`
+must keep working with no live `ktl` connection at all. Constructing a
+service then raises `KTLUnavailableError` (a `RuntimeError`), and
+`services.ktl_available()` reports it. Nothing imports `services` unless it
+needs hardware, so a replay-only CLI run never imports `ktl`.
 
 Views hold no reference to each other or to the Controller. All
 cross-panel communication (e.g. a new exposure updating both the image
@@ -165,7 +181,7 @@ implementation history.
 | --- | --- |
 | `gui/qt.py` | Single point of contact with PySide6; the only module allowed to `import PySide6` directly. |
 | `gui/launcher.py` | Builds the `QApplication` (always with Qt's "Fusion" widget style -- the Linux default -- so the layout is the same on every platform, including macOS and the offscreen test platform) and `MainWindow`. Wiring up the `Controller`, showing the window, and starting the Qt event loop happens one layer up, in `scripts/focus_gui.py`'s `NickelFocusGUI.main` (the `nickel_focus_gui` console script's entry point). |
-| `gui/controller.py` | Mediates between views and model; owns the active sequence/worker, the telescope handle/slew worker, and the hardware-exclusivity state machine; also decides, once, whether the ktl-driven tabs start out enabled. |
+| `gui/controller.py` | Mediates between views and model; owns the shared `NickelPoco`/`NSciCam` services, the active sequence/worker, the telescope handle/slew worker, and the hardware-exclusivity state machine; also decides, once, whether the ktl-driven tabs start out enabled. |
 | `gui/log_handler.py` | `QtLogHandler`, a `logging.Handler` that forwards formatted `nickel_focus.log` records into the Log tab via a Qt signal, so records logged from a background thread are delivered safely to the GUI thread. |
 | `gui/model/focus_worker.py` | `QThread` subclass that runs one `FocusSequence` operation (step/reanalyze/single exposure) off the GUI thread, reporting progress via signals. |
 | `gui/model/slew_worker.py` | `QThread` subclass that runs one `NickelTelescopePointing.slew_to` call off the GUI thread, since a slew can block for up to five minutes. |
@@ -251,11 +267,13 @@ implementation history.
   once a second, independent of whatever else is running:
   `telescope.current` for the Slew tab's live position display, and the
   keywords behind the status indicators (`POCSTOP`, `POCTRCK`, `POCOT`,
-  `POCSECLK` plus the focus value, `EXPSTATE`), each mapped to a color by
-  a small pure function in `controller.py` and pushed to
-  `StatusBar.set_indicator`. Without `ktl` the timer never starts and
-  every indicator stays red; a failed read shows red and is logged once
-  per streak of failures.
+  `POCSECLK` plus the focus value, `EXPSTATE`), read through `poco`/`cam`,
+  each mapped to a color by a small pure function in `controller.py` and
+  pushed to `StatusBar.set_indicator`. Without either service the timer
+  never starts and every indicator stays red; a failed read (including a
+  timeout) shows red and is logged once per streak of failures. The reads
+  run on the GUI thread, so an unresponsive service stalls the GUI for up to
+  1 s per read on each poll.
 
 ## 4. Usage
 
@@ -295,28 +313,46 @@ matter which is true:
   `pytest.importorskip('PySide6')` if PySide6 isn't installed, and forces
   the offscreen Qt platform plugin so whatever GUI tests do run never need
   a real display.
-- `tests/conftest.py`'s autouse `no_ktl` fixture forces `focus.ktl`/
-  `exposure.ktl`/`slew.ktl` to `None` before every test, regardless of
-  whether the real `ktl` package happens to be importable in the
-  environment running the suite. Since `focus.Focus`/`exposure.Exposure`/
-  `slew.NickelTelescopePointing` all raise `RuntimeError` in their
-  constructors whenever `ktl is None`, this guarantees no test -- not just
-  the ones that explicitly check "no ktl connection" behavior, but also,
-  e.g., every `ArchiveFocusSequence`-based test -- can reach a real
-  `ktl.cache(...)` call and touch actual hardware.
+- `tests/conftest.py`'s autouse `no_ktl` fixture sets `services.base.ktl`
+  -- the package's only reference to `ktl` -- to `None` before every test,
+  regardless of whether the real `ktl` package happens to be importable in
+  the environment running the suite. Every service class then raises
+  `KTLUnavailableError` on construction, so no test can reach a real
+  keyword.
 - Tests that need to exercise the "live hardware" code paths (stepping a
   `GridFocusSequence`/`AutomatedFocusSequence`, taking a single exposure,
-  slewing) request the `fake_hardware`/`fake_telescope` fixtures instead.
-  These run after `no_ktl` and override it: they monkeypatch
-  `focus.Focus`/`exposure.Exposure`/`slew.NickelTelescopePointing` to
-  lightweight in-memory stand-ins (`tests/fake_hardware.py`) that
-  synthesize FITS frames and record commanded focus/pointing values,
-  rather than ever talking to a real KTL keyword.
+  slewing, the status indicators) request the `fake_hardware`/
+  `fake_telescope` fixtures instead. These run after `no_ktl` and install a
+  keyword-level fake `ktl` (`tests/fake_ktl.py`) at the same place, so the
+  real service and device classes run unchanged. Its `Simulator` defines the
+  `nickelpoco`/`nscicam` keywords and makes writes act like the hardware:
+  commanding the focus moves and re-locks the secondary, commanding a slew
+  moves the telescope, and `EXPOSE = Go` steps `EXPSTATE` through an
+  exposure and writes a synthesized FITS frame. Its keywords record their
+  reads (with timeouts) and writes, and can be made unresponsive.
 
 Net effect: the same test run gives the same pass/fail result on a
 developer laptop with neither dependency installed and on a machine at the
 telescope with both installed and a live KTL dispatcher running -- and it
 never commands the telescope or camera in either case.
+
+**Live tests.** A few tests (`tests/test_ktl_live.py`, marked `ktl_live`)
+check the real services at the telescope -- that `NickelPoco` and `NSciCam`
+construct (every monitored keyword exists and answers), that the device
+classes construct on them, and that their values read. They run only when
+requested:
+
+```
+pytest nickel_focus/tests --ktl-live               # normal suite plus the live tests
+pytest nickel_focus/tests --ktl-live -m ktl_live   # live tests only
+```
+
+Without `--ktl-live` they are skipped, so `pytest`, `tox`, and CI never run
+them. With it, they need a live `ktl` connection, and fail (rather than
+skip) without one. They **never change a keyword value**: every service
+they use is constructed with `read_only=True`, so any write raises
+`KTLReadOnlyError` before reaching `ktl` (the ordinary suite tests this
+guard). `no_ktl` leaves `ktl` alone only for these tests.
 
 ## 6. Version history
 
@@ -333,4 +369,5 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `034a374` | 2026-11-16 | Status text built once in the Controller (`show_status`); 'm'-key selection and curve-panel API corrected; install/testing now point to `README.md`. |
 | `33f7060` | 2026-11-16 | Added `StatusBar` (Quit + Slew/Track/On Target/Focus/Exp colored-circle indicators) above the image panel (Quit disabled while running); image anchored to the top of its canvas; Fusion style forced on all platforms. |
 | `945b2ab` | 2026-11-17 | Exposure control (`ExposurePath`/`ExposureConfig`/`Exposure`) moved from `focus.py` to its own `exposure.py` module; exposure fields start at the camera's current settings. |
-| *pending* | 2026-11-17 | Removed the Options tab and settings persistence. |
+| `e560841` | 2026-11-17 | Removed the Options tab and settings persistence. |
+| *pending* | 2026-11-17 | KTL access moved into `services/` (`NickelPoco`/`NSciCam` on `KTLService`, the only `ktl` import; 1 s read timeouts); Controller shares one service of each; tests run on a keyword-level fake `ktl`; `--ktl-live` tests. |

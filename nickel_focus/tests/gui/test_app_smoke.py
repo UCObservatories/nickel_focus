@@ -47,7 +47,7 @@ def test_app_opens_and_shows_without_error(qapp):
     window.show()
     qapp.processEvents()
 
-    assert window.windowTitle() == 'Nickel Focus GUI'
+    assert window.windowTitle() == 'Nickel Focus GUI', 'the window should have its title'
     assert window.image_panel is not None, 'MainWindow should build a real ImagePanel'
     assert window.curve_panel is not None, 'MainWindow should build a real FocusCurvePanel'
     assert window.control_panel is not None, 'MainWindow should build a real FocusControlPanel'
