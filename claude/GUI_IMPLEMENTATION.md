@@ -2952,3 +2952,79 @@ applications should track.
   removed; §5.2 gains what to confirm about exposure completion).
 
 Full suite: `331 passed, 8 skipped`.
+
+## KTL's log routed into the `nickel_focus` log; Log tab matches the console (2026-11-17)
+
+Resolves the refactor plan's §5.1 item on hidden KTL warnings (KTL logged
+only errors, to `stderr`), and makes the GUI's Log tab track the console.
+
+- **Verbosity 0-3** (`pkg/logger.py`, `scripts/scriptbase.py`): `-v 3` added
+  (`nickel_focus` level DEBUG, like 2). New
+  `NickelFocusLogger.convert_verbosity_to_ktl_level` and `ktl_level`
+  attribute: `'warn'` for 0/1, `'notice'` for 2, `'debug'` for 3.
+  `ScriptBase.init_log` sets it from the more verbose of `--verbosity` and
+  (if a log file is written) `--log_level`. `-v`/`--log_level` now take
+  `choices=[0, 1, 2, 3]`. The level colors moved to a shared
+  `LEVEL_COLORS` table.
+- **Routing** (`services/base.py`): `KTLLogWriter` (a `ktl.logger`
+  destination) parses KTL's `'<time> <flag>: <text>'` lines and logs
+  `ktl: <text>` -- `E` ERROR, `W` WARNING, `N` INFO, `I`/`D` DEBUG -- keeping
+  partial lines until complete and logging an unrecognized line as a
+  warning. `route_ktl_logging`, called from `KTLService.__init__`, routes
+  once per `ktl` module and (re)applies `ktl.loglevel` from
+  `log.ktl_level`. Recording the level in `init_log` and applying it at
+  service construction (rather than calling `ktl` from `init_log`) keeps
+  replay-only runs from importing `ktl`.
+- **GUI**: `nickel_focus_gui` now calls `init_log`, so its `-v`,
+  `--log_file`, and `--log_level` take effect (they were accepted but
+  ignored). The `QtLogHandler`'s level is the console handler's;
+  `record_logged` now carries `(text, level)`. The Log tab keeps the short
+  `GuiFormatter` format but shows the level name bold and in its color, uses
+  the system fixed-width font (with a monospace style hint, since the
+  offscreen platform names an unresolvable generic "monospace" family), keeps
+  5000 lines (was 500), and is no longer cleared by `reset()`.
+- **Tests**: an autouse `restore_log_levels` fixture puts the console and
+  KTL levels back after each test. New tests for the verbosity mappings,
+  `init_log`'s KTL level (including the log-file case), the writer's level
+  mapping, partial lines and unrecognized lines, routing once with the
+  default and verbosity-set levels, the Log tab following and hiding per
+  the console level, the colored level name, line order, font, and cap; the
+  fake `ktl` records `logger()`/`loglevel()` calls. An offscreen render
+  confirmed the colors and font.
+- Docs: README (verbosity), the user manual (Log tab), `GUI_REFERENCE.md`
+  (§2 logging), `KTL_REFERENCE.md` (§3.7), and the plan (§5.1 item removed).
+
+Full suite: `353 passed, 8 skipped`.
+
+## Log tab: the console's format, ~80 columns, no status/step lines (2026-11-17)
+
+Follow-up to the previous entry, at the user's request: the Log tab is now
+simply a repeated view of the terminal output.
+
+- **Format:** the `QtLogHandler` uses a new instance of the console's own
+  formatter (`type(log.sh.formatter)()`: `StreamFormatter`, or
+  `DebugStreamFormatter` at debug level), so the text matches the console
+  exactly, including `[LEVEL] - ` and, at debug level, the calling
+  file/function/line. New `focus_control_panel.LogView` (a
+  `QPlainTextEdit`) renders the formatter's ANSI codes (bold, 24-bit
+  color) as Qt text formats. `GuiFormatter` was removed (unused), and
+  `record_logged` is back to carrying just the text.
+- **Width:** at the default 1200x600 window the Log tab was about 98
+  columns wide on macOS (Menlo 10 pt). `LogView` now resizes its font
+  whenever it's resized, to the largest quarter-point size that fits 80
+  columns (6-18 pt); since glyph widths step, it lands at about 80-85
+  columns (84 at the default window size).
+- **No status/step lines:** removed `FocusControlPanel.status_label`,
+  `step_label`, `show_status`, `update_step`, and `reset`;
+  `show_best_focus`/`show_nearest_target` now only fill in their fields,
+  and `set_stopping` only disables the Interrupt buttons. Everything those
+  lines showed was already logged; the one exception, the "Stopping --
+  waiting for the current exposure to finish..." notice, is now logged by
+  `Controller.stop`.
+- Tests: Controller and smoke tests check the Log tab's text instead of
+  the status/step labels; new `LogView` tests (ANSI rendering, matching the
+  console formatter, line order, the 80-column fit at several widths, the
+  minimum font size, the line cap) and a check that the Log tab holds only
+  the log. The Help text and user manual no longer mention a status line.
+
+Full suite: `353 passed, 8 skipped`.

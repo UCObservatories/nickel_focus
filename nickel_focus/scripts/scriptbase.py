@@ -109,10 +109,12 @@ class ScriptBase:
             return parser
         # Add the logging options
         parser.add_argument(
-            '-v', '--verbosity', type=int, default=1,
-            help='Verbosity level, which must be 0, 1, or 2.  Level 0 includes warning and error '
-                 'messages, level 1 adds informational messages, and level 2 adds debugging '
-                 'messages and the calling sequence.'
+            '-v', '--verbosity', type=int, default=1, choices=[0, 1, 2, 3],
+            help='Verbosity level, which must be 0, 1, 2, or 3.  Level 0 includes warning and '
+                 'error messages, level 1 adds informational messages, level 2 adds debugging '
+                 'messages and the calling sequence, and level 3 adds the KTL package\'s own '
+                 'debugging messages.  Warnings and errors from KTL are always included; level 2 '
+                 'adds its notices.'
         )
         parser.add_argument(
             '--log_file', type=str, default='default' if default_log_file else None,
@@ -120,7 +122,7 @@ class ScriptBase:
                  'a log file is not produced.'
         )
         parser.add_argument(
-            '--log_level', type=int, default=None,
+            '--log_level', type=int, default=None, choices=[0, 1, 2, 3],
             help='Verbosity level for the log file.  If a log file is produce and this is None, '
                  'the file log will match the console stream log.'
         )
@@ -129,7 +131,10 @@ class ScriptBase:
     @classmethod
     def init_log(cls, args):
         """
-        Initialize the logger provided the command-line arguments.
+        Initialize the logger provided the command-line arguments: the console
+        and log-file levels, and how much of the KTL package's own log to
+        include (:attr:`~nickel_focus.pkg.logger.NickelFocusLogger.ktl_level`),
+        which follows the more verbose of the console and the log file.
         """
         level = log.convert_verbosity_to_logging_level(args.verbosity)
         log_file_level = (
@@ -143,6 +148,12 @@ class ScriptBase:
         else:
             _log_file = args.log_file
         log.init(level=level, log_file=_log_file, log_file_level=log_file_level)
+        # KTL filters its own messages before this log sees them, so it must
+        # pass on whatever the more verbose of the console and file wants.
+        verbosity = args.verbosity
+        if _log_file is not None and args.log_level is not None:
+            verbosity = max(verbosity, args.log_level)
+        log.ktl_level = log.convert_verbosity_to_ktl_level(verbosity)
 
     @classmethod
     def default_log_file(cls):

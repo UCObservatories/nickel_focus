@@ -186,24 +186,41 @@ display and the focus curve) is mediated by the Controller reacting to one
 signal and calling methods on multiple views -- no view ever calls another
 view's methods directly.
 
-The Log tab's scrolling history (`FocusControlPanel.log_widget`) is
-populated entirely by real `nickel_focus.log` output, not by view methods
-appending text directly: `Controller.__init__` attaches a `QtLogHandler`
-(`gui/log_handler.py`) to the `nickel_focus.log` singleton, formatted with
-`pkg/logger.GuiFormatter`, which forwards each log record into the Log tab
-via a Qt signal -- safe even when the record is logged from a background
+The Log tab (`FocusControlPanel.log_widget`, a `LogView`) is a repeated view
+of the console's log output, and holds nothing else -- there is no separate
+status or step line. It's populated entirely by real `nickel_focus.log`
+output: `Controller.__init__` attaches a `QtLogHandler`
+(`gui/log_handler.py`) to the `nickel_focus.log` singleton, which forwards
+each formatted record into the Log tab via a Qt signal -- safe even when the record is logged from a background
 thread (e.g. inside a `FocusWorker`/`SlewWorker`, or from `focus.py`/
 `photometry.py` while one is running). The Controller's own `log.info(...)`/
 `log.error(...)` calls (including its `_fail(message, exc=None)` helper,
-used everywhere a failure needs to be both logged -- with the exception's
-traceback, if given -- and shown) are what actually drive the Log tab's
-content. For each message, the Controller builds the text once, logs it,
-and passes the same string to the view (`FocusControlPanel.show_status`/
-`update_step`, or `show_best_focus`/`show_nearest_target`, which also fill
-in fields), which only updates the status/step labels. Because `log` is a module-level singleton rather than
+used for every failure, which logs the message with the exception's
+traceback, if given) are what drive the Log tab's content: step results,
+fitted best focus, completed slews and exposures, nearest targets, and
+failures are all simply logged. Where a result also fills in a field, the
+Controller calls the view for that alone (`show_best_focus` sets the Single
+tab's default, `show_nearest_target` the Slew tab's target). Because `log` is a module-level singleton rather than
 one per `Controller`, `Controller.__init__` calls
 `log.remove_handlers_of_type(QtLogHandler)` before attaching its own, so a
-handler pointing at a since-destroyed window never lingers. See
+handler pointing at a since-destroyed window never lingers.
+
+The Log tab shows exactly what the console shows, as the console shows it:
+the `QtLogHandler`'s level is the console handler's (`log.sh.level`), which
+`scripts/focus_gui.py` sets from `--verbosity` via `ScriptBase.init_log`
+(along with `--log_file`/`--log_level`), and its formatter is a new
+instance of the console's (`StreamFormatter`, or `DebugStreamFormatter` at
+debug level, which adds the calling file/function/line). Those formatters
+color the text with ANSI escape codes (`pkg/logger.color_text`), which
+`LogView.append_text` renders as Qt text formats (bold, 24-bit color)
+instead of showing them. `LogView` uses the system's fixed-width font,
+re-sized whenever the view is resized to the largest size that fits
+`LogView.TARGET_COLUMNS` (80) characters across (between 6 and 18 pt;
+glyph widths step, so it typically lands at 80-85 columns); keeps the most
+recent `LogView.MAX_LINES` (5000) lines; stays scrolled to the newest line
+unless the user has scrolled up; and is never cleared: like the console,
+it's one continuous record of the session. KTL's own log is part of this stream
+too, as `ktl: ...` messages (see `services/base.py`). See
 `claude/GUI_LOGGING_PLAN.md` for the full design rationale and phased
 implementation history.
 
@@ -265,7 +282,7 @@ implementation history.
   directly.
 - **Controller → Views**: exclusively via direct method calls (e.g.
   `self.window.image_panel.add_result(result)`,
-  `self.window.control_panel.show_status(message)`) -- views expose a
+  `self.window.control_panel.show_best_focus(best_focus)`) -- views expose a
   small "public API used by the Controller" for this, documented at the
   top of each view's method list.
 - **Controller → FocusWorker**: the Controller constructs a new
@@ -418,3 +435,4 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `6227274` | 2026-11-17 | Services monitor their status/display keywords and register heartbeats at construction; checks distinguish "condition false" from "no reply" (`check`/`require`); live heartbeat test. |
 | `a37e42c` | 2026-11-17 | Status indicators and current position follow keyword broadcasts (`KTLService.subscribe` → `gui/ktl_bridge.py` → queued signal), replacing the 1 Hz poll; position redraws limited to every 200 ms. |
 | `50b703f` | 2026-11-17 | Exposure fields follow the camera both ways: broadcasts update all three tabs (outside changes logged); edits write to the camera at once, with the exposure time light red until Enter; unknown speed/binning values added to the options. |
+| *pending* | 2026-11-17 | Log tab repeats the console -- same level (`nickel_focus_gui` now applies `-v`/`--log_file`/`--log_level`), format, and colors, in a fixed-width font sized to ~80 columns -- keeps 5000 lines, is never cleared, and has no status/step lines; KTL's log included. |

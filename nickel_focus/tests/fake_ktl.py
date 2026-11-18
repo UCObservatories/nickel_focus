@@ -224,22 +224,41 @@ class FakeService:
 
 class FakeKTL:
     """
-    Stand-in for the :mod:`ktl` module: :meth:`cache` and the two exception
-    classes, over a set of :class:`FakeKeyword` objects.
+    Stand-in for the :mod:`ktl` module: :meth:`cache`, :meth:`logger`,
+    :meth:`loglevel`, the log-level constants, and the two exception classes,
+    over a set of :class:`FakeKeyword` objects.
 
     Attributes
     ----------
     writes : :obj:`list`
         Every write, as ``(service, keyword, value)``, in order.
+    log_destinations, log_levels : :obj:`list`
+        Every destination given to :meth:`logger`, and every level given to
+        :meth:`loglevel`, in order.
     """
     TimeoutException = TimeoutException
     ktlError = ktlError
+    LOG_NONE, LOG_ERROR, LOG_WARN, LOG_NOTICE, LOG_INFO, LOG_DEBUG = range(6)
 
     def __init__(self):
         self.lock = threading.RLock()
         self.keywords = {}
         self.services = {}
         self.writes = []
+        self.log_destinations = []
+        self.log_levels = []
+
+    def logger(self, destination='not specified'):
+        """Like ``ktl.logger``: record the new destination."""
+        if destination != 'not specified':
+            self.log_destinations.append(destination)
+        return destination
+
+    def loglevel(self, level=None):
+        """Like ``ktl.loglevel``: record the new level."""
+        if level is not None:
+            self.log_levels.append(level)
+        return level
 
     def define(self, service, name, value, on_write=None):
         """Add a keyword with an initial value and an optional write hook."""

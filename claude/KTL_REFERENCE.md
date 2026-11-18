@@ -310,10 +310,27 @@ raises `NoHeartbeatsError` if no heartbeat applies. We don't use it; see
 
 ### 3.7 KTL's own logging
 
-KTL logs through its own Lumberjack thread to `sys.stderr`, at level
-`ERROR` by default -- separate from `nickel_focus.log`. Warnings such as
-"timeout request ignored" are therefore invisible unless the level is raised
-with `ktl.loglevel(ktl.LOG_WARN)` (or `LOG_DEBUG`).
+KTL logs through its own Lumberjack thread (`Lumberjack.py`), to
+`sys.stderr` and at level `ERROR` by default -- separate from
+`nickel_focus.log`. `ktl.loglevel(level)` sets which severities it emits
+(`LOG_NONE`, `LOG_ERROR`, `LOG_WARN`, `LOG_NOTICE`, `LOG_INFO`, `LOG_DEBUG`);
+`ktl.logger(destination)` sets where they go: `'stderr'`, `'stdout'`, or any
+object with a `.write()` method. For each message the Lumberjack calls
+`destination.write('<unix time> <flag>: <text>\n')` from its own thread,
+the flag being `E`/`W`/`N`/`I`/`D`; at `LOG_DEBUG` it also calls
+`destination.flush()` (errors from that are ignored).
+
+**Our use:** when the first service object is constructed,
+`services/base.py`'s `route_ktl_logging` points `ktl.logger` at a
+`KTLLogWriter`, which logs each line's text to `nickel_focus.log` as
+`ktl: <text>` -- `E` as ERROR, `W` as WARNING, `N` as INFO, and `I`/`D` as
+DEBUG (KTL's "info" messages are internal detail). It sets `ktl.loglevel`
+from `log.ktl_level`, which the scripts set from `--verbosity` (the more
+verbose of it and a log file's `--log_level`): `LOG_WARN` for 0 and 1,
+`LOG_NOTICE` for 2, `LOG_DEBUG` for 3 (`LOG_WARN` if never set). The level
+is re-applied whenever a service is constructed; `ktl` isn't imported just
+for this. Warnings such as "timeout request ignored" therefore appear in the
+console, the log file, and the GUI's Log tab.
 
 ### 3.8 Dictionary-style access -- not used by `nickel_focus`
 
@@ -470,4 +487,5 @@ use it.
 | `a37e42c` | 2026-11-17 | §3.1, §3.3, §4: callbacks (clones, delivery after reads), `KTLService.subscribe`, and the GUI's subscriptions replacing its 1 Hz poll; §3.6: heartbeat state and `isAlive()`. |
 | `50b703f` | 2026-11-17 | §4: the exposure fields' subscriptions and writes; `ExposureConfig.setting_value`/`keywords`. |
 | `7efcccd` | 2026-11-17 | §3.2, §4: the slew target is written as binary radians; §4.1: `AMPCONFLIST`'s values confirmed at the telescope. |
-| *pending* | 2026-11-17 | §3.4: expression syntax (quoting, `$service.KEYWORD`, `or`); §4, §4.1: exposures use `FITSFILE` for their path and fail on `EXPSTATE == Error`. |
+| `1ac2ce3` | 2026-11-17 | §3.4: expression syntax (quoting, `$service.KEYWORD`, `or`); §4, §4.1: exposures use `FITSFILE` for their path and fail on `EXPSTATE == Error`. |
+| *pending* | 2026-11-17 | §3.7: KTL's log routed into `nickel_focus.log`, its level following `--verbosity`. |

@@ -1,8 +1,12 @@
 """Tests for :mod:`gui.views.focus_control_panel`."""
+import logging
 from pathlib import Path
 
-from nickel_focus.gui.qt import QtCore, QtWidgets
-from nickel_focus.gui.views.focus_control_panel import FocusControlPanel
+import pytest
+
+from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
+from nickel_focus.pkg.logger import LEVEL_COLORS, StreamFormatter, clear_text_color, color_text
+from nickel_focus.gui.views.focus_control_panel import FocusControlPanel, LogView
 from nickel_focus.tests.gui.keyboard import press, type_and_enter, type_text
 
 
@@ -57,7 +61,7 @@ def test_focus_value_entries_are_integers(qapp):
     # A focus value/step size is a whole-unit telescope position, even
     # though a best-fit focus can land on a fractional value (that gets
     # rounded before it's ever offered as the Single tab's default --
-    # see the show_best_focus tests below).
+    # see the show_best_focus test below).
     panel = FocusControlPanel()
     integer_entries = (
         panel.single_focus_spin,
@@ -323,7 +327,7 @@ def test_tab_bar_stays_enabled_while_running(qapp):
     assert panel.tabs.isEnabled(), 'the tab bar itself should never be disabled'
 
 
-def test_set_stopping_disables_interrupt_buttons_and_shows_status(qapp):
+def test_set_stopping_disables_interrupt_buttons(qapp):
     panel = FocusControlPanel()
     panel.set_running(True)
 
@@ -331,77 +335,101 @@ def test_set_stopping_disables_interrupt_buttons_and_shows_status(qapp):
 
     assert not panel.grid_interrupt_button.isEnabled(), 'Interrupt should disable itself once clicked'
     assert not panel.auto_interrupt_button.isEnabled(), 'Interrupt should disable itself once clicked'
-    assert 'Stopping' in panel.status_label.text(), 'status should explain the wait'
 
 
-def test_update_step_updates_label(qapp):
+def test_show_best_focus_sets_the_single_tab_default(qapp):
     panel = FocusControlPanel()
 
-    panel.update_step('Step 2/5 — Focus 345')
+    panel.show_best_focus(356.6)
 
-    assert panel.step_label.text() == 'Step 2/5 — Focus 345', \
-        'update_step should show the given text'
-
-
-def test_show_best_focus_updates_status_and_single_tab_default(qapp):
-    panel = FocusControlPanel()
-
-    panel.show_best_focus(356.6, 'Sequence finished')
-
-    assert panel.status_label.text() == 'Sequence finished', \
-        'show_best_focus should show the given text as the status'
     assert panel.single_focus_spin.value() == 357, \
         'the Single tab default should be the best focus, rounded to the nearest integer'
 
 
-def test_show_status_updates_status(qapp):
+# -- the Log tab ----------------------------------------------------------------
+
+def test_log_tab_holds_only_the_log(qapp):
     panel = FocusControlPanel()
-    panel.show_status('Stopped early -- not enough points for a focus fit')
 
-    assert panel.status_label.text() == 'Stopped early -- not enough points for a focus fit', \
-        'show_status should show the given text'
+    labels = panel.log_tab.widget().findChildren(QtWidgets.QLabel)
 
-
-def test_status_and_step_labels_wrap_instead_of_widening(qapp):
-    # An unwrapped QLabel reports its entire single-line text width as
-    # its minimum size, which would balloon the whole panel's width to
-    # fit a long message (e.g. a failure listing several file paths).
-    panel = FocusControlPanel()
-    assert panel.status_label.wordWrap(), 'status_label must wrap long messages'
-    assert panel.step_label.wordWrap(), 'step_label must wrap long messages'
-
-    # Realistic long message (space-separated words) -- word wrap can
-    # only break between words, so a single unbroken token of the same
-    # length wouldn't exercise the fix meaningfully.
-    long_message = 'Expected to find the following files, but they are not available: ' + \
-        ', '.join(f'/some/long/data/directory/n{2000 + i}.fits' for i in range(10))
-    panel.show_status(long_message)
-
-    assert panel.status_label.minimumSizeHint().width() < 200, \
-        'a long message should not inflate the label (and thus the panel) width'
+    assert labels == [], 'the Log tab should show only the log stream, no status or step lines'
+    assert isinstance(panel.log_widget, LogView), 'the Log tab should be a LogView'
 
 
-def test_reset_clears_status_and_log(qapp):
-    panel = FocusControlPanel()
-    panel.update_step('Step 1')
-    panel.show_status('oops')
-    panel.append_log_line('oops')  # the view itself no longer appends to the log
-
-    panel.reset()
-
-    assert panel.step_label.text() == 'Step: —', 'reset should restore the step placeholder'
-    assert panel.status_label.text() == '', 'reset should clear the status'
-    assert panel.log_widget.toPlainText() == '', 'reset should clear the Log tab'
+def _char_format_at(view, position):
+    cursor = QtGui.QTextCursor(view.document())
+    cursor.setPosition(position + 1)  # the format of the character before the cursor
+    return cursor.charFormat()
 
 
-def test_reset_does_not_touch_the_single_tab_default(qapp):
-    panel = FocusControlPanel()
-    panel.show_best_focus(356.6, 'Sequence finished')
+def test_log_view_renders_console_colors(qapp):
+    view = LogView()
+    text = color_text('[WARNING]', LEVEL_COLORS['warning'], bold=True, nchar=10) + ' - careful'
 
-    panel.reset()
+    view.append_text(text)
 
-    assert panel.single_focus_spin.value() == 357, \
-        "reset() clears status/log, but shouldn't discard the Single tab's best-focus default"
+    assert view.toPlainText() == ' [WARNING] - careful', \
+        'the color codes should be rendered, not shown'
+    level_format = _char_format_at(view, 2)
+    message_format = _char_format_at(view, len(' [WARNING] - c'))
+    assert level_format.foreground().color() == QtGui.QColor(*LEVEL_COLORS['warning']), \
+        'the level tag should be shown in its console color'
+    assert level_format.fontWeight() == QtGui.QFont.Weight.Bold, \
+        'the level tag should be bold, as in the console'
+    assert message_format.fontWeight() != QtGui.QFont.Weight.Bold, \
+        'the color reset should return the message to plain text'
+
+
+def test_log_view_matches_the_console_formatter(qapp):
+    view = LogView()
+    record = logging.LogRecord('nickel_focus', logging.INFO, __file__, 1, 'hello', (), None)
+
+    view.append_text(StreamFormatter().format(record))
+
+    assert view.toPlainText() == clear_text_color(StreamFormatter().format(record)), \
+        'the Log tab should show exactly the console text, without the escape codes'
+
+
+def test_log_view_appends_in_order(qapp):
+    view = LogView()
+
+    view.append_text('first')
+    view.append_text('second\ntraceback line')
+
+    assert view.toPlainText().splitlines() == ['first', 'second', 'traceback line'], \
+        'records should be appended in order, one line each (or more, for multi-line text)'
+
+
+def test_log_view_keeps_the_log_and_5000_lines(qapp):
+    view = LogView()
+
+    assert QtGui.QFontInfo(view.font()).fixedPitch(), 'the log should use a fixed-width font'
+    assert view.maximumBlockCount() == 5000, 'the log should keep the most recent 5000 lines'
+
+
+@pytest.mark.parametrize('width', [450, 600, 900])
+def test_log_view_font_fits_about_80_columns(qapp, width):
+    view = LogView()
+    view.resize(width, 300)
+    view.show()
+    qapp.processEvents()
+
+    # Font widths come in discrete steps, so the fit is approximate.
+    assert 74 <= view.columns() <= 86, \
+        f'at {width} px the font should fit about 80 columns, not {view.columns()}'
+    view.close()
+
+
+def test_log_view_font_size_is_bounded(qapp):
+    view = LogView()
+    view.resize(100, 300)
+    view.show()
+    qapp.processEvents()
+
+    assert view.font().pointSizeF() == view.MIN_POINT_SIZE, \
+        'a very narrow view should use the smallest font, not an unreadable one'
+    view.close()
 
 
 def test_browse_button_updates_datadir(qapp, monkeypatch):
@@ -445,17 +473,15 @@ def test_set_current_position_updates_labels(qapp):
         'the current-Dec label should show exactly what was passed in'
 
 
-def test_show_nearest_target_populates_target_fields_and_status(qapp):
+def test_show_nearest_target_populates_target_fields(qapp):
     panel = FocusControlPanel()
 
-    panel.show_nearest_target('00:30:07.29', '+29:45:06.20', 'Nearest target: Pointing00')
+    panel.show_nearest_target('00:30:07.29', '+29:45:06.20')
 
     assert panel.slew_target_ra_edit.text() == '00:30:07.29', \
         'the target RA field should be populated with the found target'
     assert panel.slew_target_dec_edit.text() == '+29:45:06.20', \
         'the target Dec field should be populated with the found target'
-    assert panel.status_label.text() == 'Nearest target: Pointing00', \
-        'the found target should be reported as the status'
 
 
 def test_preferred_height_excluding_help_ignores_the_tallest_page(qapp):

@@ -23,7 +23,6 @@ from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.model.focus_worker import FocusWorker
 from nickel_focus.gui.model.slew_worker import SlewWorker
 from nickel_focus.gui.qt import QtCore
-from nickel_focus.pkg.logger import GuiFormatter
 
 
 class Controller(QtCore.QObject):
@@ -117,8 +116,11 @@ class Controller(QtCore.QObject):
         # (re)constructed.
         log.remove_handlers_of_type(QtLogHandler)
         self._log_handler = QtLogHandler(self)
-        self._log_handler.setFormatter(GuiFormatter())
-        self._log_handler.setLevel(logging.INFO)
+        # The Log tab repeats the console: the same level (e.g. per the GUI
+        # script's --verbosity) and the same formatter, whose ANSI colors the
+        # Log tab renders.
+        self._log_handler.setFormatter(type(log.sh.formatter)())
+        self._log_handler.setLevel(log.sh.level)
         self._log_handler.record_logged.connect(window.control_panel.append_log_line)
         log.addHandler(self._log_handler)
 
@@ -245,7 +247,6 @@ class Controller(QtCore.QObject):
         self._standalone_focus_sequence = None
         self.window.image_panel.reset()
         self.window.curve_panel.reset()
-        self.window.control_panel.reset()
 
         exp_kwargs = (
             None if focus_sequence_type == 'archive'
@@ -332,6 +333,7 @@ class Controller(QtCore.QObject):
         if self.focus_worker is None:
             return
         self.focus_worker.request_stop()
+        log.info('Stopping -- waiting for the current exposure to finish...')
         self.window.control_panel.set_stopping()
 
     def set_method(self, method):
@@ -340,10 +342,7 @@ class Controller(QtCore.QObject):
         ``method`` is ``'brightest'`` (the default) or an ``(x, y)`` coordinate
         tuple (from
         :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`).
-        The coordinates actually measured are reported per-exposure on the Log
-        tab
-        (:meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.update_step`/
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_status`).
+        The coordinates actually measured are logged for each exposure.
         """
         self.method = method
 
@@ -436,12 +435,11 @@ class Controller(QtCore.QObject):
 
     def _fail(self, message, exc=None):
         """
-        Log ``message`` as an error and report it as a failure on the Log tab.
-        If ``exc`` (the :obj:`Exception` that caused the failure) is provided,
-        its full traceback is logged along with ``message``.
+        Log ``message`` as an error (which the Log tab shows, like the
+        console).  If ``exc`` (the :obj:`Exception` that caused the failure) is
+        provided, its full traceback is logged along with ``message``.
         """
         log.error(message, exc_info=exc)
-        self.window.control_panel.show_status(message)
 
     def _find_nearest(self, obj_search_str, file=None):
         """
@@ -476,7 +474,7 @@ class Controller(QtCore.QObject):
         dec_text = dec.to_string(unit='deg', sep=':', pad=True, alwayssign=True, precision=2)
         text = f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})'
         log.info(text)
-        self.window.control_panel.show_nearest_target(ra_text, dec_text, text)
+        self.window.control_panel.show_nearest_target(ra_text, dec_text)
 
     def _start_focus_worker(self, focus_sequence, mode, exp_kwargs=None, focus_value=None):
         """
@@ -501,7 +499,7 @@ class Controller(QtCore.QObject):
         """
         Handle one :class:`~nickel_focus.focus.StepResult` from the worker's
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.stepComplete`
-        signal: update the image/curve panels and the Log tab's step display.
+        signal: update the image/curve panels and log the step.
         """
         is_reanalyze = self.focus_worker is not None and self.focus_worker.mode == 'reanalyze'
         reanalyzing_standalone = (
@@ -534,7 +532,6 @@ class Controller(QtCore.QObject):
         if result.is_outlier:
             step_text += '  [outlier]'
         log.info(step_text)
-        self.window.control_panel.update_step(step_text)
 
     def _on_focus_sequence_finished(self, best_focus, best_fwhm):
         """
@@ -544,7 +541,7 @@ class Controller(QtCore.QObject):
         """
         text = f'Sequence finished: best focus {best_focus:.1f}, expected FWHM {best_fwhm:.2f}'
         log.info(text)
-        self.window.control_panel.show_best_focus(best_focus, text)
+        self.window.control_panel.show_best_focus(best_focus)
 
     def _on_single_exposure_finished(self, result):
         """
@@ -569,7 +566,6 @@ class Controller(QtCore.QObject):
             f'source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
         )
         log.info(text)
-        self.window.control_panel.show_status(text)
 
     def _on_focus_worker_finished(self):
         """
@@ -607,7 +603,6 @@ class Controller(QtCore.QObject):
         """
         text = 'Move to target complete.'
         log.info(text)
-        self.window.control_panel.show_status(text)
 
     def _on_slew_worker_finished(self):
         """

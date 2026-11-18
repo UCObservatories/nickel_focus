@@ -639,11 +639,6 @@ run there.
    They just stop changing. `ktl`'s heartbeat state would tell, but only by
    polling `Keyword.isAlive()` (REF §3.6); `KTL_SUGGESTIONS.md` §5 proposes
    a notification. Whether it matters in practice is unknown.
-5. **KTL's own warnings are hidden.** KTL logs at `ERROR` level by default
-   (REF §3.7), so its warnings -- e.g. a timeout it ignores -- never appear.
-   *Option:* raise the level, or route KTL's log into `nickel_focus.log`
-   with `ktl.logger(...)` (which accepts any object with a `.write()`
-   method), at least during commissioning.
 
 ### 5.2 Settings and assumptions to confirm at the telescope
 

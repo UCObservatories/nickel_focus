@@ -4,6 +4,7 @@ Tests for :mod:`nickel_focus.services`: the boundary between
 ``fake_ktl.py``).
 """
 import gc
+import logging
 import importlib.abc
 import importlib.util
 import sys
@@ -11,6 +12,7 @@ import sys
 import pytest
 
 from nickel_focus import focus
+from nickel_focus import log
 from nickel_focus.services import base
 from nickel_focus.services import (
     DEFAULT_READ_TIMEOUT, KTLError, KTLReadOnlyError, KTLService, KTLTimeoutError,
@@ -266,3 +268,63 @@ def test_read_only_service_can_subscribe(fake_telescope):
     NickelPoco(read_only=True).subscribe(['POCOT'], lambda *args: received.append(args))
     assert received == [('nickelpoco', 'POCOT', '0')], 'subscribing only reads'
     assert fake_telescope.ktl.writes == [], 'subscribing should write nothing'
+
+
+# -- KTL's own log -------------------------------------------------------------
+
+@pytest.mark.parametrize('flag, level', [
+    ('E', logging.ERROR), ('W', logging.WARNING), ('N', logging.INFO),
+    ('I', logging.DEBUG), ('D', logging.DEBUG),
+])
+def test_ktl_log_lines_are_logged_at_their_level(caplog, flag, level):
+    writer = base.KTLLogWriter()
+
+    with caplog.at_level(logging.DEBUG, logger='nickel_focus'):
+        writer.write(f'1763412345.123456 {flag}: something happened\n')
+
+    records = [r for r in caplog.records if r.getMessage() == 'ktl: something happened']
+    assert [r.levelno for r in records] == [level], \
+        f'a KTL {flag!r} message should be logged once, at {logging.getLevelName(level)}'
+
+
+def test_ktl_log_writer_waits_for_complete_lines(caplog):
+    writer = base.KTLLogWriter()
+
+    with caplog.at_level(logging.DEBUG, logger='nickel_focus'):
+        writer.write('1763412345.1 W: first ')
+        assert not caplog.records, 'an unfinished line should not be logged yet'
+        writer.write('half\n1763412345.2 E: second\n')
+        writer.flush()
+
+    assert [r.getMessage() for r in caplog.records] == ['ktl: first half', 'ktl: second'], \
+        'lines split across writes should be logged whole, in order'
+
+
+def test_unrecognized_ktl_log_line_is_logged_as_written(caplog):
+    with caplog.at_level(logging.DEBUG, logger='nickel_focus'):
+        base.KTLLogWriter().write('not a KTL log line\n')
+
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == \
+        [(logging.WARNING, 'ktl: not a KTL log line')], \
+        'a line in an unexpected form should be logged as a warning, as written'
+
+
+def test_ktl_log_is_routed_once_with_the_default_level(fake_telescope):
+    NickelPoco()
+    NickelPoco(read_only=True)
+    fake = fake_telescope.ktl
+
+    assert len(fake.log_destinations) == 1, 'KTL\'s log should be routed once per ktl module'
+    assert isinstance(fake.log_destinations[0], base.KTLLogWriter), \
+        'KTL\'s log should go to the nickel_focus log'
+    assert fake.log_levels and set(fake.log_levels) == {fake.LOG_WARN}, \
+        'by default, KTL should pass on its warnings and errors'
+
+
+def test_ktl_log_level_follows_the_verbosity(fake_telescope):
+    log.ktl_level = 'debug'  # as set by --verbosity 3; restored after the test
+
+    NickelPoco()
+
+    assert fake_telescope.ktl.log_levels[-1] == fake_telescope.ktl.LOG_DEBUG, \
+        'the KTL level set from the verbosity should be applied'

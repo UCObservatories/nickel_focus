@@ -95,8 +95,8 @@ def test_full_live_workflow(qapp, fake_hardware):
         'the simulated focus should have been commanded to the (rounded) fitted best focus'
     assert len(window.image_panel._results) == 6, 'the confirmation exposure should be displayed'
     assert len(window.curve_panel._results) == 5, 'a confirmation exposure is not sequence data'
-    assert f'{best_focus:.0f}' in panel.status_label.text(), \
-        'the result should be reported in the status'
+    assert f'{best_focus:.0f}' in panel.log_widget.toPlainText(), \
+        'the result should be logged, and so shown on the Log tab'
 
     # 5. Mark a different source. A sequence is loaded now,
     #    so this reanalyzes *it*, not the by-then-secondary standalone

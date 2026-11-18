@@ -32,6 +32,10 @@ class NickelFocusGUI(scriptbase.ScriptBase):
         from nickel_focus.gui import launcher
         from nickel_focus.gui.controller import Controller
 
+        # The console and the Log tab (which follows the console's level),
+        # the log file, and how much of KTL's own log to include.
+        cls.init_log(args)
+
         app = launcher.build_app()
         window = launcher.build_window()
         # `controller` looks unused (hence the noqa), but it must stay alive

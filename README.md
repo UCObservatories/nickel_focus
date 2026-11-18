@@ -89,7 +89,10 @@ Three command-line scripts are installed. All three share a common set of
 logging options:
 
  - `-v`/`--verbosity`: Set the verbosity level: 0 = warnings/errors only, 1 =
-   default, adds informational messages, 2 = adds debug messages.
+   default, adds informational messages, 2 = adds debug messages, 3 = also
+   adds the KTL package's own debug messages.  Warnings and errors from KTL
+   are always included, and level 2 adds its notices.  In the GUI, the Log tab
+   shows the same messages as the console.
 
  - `--log_file`: All logging messages are also passed to a log file; set to
    `default` for an automatically generated file name.

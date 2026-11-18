@@ -15,11 +15,19 @@ all.  If it can't be imported (not installed, or installed but broken),
 a warning is issued once, :func:`ktl_available` returns False, and
 constructing a service raises :class:`KTLUnavailableError`.
 
+KTL's own log -- which by default goes to ``stderr`` and includes only errors
+-- is passed on to the :mod:`nickel_focus` log once the first service object
+is constructed (see :func:`route_ktl_logging`).
+
 Only the named :mod:`ktl` methods are used: ``ktl.cache``, the keyword
-methods ``read``, ``write``, ``monitor``, ``waitFor``, and ``callback``, and
-the service method ``heartbeat``.
+methods ``read``, ``write``, ``monitor``, ``waitFor``, and ``callback``, the
+service method ``heartbeat``, and ``ktl.logger``/``ktl.loglevel``.
 """
+import logging
+import re
 import warnings
+
+from nickel_focus import log
 
 try:
     import ktl
@@ -51,6 +59,81 @@ class KTLReadOnlyError(KTLError):
 def ktl_available():
     """Return True if the :mod:`ktl` package was imported successfully."""
     return ktl is not None
+
+
+class KTLLogWriter:
+    """
+    A destination for :func:`ktl.logger` that passes KTL's log messages on to
+    the :mod:`nickel_focus` log.
+
+    KTL's logging thread writes one line per message,
+    ``'<time> <flag>: <text>'``, where the flag gives its severity.  Each
+    line's text is logged as ``'ktl: <text>'`` at the matching level (see
+    :attr:`LEVELS`); KTL's own timestamp is dropped.  A line in any other
+    form is logged as a warning, as written.
+    """
+
+    LEVELS = {
+        'E': logging.ERROR,
+        'W': logging.WARNING,
+        'N': logging.INFO,
+        # KTL's "info" messages are internal detail, so they're debug output here.
+        'I': logging.DEBUG,
+        'D': logging.DEBUG,
+    }
+    """The log level for each KTL severity flag."""
+
+    _LINE = re.compile(r'^\d+(\.\d*)? (?P<flag>\S): (?P<text>.*)$', re.DOTALL)
+
+    def __init__(self):
+        self._partial = ''
+
+    def write(self, text):
+        """Log each complete line of ``text``; keep any unfinished line for later."""
+        lines = (self._partial + text).split('\n')
+        self._partial = lines.pop()
+        for line in lines:
+            if line.strip():
+                self._log_line(line)
+        return len(text)
+
+    def flush(self):
+        """Nothing to flush: each line is logged as soon as it's complete."""
+
+    def _log_line(self, line):
+        match = self._LINE.match(line)
+        if match is None or match['flag'] not in self.LEVELS:
+            log.warning(f'ktl: {line}')
+            return
+        log.log(self.LEVELS[match['flag']], f"ktl: {match['text']}")
+
+
+_KTL_LEVELS = {'warn': 'LOG_WARN', 'notice': 'LOG_NOTICE', 'debug': 'LOG_DEBUG'}
+
+# The ktl module whose log has been routed (see route_ktl_logging).
+_routed_ktl = None
+
+
+def route_ktl_logging(ktl_module):
+    """
+    Pass KTL's own log on to the :mod:`nickel_focus` log (once per ``ktl``
+    module), and set how much of it KTL emits from
+    :attr:`log.ktl_level <nickel_focus.pkg.logger.NickelFocusLogger.ktl_level>`
+    (``'warn'`` unless set otherwise, e.g. by a script's ``--verbosity``).
+
+    Called whenever a :class:`KTLService` is constructed, so the level is
+    re-applied each time; ``ktl`` itself is never imported just for this.
+
+    Parameters
+    ----------
+    ktl_module : module
+        The :mod:`ktl` module in use.
+    """
+    global _routed_ktl
+    if _routed_ktl is not ktl_module:
+        ktl_module.logger(KTLLogWriter())
+        _routed_ktl = ktl_module
+    ktl_module.loglevel(getattr(ktl_module, _KTL_LEVELS[log.ktl_level]))
 
 
 def require(result, false_message, no_reply_message):
@@ -141,6 +224,7 @@ class KTLService:
             )
         # The module this service talks to, kept for its lifetime.
         self._ktl = ktl
+        route_ktl_logging(ktl)
         self.read_only = read_only
         # Strong references to the callbacks registered by subscribe(): ktl
         # holds callbacks only weakly, and drops any that nothing else holds.

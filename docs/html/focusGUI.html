@@ -34,9 +34,10 @@ GUI"></a><figcaption>Figure 1: Nickel Focus GUI when first opened</figcaption></
 <p> The window has three panels.  The current exposure is displayed on the left;
 the focus curve (FWHM versus focus value) is at the upper right; and the
 controls, organized in tabs, are at the lower right.  The dividers between the
-panels can be dragged to resize them.  The <b>Log</b> tab shows the current
-status, the most recent step, and a running history of everything the GUI has
-done.  </p>
+panels can be dragged to resize them.  The <b>Log</b> tab repeats the output
+of the terminal the GUI was started from -- the same messages, in the same
+format and colors -- kept for the whole session (the most recent 5000 lines),
+in a font sized to fit about 80 characters across.  </p>
 
 <p> Only a single command that moves the telescope, adjusts the focus, or
 uses the camera can run at a time.  When a slew or a focus sequence is in
@@ -60,8 +61,8 @@ coordinates</b>; these update as the telescope reports them (at most five
 times a second).  To acquire a target with
 known coordinates, enter a sexagesimal RA and Dec under <b>Target
 coordinates</b> (e.g., 05:30:00 and +20:15:00) and press <b>Move to Target</b>.
-The status line on the <b>Log</b> tab reports when the telescope arrives or why
-the move could not be made.  You must enable movement and tracking (using POCO)
+The <b>Log</b> tab reports when the telescope arrives or why the move could not
+be made.  You must enable movement and tracking (using POCO)
 to control the telescope via the GUI.</p>
 
 <p> The right side allows you to quickly find a target near the telescope's
@@ -72,8 +73,8 @@ star.  These stars are selected from a catalog of stars that comes with the
 software.  You can also search your own starlist instead: Enter the file
 location under <b>Starlist</b> (or use <b>Browse…</b>), optionally enter part of
 an object name under <b>Target pattern</b>, and press <b>Object</b>.  The name
-and coordinates of the target found are shown in the status line; check them,
-then press <b>Move to Target</b>.  </p>
+and coordinates of the target found are reported on the <b>Log</b> tab; check
+them, then press <b>Move to Target</b>.  </p>
 
 <figure><a href="../images/focusGUI_slew.png"><img
 src="../images/focusGUI_slew.png" width="600" alt="Slew tab"></a><figcaption>Figure
@@ -127,7 +128,7 @@ src="../images/focusGUI_grid.png" width="600" alt="Grid tab"></a><figcaption>Fig
 red box around the star being measured, the measured FWHM is added to the focus
 curve, and the <b>Log</b> tab reports the step number, focus value, FWHM, and
 star position.  Once there are three or more points, a quadratic fit and its
-minimum are drawn on the curve.  When the sequence finishes, the status line
+minimum are drawn on the curve.  When the sequence finishes, the <b>Log</b> tab
 reports the best focus and the expected FWHM there (Figure 4).  If the star's
 position in one exposure is inconsistent with the others, its box is yellow and
 labeled "Outlier centroid," and its point is drawn differently on the curve.
@@ -185,9 +186,8 @@ different star. (The "Replay" tab was used to construct Figure 4.)  </p>
 <a name="troubleshooting">
 <h2>Troubleshooting</h2>
 
-<p> Every error is reported in the status line on the <b>Log</b> tab and added
-to the log history below it; unexpected errors also include the full Python
-traceback.  <b>When you encounter a problem, please provide the full Python
+<p> Every error is reported on the <b>Log</b> tab (and in the terminal);
+unexpected errors also include the full Python traceback.  <b>When you encounter a problem, please provide the full Python
 traceback to help developers determine the issue.</b> </p>
 
 <table border=1>

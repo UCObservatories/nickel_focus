@@ -57,6 +57,12 @@ def _deliver_broadcasts(controller):
     loop.exec()
 
 
+def _log_text(window):
+    """The Log tab's text, once any queued log records have been delivered."""
+    QtCore.QCoreApplication.processEvents()
+    return window.control_panel.log_widget.toPlainText()
+
+
 def _make_step_result(index=0, focus_value=350., fwhm=3.2, centroid=(12.3, 45.6),
                        is_outlier=False):
     return focus.StepResult(
@@ -103,7 +109,7 @@ def test_archive_sequence_never_uses_hardware(qapp, focus_sweep, fake_hardware):
     controller.start_focus_sequence()
     _wait_for_focus_worker(controller)
 
-    assert 'Could not start sequence' not in window.control_panel.status_label.text(), \
+    assert 'Could not start sequence' not in _log_text(window), \
         'Replay should start even when ktl is available'
     replay = controller.focus_sequence
     assert replay._focus is None and replay._exposure is None, \
@@ -148,7 +154,7 @@ def test_missing_files_reports_failure(qapp, focus_sweep):
     controller.start_focus_sequence()
 
     assert controller.focus_worker is None, 'a config error should never start a worker'
-    assert 'Could not start sequence' in window.control_panel.status_label.text(), \
+    assert 'Could not start sequence' in _log_text(window), \
         'the failure should be reported to the user'
 
 
@@ -161,16 +167,16 @@ def test_stop_delegates_to_the_focus_worker(qapp):
     controller.stop()
 
     assert stop_calls == [True], 'stop() should call request_stop() on the active worker'
-    assert 'Stopping' in window.control_panel.status_label.text(), \
-        'stop() should show the "stopping" status'
+    assert 'Stopping' in _log_text(window), \
+        'stop() should log that it is waiting for the current exposure'
 
 
 def test_stop_is_a_noop_with_nothing_running(qapp):
     window = MainWindow()
     controller = Controller(window)
     controller.stop()  # should not raise
-    assert window.control_panel.status_label.text() == '', \
-        'stop() with nothing running should leave the status unchanged'
+    assert 'Stopping' not in _log_text(window), \
+        'stop() with nothing running should log nothing about stopping'
 
 
 def test_set_method_updates_state(qapp):
@@ -283,7 +289,7 @@ def test_start_focus_sequence_without_ktl_reports_clear_failure(qapp):
     controller.start_focus_sequence()
 
     assert controller.focus_worker is None, 'no worker should start without a ktl connection'
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+    assert 'no ktl connection' in _log_text(window).lower(), \
         'the failure should explain that there is no ktl connection'
 
 
@@ -305,7 +311,7 @@ def test_take_single_exposure_without_ktl_reports_clear_failure(qapp):
     controller.take_single_exposure(340.)
 
     assert controller.focus_worker is None, 'no worker should start without a ktl connection'
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+    assert 'no ktl connection' in _log_text(window).lower(), \
         'the failure should explain that there is no ktl connection'
 
 
@@ -327,8 +333,8 @@ def test_take_single_exposure_runs_against_fake_hardware(qapp, fake_hardware):
         'the exposure should be displayed in the image panel'
     assert window.curve_panel._results == [], \
         'a standalone exposure should not appear on the focus curve'
-    assert f'{345:.0f}' in panel.status_label.text(), \
-        'the result should be reported in the status'
+    assert f'{345:.0f}' in _log_text(window), \
+        'the result should be logged, and so shown on the Log tab'
 
 
 def test_source_selection_reanalyzes_a_standalone_exposure(qapp, fake_hardware):
@@ -493,7 +499,7 @@ def test_move_to_target_runs_against_fake_telescope(qapp, fake_telescope):
     commanded_ra, commanded_dec = fake_telescope.slew_calls[0]
     assert commanded_ra == pytest.approx(5.5), \
         'the telescope should be commanded to the entered target RA, in hours'
-    assert 'complete' in window.control_panel.status_label.text().lower(), \
+    assert 'complete' in _log_text(window).lower(), \
         'a successful move should be reported'
 
 
@@ -506,7 +512,7 @@ def test_move_to_target_reports_telescope_failure(qapp, fake_telescope):
     _wait_for_slew_worker(controller)
 
     assert controller.slew_worker is None, 'the slew worker should be cleared once finished'
-    assert 'Tracking is disabled' in window.control_panel.status_label.text(), \
+    assert 'Tracking is disabled' in _log_text(window), \
         'the telescope failure message should be reported'
 
 
@@ -517,7 +523,7 @@ def test_move_to_target_reports_a_parse_failure_for_bad_coordinates(qapp, fake_t
     controller.move_to_target('not a coordinate', '+20:15:00')
 
     assert controller.slew_worker is None, 'a bad target should never start a slew worker'
-    assert 'Could not parse target coordinates' in window.control_panel.status_label.text(), \
+    assert 'Could not parse target coordinates' in _log_text(window), \
         'an unparseable target should be reported'
 
 
@@ -528,7 +534,7 @@ def test_move_to_target_without_ktl_reports_clear_failure(qapp):
     controller.move_to_target('05:30:00', '+20:15:00')
 
     assert controller.slew_worker is None, 'no worker should start without a ktl connection'
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+    assert 'no ktl connection' in _log_text(window).lower(), \
         'the failure should explain that there is no ktl connection'
 
 
@@ -567,7 +573,7 @@ def test_find_nearest_pointing_populates_target_fields(qapp, fake_telescope):
 
     assert window.control_panel.slew_target_ra_edit.text() != '', \
         'the target RA field should be populated with the found target'
-    assert 'Pointing' in window.control_panel.status_label.text(), \
+    assert 'Pointing' in _log_text(window), \
         'the found target name should be reported'
 
 
@@ -580,7 +586,7 @@ def test_find_nearest_focus_populates_target_fields(qapp, fake_telescope):
 
     assert window.control_panel.slew_target_ra_edit.text() != '', \
         'the target RA field should be populated with the found target'
-    assert 'Focusing' in window.control_panel.status_label.text(), \
+    assert 'Focusing' in _log_text(window), \
         'the found target name should be reported'
 
 
@@ -590,7 +596,7 @@ def test_find_nearest_object_requires_a_file(qapp, fake_telescope):
 
     controller.find_nearest_object('', '')
 
-    assert 'starlist file must be provided' in window.control_panel.status_label.text(), \
+    assert 'starlist file must be provided' in _log_text(window), \
         'a missing starlist file should be reported, not raised'
 
 
@@ -605,7 +611,7 @@ def test_find_nearest_object_searches_the_given_file(qapp, fake_telescope, tmp_p
 
     controller.find_nearest_object(str(path), '')
 
-    assert 'StarA' in window.control_panel.status_label.text(), \
+    assert 'StarA' in _log_text(window), \
         'the nearest target in the given file should be found and reported'
 
 
@@ -615,7 +621,7 @@ def test_find_nearest_object_reports_a_missing_file(qapp, fake_telescope):
 
     controller.find_nearest_object('/does/not/exist.txt', '')
 
-    assert 'Could not find nearest target' in window.control_panel.status_label.text(), \
+    assert 'Could not find nearest target' in _log_text(window), \
         'a missing starlist file should be reported'
 
 
@@ -625,7 +631,7 @@ def test_find_nearest_without_ktl_reports_clear_failure(qapp):
 
     controller.find_nearest_pointing()
 
-    assert 'no ktl connection' in window.control_panel.status_label.text().lower(), \
+    assert 'no ktl connection' in _log_text(window).lower(), \
         'the failure should explain that there is no ktl connection'
 
 
@@ -638,6 +644,29 @@ def test_log_records_appear_in_log_tab(qapp):
 
     assert 'hello from the logger' in window.control_panel.log_widget.toPlainText(), \
         'a log.info() call should be delivered into the Log tab'
+
+
+def test_log_tab_follows_the_console_level(qapp):
+    log.sh.setLevel(logging.DEBUG)  # as with --verbosity 2; restored after the test
+    window = MainWindow()
+    controller = Controller(window)  # noqa: F841 (kept alive)
+
+    log.debug('a debug message')
+    QtCore.QCoreApplication.processEvents()
+
+    assert 'a debug message' in window.control_panel.log_widget.toPlainText(), \
+        'with the console at debug level, the Log tab should show debug messages too'
+
+
+def test_log_tab_hides_what_the_console_hides(qapp):
+    window = MainWindow()
+    controller = Controller(window)  # noqa: F841 (kept alive)
+
+    log.debug('a hidden debug message')
+    QtCore.QCoreApplication.processEvents()
+
+    assert 'a hidden debug message' not in window.control_panel.log_widget.toPlainText(), \
+        'with the console at its default (info) level, debug messages should not appear'
 
 
 def test_repeated_controller_construction_does_not_leak_handlers(qapp):
@@ -662,8 +691,7 @@ def test_fail_logs_error_and_shows_failure(qapp, caplog):
 
     assert any(r.levelname == 'ERROR' and 'boom' in r.getMessage() for r in caplog.records), \
         'a failure should be logged as an error'
-    assert window.control_panel.status_label.text() == 'boom', \
-        'a failure should also be shown as the current status'
+    assert 'boom' in _log_text(window), 'the failure should appear on the Log tab'
 
 
 def test_slew_finished_logs_info(qapp, caplog):
@@ -678,7 +706,7 @@ def test_slew_finished_logs_info(qapp, caplog):
     ), 'a completed slew should be logged at info level'
 
 
-def test_focus_sequence_finished_logs_info_and_updates_status(qapp, caplog):
+def test_focus_sequence_finished_logs_info(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
 
@@ -693,11 +721,10 @@ def test_focus_sequence_finished_logs_info_and_updates_status(qapp, caplog):
     text = messages[0]
     assert 'best focus 356.6' in text, 'result text should show the best focus'
     assert 'expected FWHM 3.30' in text, 'result text should show the expected FWHM'
-    assert window.control_panel.status_label.text() == text, \
-        'the status label should show exactly the logged text'
+    assert text in _log_text(window), 'the logged text should appear on the Log tab'
 
 
-def test_single_exposure_finished_logs_info_and_updates_status(qapp, caplog):
+def test_single_exposure_finished_logs_info(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
     controller._standalone_focus_sequence = types.SimpleNamespace(
@@ -717,8 +744,7 @@ def test_single_exposure_finished_logs_info_and_updates_status(qapp, caplog):
     assert 'focus 356' in text, 'result text should show the focus value'
     assert 'FWHM 3.20' in text, 'result text should show the measured FWHM'
     assert 'source (12.3, 45.6)' in text, 'result text should show the measured source coordinates'
-    assert window.control_panel.status_label.text() == text, \
-        'the status label should show exactly the logged text'
+    assert text in _log_text(window), 'the logged text should appear on the Log tab'
 
 
 def test_find_nearest_target_logs_info(qapp, caplog, fake_telescope):
@@ -735,11 +761,10 @@ def test_find_nearest_target_logs_info(qapp, caplog, fake_telescope):
     ]
     assert len(messages) == 1, 'a found target should be logged once at info level'
     assert 'Pointing' in messages[0], 'the logged text should name the found target'
-    assert window.control_panel.status_label.text() == messages[0], \
-        'the status label should show exactly the logged text'
+    assert messages[0] in _log_text(window), 'the logged text should appear on the Log tab'
 
 
-def test_step_complete_logs_info_and_updates_step_label(qapp, caplog):
+def test_step_complete_logs_info(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
     result = _make_step_result(index=1, focus_value=356., is_outlier=True)
@@ -755,8 +780,7 @@ def test_step_complete_logs_info_and_updates_step_label(qapp, caplog):
     assert 'FWHM 3.20' in text, 'step text should show the measured FWHM'
     assert 'Source (12.3, 45.6)' in text, 'step text should show the measured source coordinates'
     assert '[outlier]' in text, 'step text should flag outliers'
-    assert window.control_panel.step_label.text() == text, \
-        'the step label should show exactly the logged text'
+    assert text in _log_text(window), 'the logged step should appear on the Log tab'
 
 
 def test_log_tab_reflects_worker_signal_end_to_end(qapp):
@@ -1024,7 +1048,7 @@ def test_rejected_write_is_reported_and_reverted(qapp, fake_hardware, monkeypatc
     panel.tabs.setCurrentWidget(panel.single_tab)
     type_and_enter(panel.single_exptime_spin, '99')
 
-    assert 'Could not set the exposure exptime to 99.0' in panel.status_label.text(), \
+    assert 'Could not set the exposure exptime to 99.0' in _log_text(window), \
         'a rejected write should be reported'
     assert [c['exptime'] for c in _exposure_configs(panel)] == [5.0] * 3, \
         "the fields should go back to the camera's exposure time"

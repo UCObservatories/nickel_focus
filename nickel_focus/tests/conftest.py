@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
+from nickel_focus import log
 from nickel_focus.services import base as services_base
 from nickel_focus.services import NickelPoco, NSciCam
 from nickel_focus.tests.fake_ktl import Simulator
@@ -83,6 +84,19 @@ def no_ktl(request, monkeypatch):
             pytest.fail('--ktl-live was given, but the ktl package is not available.')
         return
     monkeypatch.setattr(services_base, 'ktl', None)
+
+
+@pytest.fixture(autouse=True)
+def restore_log_levels():
+    """
+    Put the ``nickel_focus`` log's console level and KTL level back after each
+    test, since tests that call a script's ``init_log`` change them for the
+    whole process (and the GUI's Log tab follows the console level).
+    """
+    console_level = log.sh.level
+    yield
+    log.sh.setLevel(console_level)
+    log.ktl_level = 'warn'
 
 
 def gaussian_frame(fwhm, amplitude=8000., background=200., noise_sigma=5.,

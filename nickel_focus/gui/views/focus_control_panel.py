@@ -8,8 +8,9 @@ talks to :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` itself --
 that's the Controller's job.
 """
 from pathlib import Path
+import re
 
-from nickel_focus.gui.qt import QtCore, QtWidgets
+from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
 
 
 def _int_spin(minimum, maximum, value):
@@ -99,6 +100,135 @@ class ExposureTimeSpinBox(QtWidgets.QDoubleSpinBox):
     def _set_pending(self, pending):
         self._pending = pending
         self.setStyleSheet(self.PENDING_STYLE if pending else '')
+
+
+class LogView(QtWidgets.QPlainTextEdit):
+    """
+    A read-only, console-like view of log output.
+
+    - **Font:** the system's fixed-width font, sized to fit about
+      :attr:`TARGET_COLUMNS` characters across the view whenever it's resized
+      (within :attr:`MIN_POINT_SIZE` to :attr:`MAX_POINT_SIZE`).
+    - **Colors:** text is expected as the console's log formatter writes it,
+      with ANSI escape codes for color and bold (see
+      :func:`~nickel_focus.pkg.logger.color_text`); :meth:`append_text`
+      renders them rather than showing them.
+    - **History:** the most recent :attr:`MAX_LINES` lines are kept; the view
+      stays scrolled to the newest line unless the user has scrolled up.
+    """
+
+    TARGET_COLUMNS = 80
+    """The number of characters the font is sized to fit across the view."""
+
+    MIN_POINT_SIZE = 6.
+    """The smallest font size, in points, however narrow the view."""
+
+    MAX_POINT_SIZE = 18.
+    """The largest font size, in points, however wide the view."""
+
+    MAX_LINES = 5000
+    """The number of most recent lines kept."""
+
+    _ANSI = re.compile('\x1b\\[([0-9;]*)m')
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        # The style hint and fixed pitch make Qt pick a monospace face even
+        # where the system names only a generic family (e.g. "monospace")
+        # it can't resolve.
+        font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+        font.setFixedPitch(True)
+        self.setFont(font)
+        # A QPlainTextEdit grows without bound by default; only the oldest
+        # lines are dropped.
+        self.setMaximumBlockCount(self.MAX_LINES)
+
+    def columns(self):
+        """How many characters currently fit across the view."""
+        width = self.viewport().width() - 2 * self.document().documentMargin()
+        return int(width // QtGui.QFontMetricsF(self.font()).horizontalAdvance('M'))
+
+    def resizeEvent(self, event):
+        """Resize the font to fit :attr:`TARGET_COLUMNS` characters across."""
+        super().resizeEvent(event)
+        self._fit_font()
+
+    def _fit_font(self):
+        width = self.viewport().width() - 2 * self.document().documentMargin()
+        if width <= 0:
+            return
+        font = QtGui.QFont(self.font())
+
+        def fits(size):
+            font.setPointSizeF(size)
+            advance = QtGui.QFontMetricsF(font).horizontalAdvance('M')
+            return advance * self.TARGET_COLUMNS <= width
+
+        # Start from a proportional estimate, then step (in quarter points)
+        # to the largest size that still fits: glyph widths change in
+        # discrete steps, so the estimate alone can land either side.
+        advance = QtGui.QFontMetricsF(font).horizontalAdvance('M')
+        size = font.pointSizeF() * width / (self.TARGET_COLUMNS * advance)
+        size = round(min(max(size, self.MIN_POINT_SIZE), self.MAX_POINT_SIZE) * 4) / 4
+        while size < self.MAX_POINT_SIZE and fits(size + 0.25):
+            size += 0.25
+        while size > self.MIN_POINT_SIZE and not fits(size):
+            size -= 0.25
+        if size != self.font().pointSizeF():
+            font.setPointSizeF(size)
+            self.setFont(font)
+
+    def append_text(self, text):
+        """
+        Append ``text`` (one log record, possibly several lines) as a new line,
+        rendering its ANSI color and bold codes.
+        """
+        scrollbar = self.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum()
+
+        document = self.document()
+        cursor = QtGui.QTextCursor(document)
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        if not document.isEmpty():
+            cursor.insertBlock()
+        char_format = QtGui.QTextCharFormat()
+        position = 0
+        for match in self._ANSI.finditer(text):
+            if match.start() > position:
+                cursor.insertText(text[position:match.start()], char_format)
+            char_format = self._apply_codes(char_format, match.group(1))
+            position = match.end()
+        if position < len(text):
+            cursor.insertText(text[position:], char_format)
+
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
+    @staticmethod
+    def _apply_codes(char_format, codes):
+        """
+        The text format after the ANSI SGR ``codes`` (e.g. ``'1;38;2;253;174;97'``):
+        ``0`` (or none) resets, ``1`` is bold, ``38;2;r;g;b`` sets the color.
+        Other codes are ignored.
+        """
+        values = [int(v) for v in codes.split(';') if v != '']
+        new_format = QtGui.QTextCharFormat(char_format)
+        i = 0
+        if not values:
+            return QtGui.QTextCharFormat()
+        while i < len(values):
+            value = values[i]
+            if value == 0:
+                new_format = QtGui.QTextCharFormat()
+            elif value == 1:
+                new_format.setFontWeight(QtGui.QFont.Weight.Bold)
+            elif value == 38 and values[i + 1:i + 2] == [2] and len(values) >= i + 5:
+                new_format.setForeground(QtGui.QColor(*values[i + 2:i + 5]))
+                i += 4
+            i += 1
+        return new_format
 
 
 def _exposure_field_rows():
@@ -318,10 +448,12 @@ class FocusControlPanel(QtWidgets.QWidget):
     Every measurement uses the brightest detected source by default; hovering
     over a different source in the image and pressing 'm' measures that one
     instead (see :class:`~nickel_focus.gui.views.image_panel.ImagePanel`).
-    Either way, the coordinates actually measured are reported on the Log tab
-    via
-    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.update_step`/
-    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_status`.
+    Either way, the coordinates actually measured are logged, and so appear
+    on the Log tab.
+
+    The Log tab is a :class:`LogView` repeating the console's log output
+    (see
+    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.append_log_line`).
 
     Attributes
     ----------
@@ -369,6 +501,7 @@ class FocusControlPanel(QtWidgets.QWidget):
     findNearestPointingRequested = QtCore.Signal()
     findNearestFocusRequested = QtCore.Signal()
     exposureSettingEdited = QtCore.Signal(str, object)
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -749,28 +882,12 @@ class FocusControlPanel(QtWidgets.QWidget):
 
     def _build_log_tab(self):
         """
-        Build the Log tab: the status line, step line, and scrolling history.
+        Build the Log tab: a :class:`LogView` repeating the console's log
+        output, and nothing else.
         """
-        # Word wrap is essential here, not cosmetic: a long message (e.g.
-        # a failure listing several missing file paths) in an unwrapped
-        # QLabel reports its *entire single-line* width as the label's
-        # minimum size, which balloons this whole panel's width to match.
-        # Wrapping lets it grow in height instead, which the surrounding
-        # QScrollArea (see MainWindow) handles gracefully.
-        self.status_label = QtWidgets.QLabel('')
-        self.status_label.setWordWrap(True)
-        self.step_label = QtWidgets.QLabel('Step: —')
-        self.step_label.setWordWrap(True)
-        self.log_widget = QtWidgets.QPlainTextEdit()
-        self.log_widget.setReadOnly(True)
-        # A QPlainTextEdit grows without bound by default, appending
-        # one line at a time all session -- capping it here is what
-        # keeps a very long run from slowly consuming ever more memory.
-        self.log_widget.setMaximumBlockCount(500)
+        self.log_widget = LogView()
 
         layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.step_label)
         layout.addWidget(self.log_widget)
         return _tab_widget(layout)
 
@@ -796,7 +913,7 @@ class FocusControlPanel(QtWidgets.QWidget):
             '<b>Grid</b> — step through an evenly spaced focus grid.<br>'
             '<b>Auto</b> — adaptively search for the best focus.<br>'
             '<b>Replay</b> — reprocess an existing set of exposures from disk.<br>'
-            '<b>Log</b> — live status and history.<br><br>'
+            '<b>Log</b> — the log, as shown in the terminal.<br><br>'
             '<b>Source selection</b> — the brightest star is measured '
             "automatically by default (see the Log for its coordinates); "
             "hover over a different star in the image and press 'm' to "
@@ -849,7 +966,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         tab page's own (a :class:`PySide6.QtWidgets.QScrollArea`, whose
         :meth:`PySide6.QtWidgets.QWidget.sizeHint` reflects a generically
         "comfortable" size that can run well past what its content actually
-        needs -- e.g.  the Log tab's :class:`PySide6.QtWidgets.QPlainTextEdit`,
+        needs -- e.g.  the Log tab's :class:`LogView`,
         which is happy to be much shorter than its
         :meth:`PySide6.QtWidgets.QWidget.sizeHint`, and would otherwise count
         as the tallest tab here).
@@ -1035,34 +1152,14 @@ class FocusControlPanel(QtWidgets.QWidget):
         for button in self._interrupt_buttons:
             button.setEnabled(running)
 
-        if not running and self.status_label.text().startswith('Stopping'):
-            # Only clear a stale "Stopping..." message -- not a
-            # confirmation/failure the worker's finishing signal may have
-            # just set moments before this.
-            self.status_label.setText('')
-
     def set_stopping(self):
         """
-        Reflect an Interrupt request that hasn't taken effect yet: the running
-        sequence only stops once the current exposure finishes, which can take
-        a while, so make that wait visible.
+        Reflect an Interrupt request that hasn't taken effect yet (the running
+        sequence only stops once the current exposure finishes): disable the
+        Interrupt buttons until it does.
         """
         for button in self._interrupt_buttons:
             button.setEnabled(False)
-        self.status_label.setText('Stopping — waiting for current exposure to finish...')
-
-    def update_step(self, text):
-        """
-        Update the Log tab's live step display.
-
-        Parameters
-        ----------
-        text : :obj:`str`
-            The step summary, already formatted for display -- formatting a
-            :class:`~nickel_focus.focus.StepResult` is the Controller's job (it
-            logs the same text), not this passive view's.
-        """
-        self.step_label.setText(text)
 
     def set_current_position(self, ra_text, dec_text):
         """
@@ -1080,10 +1177,10 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.slew_current_ra_label.setText(ra_text)
         self.slew_current_dec_label.setText(dec_text)
 
-    def show_nearest_target(self, ra_text, dec_text, text):
+    def show_nearest_target(self, ra_text, dec_text):
         """
         Populate the Slew tab's target RA/Dec fields with a found nearest
-        target, and report it.
+        target.
 
         Parameters
         ----------
@@ -1091,54 +1188,35 @@ class FocusControlPanel(QtWidgets.QWidget):
             The nearest target's right ascension, already formatted for display.
         dec_text : :obj:`str`
             The nearest target's declination, already formatted for display.
-        text : :obj:`str`
-            The status message, already formatted for display by the Controller
-            (which logs the same text).
         """
         self.slew_target_ra_edit.setText(ra_text)
         self.slew_target_dec_edit.setText(dec_text)
-        self.show_status(text)
 
-    def show_best_focus(self, best_focus, text):
+    def show_best_focus(self, best_focus):
         """
-        Report a completed sequence's fitted result, and set it as the Single
-        tab's default focus value -- rounded, since a focus value is a
-        whole-unit telescope position even though the fit itself can land on a
-        fractional one.
+        Set a completed sequence's fitted best focus as the Single tab's
+        default focus value -- rounded, since a focus value is a whole-unit
+        telescope position even though the fit itself can land on a fractional
+        one.
 
         Parameters
         ----------
         best_focus : :obj:`float`
-            The fitted best focus, used to set the Single tab's default.
-        text : :obj:`str`
-            The result summary, already formatted for display by the Controller
-            (which logs the same text).
+            The fitted best focus.
         """
-        self.show_status(text)
         self.single_focus_spin.setValue(round(best_focus))
 
-    def show_status(self, text):
+    def append_log_line(self, text):
         """
-        Show a one-line status message on the Log tab (e.g., a completed slew or
-        single exposure, or a failure), replacing whatever was there before.
+        Append one log record, as the console's formatter wrote it, to the Log
+        tab (see :meth:`LogView.append_text`).
 
         Parameters
         ----------
         text : :obj:`str`
-            The message, already formatted for display by the Controller (which
-            logs the same text).
+            The formatted record (possibly several lines, e.g. a traceback).
         """
-        self.status_label.setText(text)
-
-    def append_log_line(self, text):
-        """Append one line of text to the Log tab's scrolling history."""
-        self.log_widget.appendPlainText(text)
-
-    def reset(self):
-        """Clear live status and log for a new run."""
-        self.step_label.setText('Step: —')
-        self.status_label.setText('')
-        self.log_widget.clear()
+        self.log_widget.append_text(text)
 
     # -- internals ----------------------------------------------------------
 

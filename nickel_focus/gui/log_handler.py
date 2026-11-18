@@ -23,7 +23,7 @@ class QtLogHandler(QtCore.QObject, logging.Handler):
     Attributes
     ----------
     record_logged : :class:`PySide6.QtCore.Signal`
-        Emitted with one formatted line of text per log record accepted by this
+        Emitted with the formatted text of each log record accepted by this
         handler (i.e., past its level filter).
     """
     record_logged = QtCore.Signal(str)
