@@ -119,10 +119,12 @@ values:
   shown, so the broadcast confirming the user's own edit is a no-op. The
   first value is logged as the camera's setting, later ones as changes
   made on the camera (e.g. from another GUI, or the camera adjusting a
-  requested exposure time). A speed or binning that isn't a drop-down
-  option is added to the options, with a warning.
-- **Fields → camera.** Choosing a speed or binning, or entering an exposure
-  time, emits `FocusControlPanel.exposureSettingEdited(key, value)`. The
+  requested exposure time). Speed and binning are each a `RadioChoice` (a
+  row of radio buttons side by side); a value that isn't one of its options
+  gets a new button, with a warning.
+- **Fields → camera.** Clicking a speed or binning button
+  (`RadioChoice.chosen`, which fires only for user clicks), or entering an
+  exposure time, emits `FocusControlPanel.exposureSettingEdited(key, value)`. The
   exposure time is an `ExposureTimeSpinBox`: like the data-acquisition GUI,
   an edit turns it light red and takes effect only when Enter is pressed;
   until then `get_exposure_config` reports the previous (committed) value.
@@ -435,4 +437,5 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `6227274` | 2026-11-17 | Services monitor their status/display keywords and register heartbeats at construction; checks distinguish "condition false" from "no reply" (`check`/`require`); live heartbeat test. |
 | `a37e42c` | 2026-11-17 | Status indicators and current position follow keyword broadcasts (`KTLService.subscribe` → `gui/ktl_bridge.py` → queued signal), replacing the 1 Hz poll; position redraws limited to every 200 ms. |
 | `50b703f` | 2026-11-17 | Exposure fields follow the camera both ways: broadcasts update all three tabs (outside changes logged); edits write to the camera at once, with the exposure time light red until Enter; unknown speed/binning values added to the options. |
-| *pending* | 2026-11-17 | Log tab repeats the console -- same level (`nickel_focus_gui` now applies `-v`/`--log_file`/`--log_level`), format, and colors, in a fixed-width font sized to ~80 columns -- keeps 5000 lines, is never cleared, and has no status/step lines; KTL's log included. |
+| `8691767` | 2026-11-17 | Log tab repeats the console -- same level (`nickel_focus_gui` now applies `-v`/`--log_file`/`--log_level`), format, and colors, in a fixed-width font sized to ~80 columns -- keeps 5000 lines, is never cleared, and has no status/step lines; KTL's log included. |
+| *pending* | 2026-11-17 | Speed and binning are rows of radio buttons (`RadioChoice`) instead of drop-downs; an unrecognized camera value gets its own button. |

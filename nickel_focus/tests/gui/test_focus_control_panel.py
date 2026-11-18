@@ -6,7 +6,7 @@ import pytest
 
 from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
 from nickel_focus.pkg.logger import LEVEL_COLORS, StreamFormatter, clear_text_color, color_text
-from nickel_focus.gui.views.focus_control_panel import FocusControlPanel, LogView
+from nickel_focus.gui.views.focus_control_panel import FocusControlPanel, LogView, RadioChoice
 from nickel_focus.tests.gui.keyboard import press, type_and_enter, type_text
 
 
@@ -150,22 +150,22 @@ def test_get_exposure_config_for_single_grid_auto(qapp):
 
     panel.tabs.setCurrentWidget(panel.single_tab)
     type_and_enter(panel.single_exptime_spin, '1.5')
-    panel.single_speed_combo.setCurrentText('Fast')
-    panel.single_binning_combo.setCurrentText('2,2')
+    panel.single_speed_choice.button('Fast').click()
+    panel.single_binning_choice.button('2,2').click()
     assert panel.get_exposure_config() == {'exptime': 1.5, 'speed': 'Fast', 'binning': '2,2'}, \
         "the Single tab's exposure configuration should match its fields"
 
     panel.tabs.setCurrentWidget(panel.grid_tab)
     type_and_enter(panel.grid_exptime_spin, '2.5')
-    panel.grid_speed_combo.setCurrentText('Slow')
-    panel.grid_binning_combo.setCurrentText('1,1')
+    panel.grid_speed_choice.button('Slow').click()
+    panel.grid_binning_choice.button('1,1').click()
     assert panel.get_exposure_config() == {'exptime': 2.5, 'speed': 'Slow', 'binning': '1,1'}, \
         "the Grid tab's exposure configuration should match its fields"
 
     panel.tabs.setCurrentWidget(panel.auto_tab)
     type_and_enter(panel.auto_exptime_spin, '3.5')
-    panel.auto_speed_combo.setCurrentText('Fast')
-    panel.auto_binning_combo.setCurrentText('4,4')
+    panel.auto_speed_choice.button('Fast').click()
+    panel.auto_binning_choice.button('4,4').click()
     assert panel.get_exposure_config() == {'exptime': 3.5, 'speed': 'Fast', 'binning': '4,4'}, \
         "the Auto tab's exposure configuration should match its fields"
 
@@ -533,8 +533,10 @@ def test_set_exposure_config_adds_unknown_options(qapp):
     assert after['exptime'] == 7.0, 'the exposure time should be applied'
     assert after['binning'] == '3,3', 'an unknown binning should be added and shown'
     assert after['speed'] == before['speed'], 'a missing key should leave the field alone'
-    for combo in (panel.single_binning_combo, panel.grid_binning_combo, panel.auto_binning_combo):
-        assert combo.findText('3,3') >= 0, 'the new option should be added on every exposure tab'
+    for choice in (panel.single_binning_choice, panel.grid_binning_choice,
+                   panel.auto_binning_choice):
+        assert choice.options() == ['1,1', '2,2', '4,4', '3,3'], \
+            'the new option should be added as a button on every exposure tab'
 
 
 # -- exposure-time entry and exposure-setting edits ---------------------------
@@ -585,23 +587,16 @@ def test_set_exposure_config_discards_a_pending_edit(qapp):
     assert panel.single_exptime_spin.value() == 30.0, 'the set value should be shown'
 
 
-def _choose(combo, text):
-    """Choose ``text`` in ``combo`` the way a user does: select it, then `activated`."""
-    index = combo.findText(text)
-    combo.setCurrentIndex(index)
-    combo.activated.emit(index)
-
-
 def test_choosing_a_speed_or_binning_is_reported_at_once(qapp):
     panel = FocusControlPanel()
     edits = []
     panel.exposureSettingEdited.connect(lambda key, value: edits.append((key, value)))
 
-    _choose(panel.grid_speed_combo, 'Fast')
-    _choose(panel.auto_binning_combo, '4,4')
+    panel.grid_speed_choice.button('Fast').click()
+    panel.auto_binning_choice.button('4,4').click()
 
     assert edits == [('speed', 'Fast'), ('binning', '4,4')], \
-        'choosing a speed or binning should report it immediately'
+        'clicking a speed or binning button should report it immediately'
 
 
 def test_setting_fields_by_program_reports_nothing(qapp):
@@ -612,3 +607,50 @@ def test_setting_fields_by_program_reports_nothing(qapp):
     panel.set_exposure_config({'exptime': 30.0, 'speed': 'Fast', 'binning': '1,1'})
 
     assert edits == [], 'only user edits should be reported, not values set by the program'
+
+
+# -- speed and binning buttons --------------------------------------------------
+
+def test_speed_and_binning_are_rows_of_radio_buttons(qapp):
+    panel = FocusControlPanel()
+
+    for choice, options in ((panel.single_speed_choice, ['Slow', 'Fast']),
+                            (panel.single_binning_choice, ['1,1', '2,2', '4,4'])):
+        buttons = [choice.button(text) for text in options]
+        assert all(isinstance(b, QtWidgets.QRadioButton) for b in buttons), \
+            f'{options} should each be a radio button'
+        assert choice.options() == options, f'the options should be {options}, in order'
+        assert isinstance(choice.layout(), QtWidgets.QHBoxLayout), \
+            'the buttons should be laid out side by side'
+
+
+def test_radio_choice_is_exclusive_and_starts_at_the_first_option(qapp):
+    choice = RadioChoice(['Slow', 'Fast'])
+    assert choice.current() == 'Slow', 'the first option should be chosen initially'
+
+    choice.button('Fast').click()
+
+    assert choice.current() == 'Fast', 'clicking a button should choose its option'
+    assert not choice.button('Slow').isChecked(), 'only one option can be chosen at a time'
+
+
+def test_radio_choice_set_by_program_emits_nothing(qapp):
+    choice = RadioChoice(['Slow', 'Fast'])
+    chosen = []
+    choice.chosen.connect(chosen.append)
+
+    choice.set_current('Fast')
+    choice.button('Slow').click()
+
+    assert chosen == ['Slow'], 'only user clicks, not set_current, should emit chosen'
+
+
+def test_choice_buttons_are_disabled_while_running(qapp):
+    panel = FocusControlPanel()
+
+    panel.set_running(True)
+
+    assert not panel.grid_speed_choice.button('Fast').isEnabled(), \
+        'the speed buttons should be disabled while anything runs'
+    assert not panel.grid_binning_choice.button('4,4').isEnabled(), \
+        'the binning buttons should be disabled while anything runs'

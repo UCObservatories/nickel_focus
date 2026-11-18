@@ -488,4 +488,4 @@ use it.
 | `50b703f` | 2026-11-17 | §4: the exposure fields' subscriptions and writes; `ExposureConfig.setting_value`/`keywords`. |
 | `7efcccd` | 2026-11-17 | §3.2, §4: the slew target is written as binary radians; §4.1: `AMPCONFLIST`'s values confirmed at the telescope. |
 | `1ac2ce3` | 2026-11-17 | §3.4: expression syntax (quoting, `$service.KEYWORD`, `or`); §4, §4.1: exposures use `FITSFILE` for their path and fail on `EXPSTATE == Error`. |
-| *pending* | 2026-11-17 | §3.7: KTL's log routed into `nickel_focus.log`, its level following `--verbosity`. |
+| `8691767` | 2026-11-17 | §3.7: KTL's log routed into `nickel_focus.log`, its level following `--verbosity`. |

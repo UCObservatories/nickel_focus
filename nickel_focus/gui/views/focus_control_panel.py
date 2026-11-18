@@ -231,6 +231,65 @@ class LogView(QtWidgets.QPlainTextEdit):
         return new_format
 
 
+class RadioChoice(QtWidgets.QWidget):
+    """
+    A choice among a few options, shown as a row of mutually exclusive radio
+    buttons side by side.
+
+    Parameters
+    ----------
+    options : iterable of :obj:`str`
+        The options, in order.  The first is chosen initially.
+    parent : :class:`PySide6.QtWidgets.QWidget`, optional
+        Passed through to the base class.
+
+    Attributes
+    ----------
+    chosen : :class:`PySide6.QtCore.Signal`
+        Emitted with the option's text when the user clicks one of the
+        buttons -- never when the choice is set by the program
+        (:meth:`set_current`).
+    """
+    chosen = QtCore.Signal(str)
+
+    def __init__(self, options, parent=None):
+        super().__init__(parent)
+        self._layout = QtWidgets.QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.addStretch(1)
+        self._group = QtWidgets.QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._group.buttonClicked.connect(lambda button: self.chosen.emit(button.text()))
+        for option in options:
+            self.add_option(option)
+        self._group.buttons()[0].setChecked(True)
+
+    def options(self):
+        """The options, in order."""
+        return [button.text() for button in self._group.buttons()]
+
+    def add_option(self, text):
+        """Add an option (after the existing ones), not chosen."""
+        button = QtWidgets.QRadioButton(text)
+        self._group.addButton(button)
+        self._layout.insertWidget(self._layout.count() - 1, button)
+
+    def button(self, text):
+        """The radio button for option ``text``, or None if there isn't one."""
+        for button in self._group.buttons():
+            if button.text() == text:
+                return button
+        return None
+
+    def current(self):
+        """The chosen option's text."""
+        return self._group.checkedButton().text()
+
+    def set_current(self, text):
+        """Choose option ``text`` (which must exist), without emitting :attr:`chosen`."""
+        self.button(text).setChecked(True)
+
+
 def _exposure_field_rows():
     """
     Build exposure-time/speed/binning fields, used identically by the Single,
@@ -239,22 +298,21 @@ def _exposure_field_rows():
     Returns
     -------
     tuple
-        ``(rows, exptime_spin, speed_combo, binning_combo)``, where ``rows`` is
-        a list of ``(label, widget)`` pairs suitable for
-        :func:`~nickel_focus.gui.views.focus_control_panel._group_box`, and
-        ``exptime_spin`` is an :class:`ExposureTimeSpinBox`.
+        ``(rows, exptime_spin, speed_choice, binning_choice)``, where ``rows``
+        is a list of ``(label, widget)`` pairs suitable for
+        :func:`~nickel_focus.gui.views.focus_control_panel._group_box`,
+        ``exptime_spin`` is an :class:`ExposureTimeSpinBox`, and the choices
+        are :class:`RadioChoice` rows.
     """
     exptime_spin = ExposureTimeSpinBox(0.1, 600., 5.)
-    speed_combo = QtWidgets.QComboBox()
-    speed_combo.addItems(['Slow', 'Fast'])
-    binning_combo = QtWidgets.QComboBox()
-    binning_combo.addItems(['1,1', '2,2', '4,4'])
+    speed_choice = RadioChoice(['Slow', 'Fast'])
+    binning_choice = RadioChoice(['1,1', '2,2', '4,4'])
     rows = [
         ('Exposure time (s):', exptime_spin),
-        ('Speed:', speed_combo),
-        ('Binning:', binning_combo),
+        ('Speed:', speed_choice),
+        ('Binning:', binning_choice),
     ]
-    return rows, exptime_spin, speed_combo, binning_combo
+    return rows, exptime_spin, speed_choice, binning_choice
 
 
 def _two_column_row(left_rows, right_rows):
@@ -491,7 +549,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         Emitted with ``(key, value)`` when the user commits an exposure setting
         on the Single, Grid, or Auto tab: ``('exptime', float)`` when an
         exposure time is entered, or ``('speed', str)``/``('binning', str)``
-        when a drop-down entry is chosen.
+        when a speed or binning button is clicked.
     """
     startRequested = QtCore.Signal()
     stopRequested = QtCore.Signal()
@@ -531,20 +589,17 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.tabs.addTab(self.help_tab, 'Help')
 
         # Report committed exposure-setting edits from any of the three
-        # tabs that take exposures. `activated` (unlike
-        # `currentTextChanged`) fires only for the user's own choice, never
-        # for set_exposure_config.
-        for exptime_spin, speed_combo, binning_combo in self._exposure_widgets():
+        # tabs that take exposures. RadioChoice.chosen fires only for the
+        # user's own clicks, never for set_exposure_config.
+        for exptime_spin, speed_choice, binning_choice in self._exposure_widgets():
             exptime_spin.valueCommitted.connect(
                 lambda value: self.exposureSettingEdited.emit('exptime', value)
             )
-            speed_combo.activated.connect(
-                lambda index, combo=speed_combo:
-                    self.exposureSettingEdited.emit('speed', combo.currentText())
+            speed_choice.chosen.connect(
+                lambda text: self.exposureSettingEdited.emit('speed', text)
             )
-            binning_combo.activated.connect(
-                lambda index, combo=binning_combo:
-                    self.exposureSettingEdited.emit('binning', combo.currentText())
+            binning_choice.chosen.connect(
+                lambda text: self.exposureSettingEdited.emit('binning', text)
             )
 
         # Every input widget across the five actionable tabs, locked
@@ -556,11 +611,11 @@ class FocusControlPanel(QtWidgets.QWidget):
         self._config_widgets = [
             self.slew_target_ra_edit, self.slew_target_dec_edit, self.slew_file_edit,
             self.slew_browse_button, self.slew_search_edit, self.single_focus_spin,
-            self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo,
+            self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice,
             self.grid_start_spin, self.grid_step_spin, self.grid_nstep_spin,
-            self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo,
+            self.grid_exptime_spin, self.grid_speed_choice, self.grid_binning_choice,
             self.auto_start_spin, self.auto_step_spin, self.auto_maxsteps_spin,
-            self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo,
+            self.auto_exptime_spin, self.auto_speed_choice, self.auto_binning_choice,
             self.replay_datadir_edit, self.replay_browse_button, self.replay_prefix_edit,
             self.replay_suffix_edit, self.replay_obsnum_spin, self.replay_start_spin,
             self.replay_step_spin, self.replay_nstep_spin,
@@ -741,8 +796,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         """
         self.single_focus_spin = _int_spin(165, 500, 340)
         (
-            exposure_rows, self.single_exptime_spin, self.single_speed_combo,
-            self.single_binning_combo
+            exposure_rows, self.single_exptime_spin, self.single_speed_choice,
+            self.single_binning_choice
         ) = _exposure_field_rows()
         focus_rows = [('Focus value:', self.single_focus_spin)]
 
@@ -771,8 +826,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.grid_step_spin = _int_spin(1, 100, 5)
         self.grid_nstep_spin = _int_spin(3, 100, 5)
         (
-            exposure_rows, self.grid_exptime_spin, self.grid_speed_combo,
-            self.grid_binning_combo
+            exposure_rows, self.grid_exptime_spin, self.grid_speed_choice,
+            self.grid_binning_choice
         ) = _exposure_field_rows()
         focus_rows = [
             ('Start focus:', self.grid_start_spin),
@@ -803,8 +858,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.auto_step_spin = _int_spin(1, 100, 5)
         self.auto_maxsteps_spin = _int_spin(2, 100, 12)
         (
-            exposure_rows, self.auto_exptime_spin, self.auto_speed_combo,
-            self.auto_binning_combo
+            exposure_rows, self.auto_exptime_spin, self.auto_speed_choice,
+            self.auto_binning_choice
         ) = _exposure_field_rows()
         focus_rows = [
             ('Start focus:', self.auto_start_spin),
@@ -1042,11 +1097,11 @@ class FocusControlPanel(QtWidgets.QWidget):
         return {}
 
     def _exposure_widgets(self):
-        """The ``(exptime_spin, speed_combo, binning_combo)`` of Single, Grid, and Auto."""
+        """The ``(exptime_spin, speed_choice, binning_choice)`` of Single, Grid, and Auto."""
         return (
-            (self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo),
-            (self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo),
-            (self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo),
+            (self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice),
+            (self.grid_exptime_spin, self.grid_speed_choice, self.grid_binning_choice),
+            (self.auto_exptime_spin, self.auto_speed_choice, self.auto_binning_choice),
         )
 
     def get_exposure_config(self):
@@ -1062,21 +1117,21 @@ class FocusControlPanel(QtWidgets.QWidget):
         tab = self.tabs.currentWidget()
         if tab is self.single_tab:
             exptime, speed, binning = (
-                self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo
+                self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice
             )
         elif tab is self.grid_tab:
             exptime, speed, binning = (
-                self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo
+                self.grid_exptime_spin, self.grid_speed_choice, self.grid_binning_choice
             )
         elif tab is self.auto_tab:
             exptime, speed, binning = (
-                self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo
+                self.auto_exptime_spin, self.auto_speed_choice, self.auto_binning_choice
             )
         else:
             return {}
         return {
-            'exptime': exptime.committed_value(), 'speed': speed.currentText(),
-            'binning': binning.currentText()
+            'exptime': exptime.committed_value(), 'speed': speed.current(),
+            'binning': binning.current()
         }
 
     def set_exposure_config(self, config):
@@ -1098,23 +1153,23 @@ class FocusControlPanel(QtWidgets.QWidget):
         -------
         :obj:`list`
             The keys (``speed``/``binning``) whose value wasn't one of the
-            drop-down's options, and so was added to it.  An ``exptime``
+            options, and so was added as a new button.  An ``exptime``
             outside the field's range is clamped to it rather than reported.
         """
         exposure_widgets = self._exposure_widgets()
         added = []
         for key, index in (('speed', 1), ('binning', 2)):
-            if key in config and exposure_widgets[0][index].findText(config[key]) < 0:
+            if key in config and exposure_widgets[0][index].button(config[key]) is None:
                 added.append(key)
                 for widgets in exposure_widgets:
-                    widgets[index].addItem(config[key])
-        for exptime_spin, speed_combo, binning_combo in exposure_widgets:
+                    widgets[index].add_option(config[key])
+        for exptime_spin, speed_choice, binning_choice in exposure_widgets:
             if 'exptime' in config:
                 exptime_spin.set_committed_value(config['exptime'])
             if 'speed' in config:
-                speed_combo.setCurrentText(config['speed'])
+                speed_choice.set_current(config['speed'])
             if 'binning' in config:
-                binning_combo.setCurrentText(config['binning'])
+                binning_choice.set_current(config['binning'])
         return added
 
     def set_hardware_tabs_enabled(self, enabled):

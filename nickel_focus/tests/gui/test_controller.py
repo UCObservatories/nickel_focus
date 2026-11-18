@@ -1024,11 +1024,7 @@ def test_chosen_speed_is_written_to_the_camera(qapp, fake_hardware):
     window = MainWindow()
     controller = Controller(window)
     _deliver_broadcasts(controller)
-    combo = window.control_panel.single_speed_combo
-
-    index = combo.findText('Fast')
-    combo.setCurrentIndex(index)
-    combo.activated.emit(index)
+    window.control_panel.single_speed_choice.button('Fast').click()
 
     assert fake_hardware['sim'].keyword('nscicam', 'AMPCONF').writes == ['1.0MHz'], \
         'choosing a speed should write its AMPCONF value to the camera at once'

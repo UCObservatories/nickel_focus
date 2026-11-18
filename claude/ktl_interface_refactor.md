@@ -250,12 +250,13 @@ phase 3) it replaces the GUI's 1 Hz polling.
   camera's setting, later ones as changes made on the camera (e.g. from
   another GUI, or the camera adjusting a requested exposure time). The
   broadcast that confirms the user's own edit equals what's already shown,
-  so it's neither applied again nor logged. A speed or binning that isn't a
-  drop-down option is added to the options (on all three tabs), with a
+  so it's neither applied again nor logged. A speed or binning that isn't
+  one of the field's options is added to them (on all three tabs), with a
   warning, so the field always shows the camera's actual setting.
 - **GUI → camera:** a committed edit is written to the camera immediately
-  via `NSciCam`, rather than waiting for Acquire. A drop-down choice commits
-  at once (`activated`, which fires only for the user's own choices). The
+  via `NSciCam`, rather than waiting for Acquire. A speed or binning choice
+  commits at once (the fields are rows of radio buttons, whose `chosen`
+  signal fires only for the user's own clicks). The
   exposure time commits only on Enter, as in the data-acquisition GUI: an
   edit turns the field light red until then, and Acquire uses the last
   committed value. The write runs **on the GUI thread**: settings changes

@@ -709,14 +709,14 @@ class Controller(QtCore.QObject):
         """
         Show ``config`` (exposure ``key`` -> value) on the Single/Grid/Auto
         tabs and remember it as shown.  A speed or binning that isn't one of
-        the drop-down's options is added to it, with a warning.
+        the options is added as a new button, with a warning.
         """
         added = self.window.control_panel.set_exposure_config(config)
         self._shown_exposure.update(config)
         for key in added:
             log.warning(
-                f'Exposure {key} {config[key]!r} is not one of the GUI options; added it to '
-                f'the {key} list.'
+                f'Exposure {key} {config[key]!r} is not one of the GUI options; added it as a '
+                f'{key} option.'
             )
 
     def _subscribe(self, service, names):

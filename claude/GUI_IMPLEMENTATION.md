@@ -3028,3 +3028,29 @@ simply a repeated view of the terminal output.
   the log. The Help text and user manual no longer mention a status line.
 
 Full suite: `353 passed, 8 skipped`.
+
+## Speed and binning as radio buttons (2026-11-17)
+
+The Single/Grid/Auto tabs' Speed and Binning fields are now rows of
+mutually exclusive radio buttons, side by side, instead of drop-downs.
+
+- New `focus_control_panel.RadioChoice` (a `QWidget` with a `QButtonGroup`
+  of `QRadioButton`s in a horizontal layout): `options()`, `add_option()`,
+  `button(text)`, `current()`, `set_current()` (programmatic, emits
+  nothing), and `chosen(str)`, emitted only for user clicks (the role
+  `QComboBox.activated` played). The first option starts chosen, as the
+  combo boxes' first entries did (Slow, 1,1).
+- `FocusControlPanel`: `*_speed_combo`/`*_binning_combo` renamed to
+  `*_speed_choice`/`*_binning_choice`; `get_exposure_config`/
+  `set_exposure_config` use the new API. An unrecognized speed or binning
+  from the camera (e.g. `5.0MHz` set from another tool) is added as a new
+  button on all three tabs, with the Controller's warning reworded to
+  match. The panel's minimum width is unchanged (the tab pages scroll).
+- Tests: the combo-box tests now click the radio buttons; new tests for
+  the button rows (radio buttons, order, horizontal layout), exclusivity
+  and the initial choice, `set_current` emitting nothing, and the buttons
+  being disabled while running. Rendered at the default window size to
+  check the layout, including an added `5.0MHz` button.
+- Docs: `GUI_REFERENCE.md` (§2) and the plan's §3.6.
+
+Full suite: `357 passed, 8 skipped`.
