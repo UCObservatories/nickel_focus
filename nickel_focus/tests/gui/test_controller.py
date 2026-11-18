@@ -1264,6 +1264,56 @@ def test_fwhm_is_reported_in_pixels_only_without_binning(qapp, caplog, focus_swe
         'without a known binning, the FWHM should be reported in pixels only'
 
 
+# -- Use current focus ----------------------------------------------------------
+
+def test_use_current_focus_fills_the_single_focus(qapp, fake_hardware):
+    fake_hardware['sim'].keyword('nickelpoco', 'POCSECPA').value = 352.98
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
+
+    window.control_panel.single_current_focus_button.click()
+
+    assert window.control_panel.single_focus_spin.value() == 353, \
+        "the Single tab's focus should be the current focus, rounded"
+
+
+def test_acquire_at_the_current_focus_does_not_move_it(qapp, caplog, fake_hardware):
+    sim = fake_hardware['sim']  # starts with the focus at 340, commanded and actual
+    window = MainWindow()
+    controller = Controller(window)
+    _deliver_broadcasts(controller)
+    panel = window.control_panel
+    panel.tabs.setCurrentWidget(panel.single_tab)
+    panel.single_focus_spin.setValue(360)
+
+    panel.single_current_focus_button.click()
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        panel.single_acquire_button.click()
+        _wait_for_focus_worker(controller)
+
+    assert panel.single_focus_spin.value() == 340, 'setup: the current focus should be used'
+    assert sim.keyword('nickelpoco', 'POCSECPD').writes == [], \
+        'acquiring at the current focus should not command a focus move'
+    assert any('No change needed' in r.getMessage() for r in caplog.records), \
+        'the focus should take the already-at-position path'
+    assert sim.exposure_count == 1, 'the exposure should still be taken'
+
+
+def test_use_current_focus_without_a_value_warns(qapp, caplog):
+    window = MainWindow()
+    controller = Controller(window)  # no ktl: no current focus
+    window.control_panel.single_focus_spin.setValue(360)
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller.use_current_focus()
+
+    assert window.control_panel.single_focus_spin.value() == 360, \
+        'without a current focus, the field should be left unchanged'
+    assert any(r.levelname == 'WARNING' and 'No current focus' in r.getMessage()
+               for r in caplog.records), 'the missing value should be logged as a warning'
+
+
 # -- the shared services --------------------------------------------------------
 
 def test_controller_shares_one_service_per_ktl_service(qapp, fake_hardware):

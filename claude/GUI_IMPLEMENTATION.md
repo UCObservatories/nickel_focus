@@ -3216,3 +3216,26 @@ now gives arcseconds as well as pixels when the binning is known.
 - Docs: `GUI_REFERENCE.md` (§3) and the user manual.
 
 Full suite: `410 passed, 8 skipped`.
+
+## Single tab: "Use current focus" (2026-11-18)
+
+A "Use current focus" button below the Single tab's focus value fills it
+with the telescope's current focus. Acquire is unchanged: it still asks to
+move to the requested focus, and `Focus.set_to` skips the move when the
+commanded focus (`POCSECPD`) is already within 0.1 of it.
+
+- `FocusControlPanel`: `single_current_focus_button` (a row under "Focus
+  value:" in the focus group; disabled while running, with the other
+  configuration widgets), the `useCurrentFocusRequested` signal, and
+  `set_single_focus(value)` (rounds; the field holds whole units). Help text
+  updated.
+- `Controller.use_current_focus`: the latest `POCSECPA` broadcast (no
+  keyword read), rounded; without one (e.g. no telescope), a warning and no
+  change.
+- Tests: the button's place, signal, rounding, and disabling; through the
+  Controller, filling from the current focus, acquiring there without a
+  focus write ("No change needed") while still exposing, and the
+  no-value warning. The button-list test now expects it.
+- Docs: `GUI_REFERENCE.md` (§3) and the user manual.
+
+Full suite: `417 passed, 8 skipped`.

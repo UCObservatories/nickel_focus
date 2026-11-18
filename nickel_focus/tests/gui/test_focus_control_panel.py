@@ -187,7 +187,8 @@ def test_each_tab_has_the_requested_buttons(qapp):
     assert button_texts(panel.slew_tab) == sorted([
         'Browse…', 'Move to Target', 'Object', 'Pointing *', 'Focusing *',
     ]), 'the Slew tab should have its file-browse, move, and three find-nearest buttons'
-    assert button_texts(panel.single_tab) == ['Acquire'], 'the Single tab should have only Acquire'
+    assert button_texts(panel.single_tab) == ['Acquire', 'Use current focus'], \
+        'the Single tab should have Acquire and Use current focus'
     assert button_texts(panel.grid_tab) == ['Acquire', 'Interrupt'], \
         'the Grid tab should have Acquire and Interrupt'
     assert button_texts(panel.auto_tab) == ['Acquire', 'Interrupt'], \
@@ -694,3 +695,45 @@ def test_choice_buttons_are_disabled_while_running(qapp):
         'the speed buttons should be disabled while anything runs'
     assert not panel.grid_binning_choice.button('4,4').isEnabled(), \
         'the binning buttons should be disabled while anything runs'
+
+
+# -- Use current focus ----------------------------------------------------------
+
+def test_use_current_focus_button_is_below_the_focus_value(qapp):
+    panel = FocusControlPanel()
+    button = panel.single_current_focus_button
+    form = panel.single_focus_spin.parentWidget().layout()
+
+    spin_row = form.getWidgetPosition(panel.single_focus_spin)[0]
+    button_row = form.getWidgetPosition(button)[0]
+
+    assert button.text() == 'Use current focus', 'the button should be labeled'
+    assert button_row == spin_row + 1, 'the button should be directly below the focus value'
+
+
+def test_use_current_focus_button_emits_a_request(qapp):
+    panel = FocusControlPanel()
+    requests = []
+    panel.useCurrentFocusRequested.connect(lambda: requests.append(True))
+
+    panel.single_current_focus_button.click()
+
+    assert requests == [True], 'clicking the button should request the current focus'
+
+
+def test_set_single_focus_rounds(qapp):
+    panel = FocusControlPanel()
+
+    panel.set_single_focus(344.62)
+
+    assert panel.single_focus_spin.value() == 345, \
+        'the focus value should be the given focus, rounded to a whole unit'
+
+
+def test_use_current_focus_button_is_disabled_while_running(qapp):
+    panel = FocusControlPanel()
+
+    panel.set_running(True)
+
+    assert not panel.single_current_focus_button.isEnabled(), \
+        'the button should be disabled while anything runs, like the field it fills'

@@ -183,6 +183,7 @@ class Controller(QtCore.QObject):
         window.image_panel.sourceSelected.connect(self._on_source_selected)
         window.status_bar.quitRequested.connect(self.quit)
         window.control_panel.exposureSettingEdited.connect(self._on_exposure_setting_edited)
+        window.control_panel.useCurrentFocusRequested.connect(self.use_current_focus)
 
         # The status indicators and current position follow the keywords'
         # broadcasts. ktl delivers each new value on its own callback
@@ -431,6 +432,26 @@ class Controller(QtCore.QObject):
         -s Focusing`` with no ``-f``).
         """
         self._find_nearest('Focusing')
+
+    def use_current_focus(self):
+        """
+        Handle the Single tab's "Use current focus" button: set its focus value
+        to the telescope's current focus (the latest ``POCSECPA`` broadcast,
+        rounded to a whole unit), so Acquire exposes there.  Acquire still
+        asks to move the focus, which
+        :meth:`~nickel_focus.focus.Focus.set_to` skips if the commanded focus
+        is already that value.  Without a current focus value (e.g. no
+        telescope connection), a warning is logged and the field is left
+        unchanged.
+        """
+        value = self._latest.get(('nickelpoco', 'POCSECPA'))
+        try:
+            focus_value = float(value)
+        except (TypeError, ValueError):
+            log.warning('No current focus value is available; the Single tab is unchanged.')
+            return
+        self.window.control_panel.set_single_focus(focus_value)
+        log.info(f'Single tab focus set to the current focus ({focus_value:.1f}).')
 
     def quit(self):
         """

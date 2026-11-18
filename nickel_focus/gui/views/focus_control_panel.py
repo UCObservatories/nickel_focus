@@ -545,6 +545,11 @@ class FocusControlPanel(QtWidgets.QWidget):
         Emitted when the Slew tab's "Find nearest focus star" is clicked; like
         ``findNearestPointingRequested``, but with
         ``obj_search_str='Focusing'``.
+    useCurrentFocusRequested : :class:`PySide6.QtCore.Signal`
+        Emitted when the Single tab's "Use current focus" is clicked; the
+        Controller should fill the focus value with the telescope's current
+        focus (see
+        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.set_single_focus`).
     exposureSettingEdited : :class:`PySide6.QtCore.Signal`
         Emitted with ``(key, value)`` when the user commits an exposure setting
         on the Single, Grid, or Auto tab: ``('exptime', float)`` when an
@@ -558,6 +563,7 @@ class FocusControlPanel(QtWidgets.QWidget):
     findNearestObjectRequested = QtCore.Signal(str, str)
     findNearestPointingRequested = QtCore.Signal()
     findNearestFocusRequested = QtCore.Signal()
+    useCurrentFocusRequested = QtCore.Signal()
     exposureSettingEdited = QtCore.Signal(str, object)
 
 
@@ -610,7 +616,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         # stays reachable while a sequence runs.
         self._config_widgets = [
             self.slew_target_name_edit, self.slew_target_ra_edit, self.slew_target_dec_edit,
-            self.slew_file_edit,
+            self.slew_file_edit, self.single_current_focus_button,
             self.slew_browse_button, self.slew_search_edit, self.single_focus_spin,
             self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice,
             self.grid_start_spin, self.grid_step_spin, self.grid_nstep_spin,
@@ -803,15 +809,21 @@ class FocusControlPanel(QtWidgets.QWidget):
     def _build_single_tab(self):
         """
         Build the Single tab as two side-by-side sub-panels -- exposure
-        settings, focus value -- with "Acquire" below both, spanning the full
-        tab width rather than belonging to either one.
+        settings, focus value (with a "Use current focus" button below it) --
+        with "Acquire" below both, spanning the full tab width rather than
+        belonging to either one.
         """
         self.single_focus_spin = _int_spin(165, 500, 340)
         (
             exposure_rows, self.single_exptime_spin, self.single_speed_choice,
             self.single_binning_choice
         ) = _exposure_field_rows()
-        focus_rows = [('Focus value:', self.single_focus_spin)]
+        self.single_current_focus_button = QtWidgets.QPushButton('Use current focus')
+        self.single_current_focus_button.clicked.connect(self.useCurrentFocusRequested.emit)
+        focus_rows = [
+            ('Focus value:', self.single_focus_spin),
+            ('', self.single_current_focus_button),
+        ]
 
         self.single_acquire_button = QtWidgets.QPushButton('Acquire')
         self.single_acquire_button.clicked.connect(
@@ -970,7 +982,8 @@ class FocusControlPanel(QtWidgets.QWidget):
             '<b>Single</b> — take one exposure at the given focus. '
             'Defaults to the most recent fitted best focus, so acquiring '
             'it as-is moves to best focus; change the value first to '
-            'test any other focus.<br><br>'
+            'test any other focus, or press "Use current focus" to expose '
+            'at the focus the telescope is at now.<br><br>'
             '<b>Exposure settings</b> (Single, Grid, Auto) — show the '
             "camera's current settings, including changes made from other "
             'programs, and are the same on all three tabs. Choosing a speed '
@@ -1275,6 +1288,13 @@ class FocusControlPanel(QtWidgets.QWidget):
     def get_target_coordinates(self):
         """The Slew tab's target ``(ra_text, dec_text)``, as entered."""
         return self.slew_target_ra_edit.text(), self.slew_target_dec_edit.text()
+
+    def set_single_focus(self, focus_value):
+        """
+        Set the Single tab's focus value -- rounded, since it's a whole-unit
+        telescope position (and clamped to the field's range).
+        """
+        self.single_focus_spin.setValue(round(focus_value))
 
     def show_best_focus(self, best_focus):
         """
