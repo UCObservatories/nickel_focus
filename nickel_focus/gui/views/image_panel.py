@@ -12,7 +12,7 @@ from astropy.visualization import (
     AsinhStretch,
 )
 
-from nickel_focus.gui.qt import QtCore, QtWidgets
+from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
 
 
 class ElidingComboBox(QtWidgets.QComboBox):
@@ -88,6 +88,16 @@ class ImagePanel(QtWidgets.QWidget):
     Recentering ('r') always fits the whole frame; it doesn't center on the
     measured source.  Unlike 'm', it works whether or not a sequence is
     running.
+
+    While the mouse is over the image, a small readout just below and to the
+    right of the pointer shows the pixel under it and that pixel's *raw* value
+    (:attr:`~nickel_focus.focus.StepResult.raw`, before background
+    subtraction), as ``x, y: value``.  Pixel coordinates are 0-based, like
+    the measured centroids, 'm' selection, and Log messages (so one less
+    than FITS and DS9 give).  Near the canvas's right or bottom edge the
+    readout moves to the other side of the pointer so it stays fully visible.
+    It hides when the pointer leaves the image, and whenever the view or the
+    displayed exposure changes, until the mouse next moves.
     """
 
     #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'm' is
@@ -109,6 +119,13 @@ class ImagePanel(QtWidgets.QWidget):
     The exposure drop-down's minimum width, in characters.  Its width doesn't
     depend on its entries; beyond this minimum it takes whatever room the row
     has.  Kept small so it never sets the window's minimum width.
+    """
+
+    READOUT_OFFSET = 14
+    """
+    Distance, in screen pixels, from the mouse pointer to the near corner of
+    the pixel-value readout, horizontally and vertically.  Large enough to
+    clear the arrow pointer.
     """
 
     STRETCHES = {
@@ -172,6 +189,22 @@ class ImagePanel(QtWidgets.QWidget):
         self.stretch_combo.addItems(list(self.STRETCHES))
         self.stretch_combo.setToolTip('Image stretch')
 
+        # The pixel-value readout: a child of the canvas, so it floats over
+        # the image and moving it never redraws the figure.  It ignores the
+        # mouse, so it can't intercept the canvas's own mouse events.
+        self.readout = QtWidgets.QLabel(self.canvas)
+        self.readout.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # The same fixed-width font as the Log tab.
+        readout_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        readout_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+        readout_font.setFixedPitch(True)
+        self.readout.setFont(readout_font)
+        self.readout.setStyleSheet(
+            'QLabel { background-color: rgba(0, 0, 0, 180); color: white;'
+            ' border: 1px solid rgba(255, 255, 255, 120); padding: 1px 4px; }'
+        )
+        self.readout.hide()
+
         self.h_scroll = QtWidgets.QScrollBar(QtCore.Qt.Orientation.Horizontal)
         self.v_scroll = QtWidgets.QScrollBar(QtCore.Qt.Orientation.Vertical)
 
@@ -215,6 +248,9 @@ class ImagePanel(QtWidgets.QWidget):
         # matplotlib's own connection mechanism instead of `.connect()`.
         self.canvas.mpl_connect('scroll_event', self._on_wheel_zoom)
         self.canvas.mpl_connect('key_press_event', self._on_key_press)
+        self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
+        self.canvas.mpl_connect('axes_leave_event', self._hide_readout)
+        self.canvas.mpl_connect('figure_leave_event', self._hide_readout)
 
     # -- public API used by the Controller -------------------------------
 
@@ -332,6 +368,7 @@ class ImagePanel(QtWidgets.QWidget):
         self.exposure_combo.blockSignals(True)
         self.exposure_combo.clear()
         self.exposure_combo.blockSignals(False)
+        self._hide_readout()
         self.ax.clear()
         self.canvas.draw_idle()
 
@@ -378,6 +415,7 @@ class ImagePanel(QtWidgets.QWidget):
         leading underscore is just this codebase's way of flagging
         "intentionally unused."
         """
+        self._hide_readout()
         if self._current is not None:
             self._apply_view_limits()
             self.canvas.draw_idle()
@@ -443,6 +481,72 @@ class ImagePanel(QtWidgets.QWidget):
             return
         self.sourceSelected.emit(float(event.xdata), float(event.ydata))
 
+    def readout_text(self, xdata, ydata):
+        """
+        The pixel-value readout's text for data coordinates ``(xdata,
+        ydata)``: ``'x, y: value'``, with the 0-based pixel containing that
+        point and its raw value, or just ``'x, y'`` if the displayed exposure
+        has no raw data.  None if nothing is displayed or the point is off the
+        image.
+        """
+        if self._current is None or xdata is None or ydata is None:
+            return None
+        # imshow centers pixel (i, j) on the integer coordinates (i, j).
+        col, row = round(xdata), round(ydata)
+        ny, nx = self._current.frame.shape
+        if not (0 <= col < nx and 0 <= row < ny):
+            return None
+        if self._current.raw is None:
+            return f'{col}, {row}'
+        return f'{col}, {row}: {self._current.raw[row, col]:.7g}'
+
+    def _on_mouse_move(self, event):
+        """
+        matplotlib ``motion_notify_event`` callback: show the pixel-value
+        readout next to the pointer, or hide it if the pointer isn't over the
+        image.
+        """
+        text = self.readout_text(event.xdata, event.ydata) \
+            if event.inaxes == self.ax else None
+        if text is None:
+            self._hide_readout()
+            return
+        self.readout.setText(text)
+        self.readout.adjustSize()
+        # matplotlib reports event.x/y in physical pixels from the canvas's
+        # bottom-left; Qt positions widgets in logical pixels from its top-left.
+        ratio = self.canvas.device_pixel_ratio
+        x = event.x / ratio
+        y = self.canvas.height() - event.y / ratio
+        self.readout.move(*self._readout_position(x, y))
+        self.readout.show()
+        self.readout.raise_()
+
+    def _readout_position(self, x, y):
+        """
+        Top-left corner, in canvas widget coordinates, for the readout given
+        the pointer at ``(x, y)``: below and to the right of the pointer,
+        flipped to the left and/or above it where it would otherwise extend
+        past the canvas's right or bottom edge.
+        """
+        offset = self.READOUT_OFFSET
+        width, height = self.readout.width(), self.readout.height()
+        left = x + offset
+        if left + width > self.canvas.width():
+            left = x - offset - width
+        top = y + offset
+        if top + height > self.canvas.height():
+            top = y - offset - height
+        return max(0, round(left)), max(0, round(top))
+
+    def _hide_readout(self, _event=None):
+        """
+        Hide the pixel-value readout.  Also the matplotlib
+        ``axes_leave_event``/``figure_leave_event`` callback, whose event isn't
+        needed.
+        """
+        self.readout.hide()
+
     def _render(self, reset_view):
         """
         Redraw the currently displayed result from scratch: image, stretch, and
@@ -453,6 +557,7 @@ class ImagePanel(QtWidgets.QWidget):
         (e.g.  just changing the stretch on the same image).
         """
         result = self._current
+        self._hide_readout()
         self.ax.clear()
         self.ax.set_xticks([])
         self.ax.set_yticks([])
@@ -463,7 +568,9 @@ class ImagePanel(QtWidgets.QWidget):
 
         data = result.frame
         normalize = self.STRETCHES[self._stretch_name](data)
-        self.ax.imshow(data, cmap='gray', origin='lower', norm=normalize)
+        # Row 0 at the top (with the y-axis inverted in _apply_view_limits),
+        # which puts North up and East to the left on the sky.
+        self.ax.imshow(data, cmap='gray', origin='upper', norm=normalize)
 
         stamp_size = int(result.fwhm * 10)
         half = stamp_size / 2
@@ -474,9 +581,10 @@ class ImagePanel(QtWidgets.QWidget):
         )
         self.ax.add_patch(rect)
         if result.is_outlier:
+            # Above the box: y increases downward on screen.
             self.ax.text(
-                result.centroid[0], result.centroid[1] + half + 5, 'Outlier centroid',
-                color='yellow', fontsize=10, ha='center'
+                result.centroid[0], result.centroid[1] - half - 5, 'Outlier centroid',
+                color='yellow', fontsize=10, ha='center', va='bottom'
             )
 
         if reset_view:
@@ -528,7 +636,9 @@ class ImagePanel(QtWidgets.QWidget):
     def _apply_view_limits(self):
         """
         Set the matplotlib axes' visible data range from the current scrollbar
-        positions and zoom level.  Doesn't redraw the canvas itself -- callers
+        positions and zoom level.  The y-axis is inverted -- row 0 at the top
+        -- so the image shows North up (and the vertical scrollbar's top shows
+        the top of the image).  Doesn't redraw the canvas itself -- callers
         are responsible for that
         (:meth:`matplotlib.backend_bases.FigureCanvasBase.draw_idle`), since
         this is often one of several changes made before a single redraw.
@@ -537,4 +647,4 @@ class ImagePanel(QtWidgets.QWidget):
         x0 = self.h_scroll.value()
         y0 = self.v_scroll.value()
         self.ax.set_xlim(x0, x0 + view_w)
-        self.ax.set_ylim(y0, y0 + view_h)
+        self.ax.set_ylim(y0 + view_h, y0)

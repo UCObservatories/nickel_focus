@@ -273,7 +273,8 @@ def image_quality(fits_file, method='brightest'):
     Returns
     -------
     data : :class:`numpy.ndarray`
-        Raw image data.
+        Raw image data, in the file's own type (e.g. 16-bit unsigned integers
+        for the Nickel camera); the measurements use a floating-point copy.
     bkg : :obj:`float`
         Estimated background.
     src_data : :class:`astropy.table.Table`
@@ -287,7 +288,9 @@ def image_quality(fits_file, method='brightest'):
         The (x,y) centroid of the selected source.
     """
     with fits.open(fits_file) as hdu:
-        data = hdu[0].data.astype(float)
+        # A copy, so it doesn't depend on the (closed) file.
+        raw = np.array(hdu[0].data)
+    data = raw.astype(float)
     bkg, sources = find_sources(data)
     src_data = evaluate_sources(data-bkg, sources)
 
@@ -321,7 +324,7 @@ def image_quality(fits_file, method='brightest'):
         coords = (src_data['CENX'][target_source], src_data['CENY'][target_source])
         stamp = extract_stamp(data-bkg, coords, int(img_quality*10))
 
-    return data, bkg, src_data, img_quality, stamp, coords
+    return raw, bkg, src_data, img_quality, stamp, coords
 
 
 def extract_stamp(data, coords, size):

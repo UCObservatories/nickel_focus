@@ -352,9 +352,21 @@ class Controller(QtCore.QObject):
         ``method`` is ``'brightest'`` (the default) or an ``(x, y)`` coordinate
         tuple (from
         :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`).
-        The coordinates actually measured are logged for each exposure.
+        The coordinates actually measured are logged for each exposure.  A
+        marked source stays in effect, for every later sequence, single
+        exposure, and reanalysis, until a slew is started (see
+        :meth:`~nickel_focus.gui.controller.Controller.move_to_target`).
         """
         self.method = method
+
+    def _clear_marked_source(self):
+        """
+        Return to measuring the brightest source, logging it if a source had
+        been marked.
+        """
+        if self.method != 'brightest':
+            log.info('Cleared the marked star; measuring the brightest star.')
+        self.set_method('brightest')
 
     def move_to_target(self, ra_text, dec_text):
         """
@@ -370,6 +382,10 @@ class Controller(QtCore.QObject):
             (a bare sexagesimal string, e.g.  ``'05:30:00'``).
         dec_text : :obj:`str`
             Target declination, entered the same way (e.g.  ``'+20:15:00'``).
+
+        Starting a slew clears any marked source (see
+        :meth:`~nickel_focus.gui.controller.Controller.set_method`): the new
+        field's stars are unrelated to the old pixel position.
         """
         if self.focus_worker is not None or self.slew_worker is not None:
             return  # hardware exclusivity: something is already running
@@ -382,6 +398,7 @@ class Controller(QtCore.QObject):
             self._fail(f'Could not parse target coordinates: {e}', e)
             return
 
+        self._clear_marked_source()
         self.slew_worker = SlewWorker(self.telescope, target.ra, target.dec)
         self.slew_worker.slewFinished.connect(self._on_slew_finished)
         self.slew_worker.slewFailed.connect(self._fail)

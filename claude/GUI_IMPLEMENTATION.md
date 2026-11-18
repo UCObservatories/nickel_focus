@@ -3239,3 +3239,101 @@ commanded focus (`POCSECPD`) is already within 0.1 of it.
 - Docs: `GUI_REFERENCE.md` (§3) and the user manual.
 
 Full suite: `417 passed, 8 skipped`.
+
+## Image panel: North up (2026-11-18)
+
+The image panel drew frames with row 0 at the bottom (`origin='lower'`),
+which put North at the bottom and East to the left. It now draws row 0 at
+the top (`origin='upper'`, `set_ylim(y0 + view_h, y0)` in
+`_apply_view_limits`): North up, East still left. Only the display changes
+-- pixel coordinates, the measurement box, 'm' selection, and wheel zoom
+work in the same data coordinates as before -- and the vertical
+scrollbar's top now shows the top of the image. The "Outlier centroid"
+label is placed above its box in the new orientation. The CLI's live
+`FocusPlot` (matplotlib, `origin='lower'`) is unchanged. Tests: the image's
+origin and inverted y-axis; the wheel-zoom test now sorts the limits.
+
+## Image panel: pixel-value readout (2026-11-18)
+
+While the pointer is over the image, a small label just below and to the
+right of it shows `x, y: value`: the pixel under the pointer (`round` of
+the data coordinates, since `imshow` centres pixels on integers) and its
+*raw* value. The pixel is 0-based, matching the measured centroids, 'm'
+selection, and Log messages; 1-based (as in FITS and DS9) was tried and
+reverted, since the readout and the Log would then disagree by one for
+the same pixel.
+
+- `StepResult.raw`: the image data as read from the file (before background
+  subtraction), in the file's own type -- 16-bit unsigned for the camera,
+  so a quarter the size of the float64 `frame` -- set by all three
+  `StepResult` constructions in `focus.py` (`step`, `reanalyze`, `single`).
+  `photometry.image_quality` now returns a copy of the file's data in its
+  own type (measuring on a float copy), and `focus.py` builds `frame` as
+  `data.astype(float) - bkg`. Defaults to None; the displayed `frame` is
+  still background-subtracted. Without raw data the readout gives only
+  the pixel.
+- `ImagePanel.readout`: a `QLabel` child of the canvas (so moving it never
+  redraws the figure), transparent to the mouse, in the Log tab's
+  fixed-width system font, white on semi-opaque black. Driven by
+  matplotlib's `motion_notify_event` (`_on_mouse_move`), converting
+  matplotlib's physical, bottom-left event position to Qt's logical,
+  top-left one with `device_pixel_ratio`. `READOUT_OFFSET = 14` screen
+  pixels from the pointer; `_readout_position` flips it left/above near the
+  canvas's right/bottom edge.
+- Hidden when the pointer leaves the axes or the canvas
+  (`axes_leave_event`/`figure_leave_event`), is beyond the image, and on any
+  view or exposure change that would make it stale (`_render`, scrollbar
+  moves, `reset`) until the mouse next moves. Wheel zoom keeps the point
+  under the pointer fixed, so it leaves the readout as is.
+- `readout_text(xdata, ydata)` is public, for tests.
+- Tests: raw data kept and matching the file, including a 16-bit
+  (`BZERO`) file kept as `uint16`; 0-based text and value; position
+  below-right and flipped near the edges; hiding off the image, on leaving,
+  and on exposure/scroll/reset changes; the no-raw fallback.
+- Docs: `GUI_REFERENCE.md` (§3, history) and the user manual (also now
+  notes North up).
+
+Full suite: `426 passed, 8 skipped`.
+
+## Marked star cleared by a slew (2026-11-18)
+
+A star marked with 'm' set `Controller.method` to its `(x, y)` pixel
+position for the rest of the session: every later sequence, Single
+exposure, and reanalysis measured the source nearest that position, with no
+distance limit, so after moving to a new field it measured whichever star
+happened to be nearest the old spot. Now `move_to_target` calls
+`_clear_marked_source()` just before starting the `SlewWorker` (so only a
+slew that actually starts clears it, not a rejected or unparseable
+request), which sets the method back to `'brightest'` and logs "Cleared the
+marked star; measuring the brightest star." if a star had been marked. No
+distance check between the old and new pointing. Slews started outside
+this GUI aren't detected; that's listed as a known issue (GUI_REFERENCE §4,
+the user manual's Troubleshooting section) and isn't planned unless it
+proves troublesome. The in-app Help tab's "Source selection" text says
+when the mark is cleared.
+
+Tests: a started slew clears the mark and logs it; an unparseable target
+or an ignored request (something running) keeps it; with nothing marked,
+nothing is logged. Docs: `GUI_REFERENCE.md` (§3, history) and the user
+manual.
+
+Full suite: `429 passed, 8 skipped`.
+
+## GUI tests: settle Qt after each test (2026-11-18)
+
+About 1 in 4 runs of the GUI tests printed `RuntimeError: libshiboken:
+Internal C++ object (FigureCanvasQTAgg) already deleted.` from matplotlib's
+`_draw_idle` (also on the previous commit, so not caused by the readout
+or slew changes), and one full-suite run crashed outright. A test's windows
+sit in reference cycles (Controller, signal connections), so Python freed
+them at an unpredictable later point, often during a later test; a
+`draw_idle` they had scheduled (a zero-delay Qt timer) then fired on the
+deleted canvas. A new autouse fixture in `tests/gui/conftest.py`,
+`_settle_qt`, runs after every GUI test: process pending events while the
+widgets still exist, `gc.collect()`, deliver deferred deletes, and process
+events again. Qt modules are imported once at the top of the conftest,
+since `test_qt_shim.py` hides PySide6 from imports until its own teardown.
+15 repeated GUI-suite runs afterward: no errors. The GUI tests take about
+50% longer (≈65 s to ≈93 s) because of the per-test collection.
+
+Full suite: `429 passed, 8 skipped`.

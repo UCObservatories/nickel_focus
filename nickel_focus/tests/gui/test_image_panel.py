@@ -221,7 +221,8 @@ def test_wheel_zoom_keeps_the_cursor_point_fixed(qapp, focus_sweep):
     panel._on_wheel_zoom(event)
 
     assert panel._zoom > 1.0, 'scrolling up should zoom in'
-    xlim, ylim = panel.ax.get_xlim(), panel.ax.get_ylim()
+    # Limits in increasing order: the y-axis is inverted (row 0 at the top).
+    xlim, ylim = sorted(panel.ax.get_xlim()), sorted(panel.ax.get_ylim())
     assert xlim[0] <= cursor_x <= xlim[1], 'the cursor location should remain within view'
     assert ylim[0] <= cursor_y <= ylim[1], 'the cursor location should remain within view'
     # The cursor's fractional position within the view should be
@@ -399,3 +400,135 @@ def test_tooltip_shows_the_full_entry(qapp, monkeypatch):
 
     assert shown == [LONG_ENTRY], 'hovering should show the full current entry'
     combo.close()
+
+
+def test_image_is_shown_north_up(qapp, focus_sweep):
+    # The frames' row 0 is at the south, so drawing row 0 at the top puts
+    # North up (East stays to the left).
+    panel = ImagePanel()
+    panel.add_result(_step_results(focus_sweep)[0])
+
+    image = panel.ax.get_images()[0]
+    bottom, top = panel.ax.get_ylim()
+    assert image.origin == 'upper', 'row 0 of the frame should be drawn at the top'
+    assert top < bottom, 'the y-axis should increase downward, so row 0 is at the top'
+    left, right = panel.ax.get_xlim()
+    assert left < right, 'columns should still run left to right'
+
+
+def test_results_keep_the_raw_frame(qapp, focus_sweep):
+    from astropy.io import fits
+    result = _step_results(focus_sweep)[0]
+    with fits.open(result.exposure) as hdu:
+        expected = hdu[0].data.astype(float)
+    assert result.raw is not None, 'each step result should keep the raw image data'
+    assert (result.raw == expected).all(), 'the raw data should match the file'
+    assert not (result.raw == result.frame).all(), \
+        'the displayed frame should still be background-subtracted'
+
+
+def _motion(panel, xdata, ydata, x=100, y=100, over_image=True):
+    """A mouse-move event at canvas position (x, y), matplotlib's convention
+    (physical pixels from the bottom-left), over data point (xdata, ydata)."""
+    event = MouseEvent('motion_notify_event', panel.canvas, x=x, y=y)
+    event.inaxes = panel.ax if over_image else None
+    event.xdata, event.ydata = (xdata, ydata) if over_image else (None, None)
+    return event
+
+
+def _hover_panel(focus_sweep):
+    panel = ImagePanel()
+    panel.canvas.resize(300, 300)
+    panel.add_result(_step_results(focus_sweep)[0])
+    return panel
+
+
+def test_readout_shows_raw_value_under_the_pointer(qapp, focus_sweep):
+    panel = _hover_panel(focus_sweep)
+    raw = panel._current.raw
+    # 12.4, 7.6 lies in the pixel centred on column 12, row 8.
+    panel._on_mouse_move(_motion(panel, 12.4, 7.6))
+    assert not panel.readout.isHidden(), 'the readout should show over the image'
+    assert panel.readout.text() == f'12, 8: {raw[8, 12]:.7g}', \
+        'the readout should give the 0-based pixel and its raw value'
+
+
+def test_readout_sits_below_right_of_the_pointer(qapp, focus_sweep):
+    panel = _hover_panel(focus_sweep)
+    ratio = panel.canvas.device_pixel_ratio
+    panel._on_mouse_move(_motion(panel, 5, 5, x=50 * ratio, y=(300 - 60) * ratio))
+    offset = ImagePanel.READOUT_OFFSET
+    assert (panel.readout.x(), panel.readout.y()) == (50 + offset, 60 + offset), \
+        'the readout should sit just below and to the right of the pointer'
+
+
+def test_readout_flips_near_the_bottom_right_edge(qapp, focus_sweep):
+    panel = _hover_panel(focus_sweep)
+    ratio = panel.canvas.device_pixel_ratio
+    panel._on_mouse_move(_motion(panel, 5, 5, x=295 * ratio, y=5 * ratio))
+    offset = ImagePanel.READOUT_OFFSET
+    assert panel.readout.x() + panel.readout.width() == 295 - offset, \
+        'near the right edge the readout should move to the left of the pointer'
+    assert panel.readout.y() + panel.readout.height() == 295 - offset, \
+        'near the bottom edge the readout should move above the pointer'
+
+
+def test_readout_hides_off_the_image(qapp, focus_sweep):
+    panel = _hover_panel(focus_sweep)
+    ny, nx = panel._current.frame.shape
+    panel._on_mouse_move(_motion(panel, 5, 5))
+    panel._on_mouse_move(_motion(panel, 5, 5, over_image=False))
+    assert panel.readout.isHidden(), 'the readout should hide when the pointer leaves the axes'
+
+    panel._on_mouse_move(_motion(panel, 5, 5))
+    panel._on_mouse_move(_motion(panel, nx + 3, 5))
+    assert panel.readout.isHidden(), 'the readout should hide beyond the edge of the image'
+
+    panel._on_mouse_move(_motion(panel, 5, 5))
+    panel._hide_readout(MouseEvent('figure_leave_event', panel.canvas, x=0, y=0))
+    assert panel.readout.isHidden(), 'the readout should hide when the pointer leaves the canvas'
+
+
+def test_readout_hides_when_the_view_or_exposure_changes(qapp, focus_sweep):
+    panel = _hover_panel(focus_sweep)
+    results = _step_results(focus_sweep)
+
+    panel._on_mouse_move(_motion(panel, 5, 5))
+    panel.add_result(results[1])
+    assert panel.readout.isHidden(), 'a newly displayed exposure should hide the readout'
+
+    panel.set_zoom(4)
+    panel._on_mouse_move(_motion(panel, 5, 5))
+    panel.h_scroll.setValue(panel.h_scroll.value() + 1)
+    assert panel.readout.isHidden(), 'scrolling should hide the (now stale) readout'
+
+    panel._on_mouse_move(_motion(panel, 5, 5))
+    panel.reset()
+    assert panel.readout.isHidden(), 'clearing the panel should hide the readout'
+
+
+def test_readout_without_raw_data_shows_only_the_pixel(qapp, focus_sweep):
+    panel = ImagePanel()
+    panel.add_result(dataclasses.replace(_step_results(focus_sweep)[0], raw=None))
+    assert panel.readout_text(3.2, 4.9) == '3, 5', \
+        'without raw data the readout should give only the pixel'
+    assert panel.readout_text(-1, 4) is None, 'off the image there should be no readout'
+
+
+def test_raw_frame_keeps_the_files_16_bit_type(qapp, tmp_path):
+    # Like the camera's files: 16-bit unsigned integers (stored with BZERO).
+    import numpy as np
+    from astropy.io import fits
+    from nickel_focus.tests.conftest import gaussian_frame
+    data = np.round(gaussian_frame(3.0)).astype(np.uint16)
+    path = tmp_path / 'n1000.fits'
+    fits.writeto(path, data)
+    result = list(focus.ArchiveFocusSequence([350.], [path]).step(method='brightest'))[0]
+    assert result.raw.dtype == np.uint16, 'the raw data should keep the file\'s 16-bit type'
+    assert (result.raw == data).all(), 'the raw data should match the file exactly'
+    assert result.frame.dtype == np.float64, 'the displayed frame should be floating point'
+
+    panel = ImagePanel()
+    panel.add_result(result)
+    assert panel.readout_text(0, 0) == f'0, 0: {data[0, 0]}', \
+        'the readout should show the 16-bit value as an integer'

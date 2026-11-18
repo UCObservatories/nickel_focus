@@ -539,6 +539,43 @@ def test_move_to_target_without_ktl_reports_clear_failure(qapp):
         'the failure should explain that there is no ktl connection'
 
 
+def test_starting_a_slew_clears_the_marked_star(qapp, fake_telescope):
+    window = MainWindow()
+    controller = Controller(window)
+    controller.set_method((42.0, 17.0))
+
+    controller.move_to_target('05:30:00', '+20:15:00')
+    assert controller.method == 'brightest', \
+        'starting a slew should return to measuring the brightest star'
+    _wait_for_slew_worker(controller)
+    assert 'Cleared the marked star' in _log_text(window), 'clearing the mark should be logged'
+
+
+def test_a_marked_star_persists_without_a_slew(qapp, fake_telescope):
+    window = MainWindow()
+    controller = Controller(window)
+    controller.set_method((42.0, 17.0))
+
+    controller.move_to_target('not a coordinate', '+20:15:00')
+    assert controller.method == (42.0, 17.0), \
+        'a slew that never starts should leave the marked star in effect'
+
+    controller.focus_worker = types.SimpleNamespace()  # pretend a sequence is running
+    controller.move_to_target('05:30:00', '+20:15:00')
+    assert controller.method == (42.0, 17.0), \
+        'an ignored move request should leave the marked star in effect'
+
+
+def test_slewing_without_a_marked_star_logs_nothing_about_it(qapp, fake_telescope):
+    window = MainWindow()
+    controller = Controller(window)
+
+    controller.move_to_target('05:30:00', '+20:15:00')
+    _wait_for_slew_worker(controller)
+    assert 'marked star' not in _log_text(window), \
+        'with no star marked, a slew should not mention clearing one'
+
+
 def test_move_to_target_is_a_noop_while_something_is_running(qapp, fake_telescope):
     window = MainWindow()
     controller = Controller(window)

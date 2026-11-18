@@ -505,8 +505,9 @@ class FocusControlPanel(QtWidgets.QWidget):
 
     Every measurement uses the brightest detected source by default; hovering
     over a different source in the image and pressing 'm' measures that one
-    instead (see :class:`~nickel_focus.gui.views.image_panel.ImagePanel`).
-    Either way, the coordinates actually measured are logged, and so appear
+    instead (see :class:`~nickel_focus.gui.views.image_panel.ImagePanel`),
+    until a move is started from the Slew tab (see
+    :meth:`~nickel_focus.gui.controller.Controller.move_to_target`).  Either way, the coordinates actually measured are logged, and so appear
     on the Log tab.
 
     The Log tab is a :class:`LogView` repeating the console's log output
@@ -997,8 +998,10 @@ class FocusControlPanel(QtWidgets.QWidget):
             '<b>Source selection</b> — the brightest star is measured '
             "automatically by default (see the Log for its coordinates); "
             "hover over a different star in the image and press 'm' to "
-            "measure that one instead. Press 'r' over the image to fit the "
-            'whole frame in view again.<br><br>'
+            'measure that one instead. The marked star is used until you '
+            'start a move from the Slew tab (a slew started from another '
+            'program does not clear it). Press \'r\' over the image to fit '
+            'the whole frame in view again.<br><br>'
             '<b>Acquire / Load</b> — run the action configured in that '
             'tab.<br>'
             '<b>Interrupt</b> — stop a running Grid/Auto sequence between '

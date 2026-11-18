@@ -261,13 +261,13 @@ implementation history.
 | --- | --- |
 | `gui/qt.py` | Single point of contact with PySide6; the only module allowed to `import PySide6` directly. |
 | `gui/launcher.py` | Builds the `QApplication` (always with Qt's "Fusion" widget style -- the Linux default -- so the layout is the same on every platform, including macOS and the offscreen test platform) and `MainWindow`. Wiring up the `Controller`, showing the window, and starting the Qt event loop happens one layer up, in `scripts/focus_gui.py`'s `NickelFocusGUI.main` (the `nickel_focus_gui` console script's entry point). |
-| `gui/controller.py` | Mediates between views and model; owns the shared `NickelPoco`/`NSciCam` services, the active sequence/worker, the telescope handle/slew worker, and the hardware-exclusivity state machine; also decides, once, whether the ktl-driven tabs start out enabled. |
+| `gui/controller.py` | Mediates between views and model; owns the shared `NickelPoco`/`NSciCam` services, the active sequence/worker, the telescope handle/slew worker, the photometry method ('brightest', or the star marked with 'm', which persists until a Slew-tab move starts), and the hardware-exclusivity state machine; also decides, once, whether the ktl-driven tabs start out enabled. |
 | `gui/log_handler.py` | `QtLogHandler`, a `logging.Handler` that forwards formatted `nickel_focus.log` records into the Log tab via a Qt signal, so records logged from a background thread are delivered safely to the GUI thread. |
 | `gui/model/focus_worker.py` | `QThread` subclass that runs one `FocusSequence` operation (step/reanalyze/single exposure) off the GUI thread, reporting progress via signals. |
 | `gui/model/slew_worker.py` | `QThread` subclass that runs one `NickelTelescopePointing.slew_to` call off the GUI thread, since a slew can block for up to five minutes. |
 | `gui/views/main_window.py` | Top-level `QMainWindow`; lays out the panels (status bar stacked above the image panel; splitters between left/right and between the two right-hand panels). |
 | `gui/views/status_bar.py` | One row: a Quit button (disabled while anything is running) and five indicators (Slew, Track, On Target, Focus, Exp), each a `StatusIndicator`: a green/yellow/red circle, as set by the Controller, next to left-aligned text. |
-| `gui/views/image_panel.py` | Displays collected exposures one at a time: pan, zoom ('r' recenters to fit the frame), stretch selection, and source selection (hover and press 'm') for reanalysis; `ElidingComboBox` for the exposure drop-down. |
+| `gui/views/image_panel.py` | Displays collected exposures one at a time, North up (row 0 drawn at the top, y-axis inverted; pixel coordinates unchanged): pan, zoom ('r' recenters to fit the frame), stretch selection, source selection (hover and press 'm') for reanalysis, and a pixel-value readout beside the pointer (a `QLabel` child of the canvas; 0-based pixel, like the centroids, and `StepResult.raw` value); `ElidingComboBox` for the exposure drop-down. |
 | `gui/views/focus_curve_panel.py` | Live scatter plot of FWHM vs. focus value, with the fitted quadratic and its vertex (an open black star) once enough points exist. The limits are set by the measured points alone, so the fit and best focus never widen them. The right axis (a `twinx`) is FWHM in arcsec -- `focus.ARCSEC_PER_UNBINNED_PIXEL` (0.1665) times the binning, from each exposure's `CD1_1C`/`CD2_2C` header (`focus.exposure_binning`, `StepResult.binning`) -- when every point has the same known binning (`focus.common_binning`), and otherwise repeats the left axis in pixels. A binning that can't be read is logged as a warning. The Controller's step, single-exposure, and best-fit log messages give FWHMs the same way, via `focus.fwhm_text` (`'3.21 pix (1.07 arcsec)'`, or `'3.21 pix'`); the best fit uses the sequence's common binning (`FocusSequence.binning`, from `FocusSequence.binnings`). |
 | `gui/views/focus_control_panel.py` | Tabbed sequence configuration -- Slew (target entry, "Move to Target", "Find nearest object/pointing/focus star") plus Single (with "Use current focus": `useCurrentFocusRequested`, answered by `Controller.use_current_focus` from the latest `POCSECPA` broadcast, rounded, via `set_single_focus`; Acquire is unchanged and so skips the move when the commanded focus already matches)/Grid/Auto/Replay -- and Log/Help tabs; emits the signals that request an action. `set_hardware_tabs_enabled` grays out the four ktl-driven tabs (and switches to Replay) on the Controller's say-so. |
 
@@ -390,6 +390,16 @@ connection can pass the undocumented `nickel_focus_gui --test` flag to
 leave those tabs enabled anyway -- every action on them still fails the
 same way; only the graying is skipped.
 
+### Known issues
+
+- **Only Slew-tab moves clear a marked star.** `Controller.move_to_target`
+  resets the photometry method to `'brightest'` when it starts a slew, but
+  a slew started outside the GUI isn't detected, so a star marked with 'm'
+  stays in effect (the new field is measured with the source nearest the
+  old pixel position). Detecting it would mean watching a `nickelpoco`
+  keyword that reliably signals a new slew; not planned unless it proves
+  troublesome for observers. Workaround: mark again, or restart the GUI.
+
 For installation (including the `gui` extra) and running the test suite,
 see the top-level `README.md`.
 
@@ -403,7 +413,10 @@ matter which is true:
 - `tests/gui/conftest.py` skips the entire `tests/gui/` subtree via
   `pytest.importorskip('PySide6')` if PySide6 isn't installed, and forces
   the offscreen Qt platform plugin so whatever GUI tests do run never need
-  a real display.
+  a real display. Its autouse `_settle_qt` fixture runs any pending Qt
+  events after each GUI test and then frees that test's widgets, so a
+  redraw a window scheduled can't fire on it after it's deleted during a
+  later test.
 - `tests/conftest.py`'s autouse `no_ktl` fixture sets `services.base.ktl`
   -- the package's only reference to `ktl` -- to `None` before every test,
   regardless of whether the real `ktl` package happens to be importable in
@@ -470,4 +483,8 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `894c444` | 2026-11-17 | Speed and binning are rows of radio buttons (`RadioChoice`) instead of drop-downs; an unrecognized camera value gets its own button. |
 | `79166ad` | 2026-11-17 | Every exposure from a sequence or the Single tab sets `OBJECT` to the Slew tab's new, editable target Name (or `unknown`, with a warning if the telescope is >2' from the target) and the focus; Exposure drop-down entries show file and object names, at a fixed width, shortened in the middle when long (full text in the list and tooltip); `OBJECT` capped at 68 characters; Recenter button and Stretch label removed, 'r' recenters. |
 | `19566b8` | 2026-11-18 | Focus curve: right axis in arcsec (0.1665"/unbinned pixel x binning from `CD1_1C`/`CD2_2C`; pixels if unknown), limits from the measured points only, best focus an open black star; logged FWHMs (each step, single exposures, best fit) in pixels and arcsec when the binning is known. |
-| *pending* | 2026-11-18 | Single tab: "Use current focus" button fills the focus value with the telescope's current focus. |
+| `282eea6` | 2026-11-18 | Single tab: "Use current focus" button fills the focus value with the telescope's current focus. |
+| *pending* | 2026-11-18 | Image panel shows exposures North up (East left). |
+| *pending* | 2026-11-18 | Image panel shows the pixel (0-based) and its raw value beside the mouse pointer; `StepResult.raw` added, in the file's own (16-bit) type. |
+| *pending* | 2026-11-18 | Starting a slew from the Slew tab clears the marked star (back to the brightest); slews from elsewhere listed as a known issue. |
+| *pending* | 2026-11-18 | GUI tests run pending Qt events and free each test's widgets after it (`_settle_qt`), fixing intermittent "already deleted" errors. |

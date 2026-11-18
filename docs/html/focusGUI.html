@@ -163,7 +163,9 @@ documentation.</figcaption></figure>
 different star, hover the mouse over it in the image panel (left) and press the
 <b>m</b> key.  The FWHM is remeasured using that star for each exposure in the
 sequence; the FWHM values and best-fitting curve are updated based on the new
-measurements.  The image panel also has an <b>Exposure</b> drop-down menu (top
+measurements.  The marked star is used for every later sequence and
+<b>Single</b> exposure until you start a move from the <b>Slew</b> tab, which
+returns to measuring the brightest star (noted in the <b>Log</b> tab).  The image panel also has an <b>Exposure</b> drop-down menu (top
 left) which can be used to step through every exposure in the sequence (listed
 in order of focus value, each by its file name and object name, e.g.
 <b>n3246.fits - Focusing03: focus=345.0</b>; a long entry is shortened in the
@@ -171,7 +173,11 @@ middle, and hovering over the menu shows it in full).  You can also change the
 image stretch using the drop-down menu at the top right (<b>ZScale</b>,
 <b>Min/Max</b>, <b>Sqrt</b>, <b>Log</b>, <b>Asinh</b>), zoom the image using the
 mouse wheel, and refit the image to the window by pressing <b>r</b> with the
-mouse over the image.  </p>
+mouse over the image.  Images are shown with North up and East to the left.
+While the mouse is over the image, a small box beside the pointer gives the
+pixel under it (x, y, counting from 0, like the star positions in the
+<b>Log</b> tab; DS9 counts from 1) and that pixel's raw value, before the
+background is subtracted.  </p>
 
 <p> The <b>Single</b> tab takes one exposure at the given <b>Focus value</b>.
 After a sequence finishes, the focus value is set to the fitted best focus, so
@@ -245,6 +251,17 @@ prefix/suffix, <b>Obsnum</b>, and the number of steps) do not match the files on
 disk.</td>
 <td>Correct the entries on the <b>Replay</b> tab.</td></tr>
 </table>
+
+<h3>Known issues</h3>
+
+<ul>
+<li><b>A marked star is only cleared by a move from the Slew tab.</b>  The
+GUI can't tell when the telescope is slewed from another program, so a star
+marked with <b>m</b> stays in effect after such a slew, and the new field is
+measured using the star nearest the old position.  After slewing the telescope
+outside the GUI, mark the star you want with <b>m</b> again, or restart the
+GUI to return to measuring the brightest star.</li>
+</ul>
 
 <p> If a problem persists and you need immediate support, contact a <a
 href="../../../staff/on_call.html">Support Astronomer or Telescope

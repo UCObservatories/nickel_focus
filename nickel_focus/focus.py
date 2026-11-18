@@ -254,6 +254,11 @@ class StepResult:
     binning : :obj:`int` or None
         The exposure's binning (1, 2, or 4; see
         :func:`~nickel_focus.focus.exposure_binning`), or None if unknown.
+    raw : :class:`numpy.ndarray` or None
+        The exposure's image data as read from the file (before background
+        subtraction), in the file's own type -- 16-bit unsigned integers for
+        the Nickel camera, a quarter of the size of ``frame`` -- or None if
+        not kept.
     """
     index: int
     focus_value: float
@@ -265,6 +270,7 @@ class StepResult:
     is_outlier: bool
     object_name: str | None = None
     binning: int | None = None
+    raw: np.ndarray | None = None
 
 
 ARCSEC_PER_UNBINNED_PIXEL = 0.1665
@@ -468,7 +474,8 @@ class FocusSequence:
                 focus_value=self.observed_focus[-1],
                 exposure=self.exposures[-1],
                 fwhm=img_quality,
-                frame=data - bkg,
+                frame=data.astype(float) - bkg,
+                raw=data,
                 stamp=source_stamp,
                 centroid=coords,
                 is_outlier=FocusPlot.is_outlier(self.centroids),
@@ -525,7 +532,8 @@ class FocusSequence:
                 focus_value=focus_value,
                 exposure=exposure_file,
                 fwhm=img_quality,
-                frame=data - bkg,
+                frame=data.astype(float) - bkg,
+                raw=data,
                 stamp=source_stamp,
                 centroid=coords,
                 is_outlier=FocusPlot.is_outlier(self.centroids),
@@ -581,7 +589,8 @@ class FocusSequence:
             focus_value=self._focus.current,
             exposure=exposure_file,
             fwhm=img_quality,
-            frame=data - bkg,
+            frame=data.astype(float) - bkg,
+            raw=data,
             stamp=source_stamp,
             centroid=coords,
             is_outlier=False,
