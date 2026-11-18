@@ -476,12 +476,52 @@ def test_set_current_position_updates_labels(qapp):
 def test_show_nearest_target_populates_target_fields(qapp):
     panel = FocusControlPanel()
 
-    panel.show_nearest_target('00:30:07.29', '+29:45:06.20')
+    panel.show_nearest_target('00:30:07.29', '+29:45:06.20', 'Pointing00')
 
-    assert panel.slew_target_ra_edit.text() == '00:30:07.29', \
-        'the target RA field should be populated with the found target'
-    assert panel.slew_target_dec_edit.text() == '+29:45:06.20', \
-        'the target Dec field should be populated with the found target'
+    assert panel.slew_target_name_edit.text() == 'Pointing00', \
+        'the target name field should be populated with the found target'
+    assert panel.get_target_coordinates() == ('00:30:07.29', '+29:45:06.20'), \
+        'the target RA/Dec fields should be populated with the found target'
+    assert panel.get_target_name() == 'Pointing00', "the found target's name should be reported"
+
+
+def test_target_name_can_be_edited(qapp):
+    panel = FocusControlPanel()
+    panel.show_nearest_target('00:30:07.29', '+29:45:06.20', 'Pointing00')
+
+    type_text(panel.slew_target_name_edit, 'My star')
+
+    assert panel.get_target_name() == 'My star', 'the user should be able to edit the name'
+
+
+def test_target_name_is_cleared_for_typed_coordinates(qapp):
+    panel = FocusControlPanel()
+    assert panel.get_target_name() is None, 'with no target found, there is no name'
+
+    panel.show_nearest_target('00:30:07.29', '+29:45:06.20', 'Pointing00')
+    type_text(panel.slew_target_dec_edit, '+30:00:00')
+
+    assert panel.get_target_name() is None, \
+        'typing coordinates should clear the name: the target is no longer the one named'
+
+
+def test_finding_a_target_again_restores_a_name(qapp):
+    panel = FocusControlPanel()
+    type_text(panel.slew_target_ra_edit, '01:00:00')
+
+    panel.show_nearest_target('00:30:07.29', '+29:45:06.20', 'Focusing00')
+
+    assert panel.get_target_name() == 'Focusing00', 'a newly found target should be named'
+
+
+def test_target_section_is_labeled_target(qapp):
+    panel = FocusControlPanel()
+
+    texts = [label.text() for label in panel.slew_tab.widget().findChildren(QtWidgets.QLabel)]
+
+    assert 'Target' in texts and 'Target coordinates' not in texts, \
+        "the target section should be headed 'Target'"
+    assert 'Name:' in texts, 'the target should have a Name field'
 
 
 def test_preferred_height_excluding_help_ignores_the_tallest_page(qapp):

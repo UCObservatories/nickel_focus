@@ -73,3 +73,36 @@ def test_automated_sequence_starting_past_best_focus_still_converges(fake_hardwa
     best_focus, best_fwhm = seq.fit_best_focus(seq.observed_focus, seq.img_quality)
     assert best_focus == pytest.approx(fake_hardware['best_focus'], abs=5.), \
         'the adaptive search should converge regardless of which side it starts on'
+
+
+def test_each_exposure_records_the_object_and_focus(fake_hardware):
+    seq = focus.GridFocusSequence(340., 5., nstep=3, **_services(fake_hardware))
+    seq.object_name = 'Focusing07'
+
+    list(seq.step(method='brightest'))
+
+    assert fake_hardware['sim'].keyword('nscicam', 'OBJECT').writes == [
+        'Focusing07: focus=340.0', 'Focusing07: focus=345.0', 'Focusing07: focus=350.0',
+    ], 'each exposure should record the object name and the focus it was taken at'
+
+
+def test_object_name_defaults_to_unknown(fake_hardware):
+    seq = focus.GridFocusSequence(340., 5., nstep=3, **_services(fake_hardware))
+
+    list(seq.step(method='brightest'))
+
+    assert fake_hardware['sim'].keyword('nscicam', 'OBJECT').writes[0] == \
+        'unknown: focus=340.0', "without an object name, OBJECT should say 'unknown'"
+
+
+def test_long_object_names_are_shortened_to_fit_fits(fake_hardware):
+    seq = focus.GridFocusSequence(340., 5., nstep=3, **_services(fake_hardware))
+    seq.object_name = 'A' * 100
+
+    list(seq.step(method='brightest'))
+
+    written = fake_hardware['sim'].keyword('nscicam', 'OBJECT').writes[0]
+    assert len(written) == seq.OBJECT_MAX_LENGTH, \
+        'OBJECT should be capped at the 68 characters a FITS string value can hold'
+    assert written.endswith('...: focus=340.0'), \
+        'only the name should be shortened, so the focus is always kept'

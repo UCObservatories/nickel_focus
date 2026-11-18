@@ -153,3 +153,14 @@ def test_setting_value_converts_keyword_values(key, ascii_value, expected):
 def test_setting_value_rejects_a_non_numeric_exposure_time():
     with pytest.raises(ValueError):
         ExposureConfig.setting_value('exptime', 'garbage')
+
+
+def test_configure_and_expose_set_the_object(fake_hardware):
+    sim, cam = fake_hardware['sim'], fake_hardware['cam']
+
+    cam.cfg.configure(object_name='Pointing03: focus=350.0')
+    exposure.Exposure(cam).expose(object_name='Pointing03: focus=355.0')
+
+    assert sim.keyword('nscicam', 'OBJECT').writes == [
+        'Pointing03: focus=350.0', 'Pointing03: focus=355.0'
+    ], 'configure and expose should write OBJECT when given an object name'

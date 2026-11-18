@@ -206,11 +206,12 @@ class ExposureConfig:
         # TODO: Is there a way to programmatically get the binning options
         self.expbin_options = ['1,1', '2,2', '4,4']
 
-    def configure(self, record=None, speed=None, binning=None, exptime=None):
+    def configure(self, record=None, speed=None, binning=None, exptime=None, object_name=None):
         """
         Write each setting that isn't None: ``RECORD``, ``AMPCONF`` (``speed``,
         a :attr:`speed_aliases` name or an ``AMPCONFLIST`` value), ``BINNING``,
-        and ``EXPOSURE`` (``exptime``, seconds).
+        ``EXPOSURE`` (``exptime``, seconds), and ``OBJECT`` (``object_name``,
+        the name recorded with the exposure).
 
         Raises
         ------
@@ -234,6 +235,8 @@ class ExposureConfig:
             self.cam.write('BINNING', binning)
         if exptime is not None:
             self.cam.write('EXPOSURE', exptime)
+        if object_name is not None:
+            self.cam.write('OBJECT', object_name)
 
     @property
     def exptime(self):

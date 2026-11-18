@@ -38,7 +38,7 @@ class Exposure:
     finished file (``FITSFILE``).
     """
 
-    def expose(self, record=None, speed=None, binning=None, exptime=None):
+    def expose(self, record=None, speed=None, binning=None, exptime=None, object_name=None):
         """
         Configure the camera (see
         :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure`), take
@@ -67,7 +67,9 @@ class Exposure:
             'No reply from nscicam.EXPSTATE; cannot tell whether the camera is ready.'
         )
 
-        self.cfg.configure(record=record, speed=speed, binning=binning, exptime=exptime)
+        self.cfg.configure(
+            record=record, speed=speed, binning=binning, exptime=exptime, object_name=object_name
+        )
 
         # The file from the previous exposure; this exposure's will differ.
         previous_file = self.cam.fits_file()

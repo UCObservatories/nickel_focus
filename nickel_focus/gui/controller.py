@@ -99,6 +99,13 @@ class Controller(QtCore.QObject):
         outside of that.
     """
 
+    MAX_TARGET_OFFSET_ARCMIN = 2.
+    """
+    How far, in arcminutes, the telescope may be from the Slew tab's target for
+    its name to be recorded as the exposures' object (see
+    :meth:`~nickel_focus.gui.controller.Controller._name_object`).
+    """
+
     POSITION_REDRAW_MS = 200
     """
     The shortest interval, in milliseconds, between redraws of the Slew tab's
@@ -243,6 +250,7 @@ class Controller(QtCore.QObject):
             )
             return
 
+        self._name_object(focus_sequence)
         self.focus_sequence = focus_sequence
         self._standalone_focus_sequence = None
         self.window.image_panel.reset()
@@ -318,6 +326,7 @@ class Controller(QtCore.QObject):
         if standalone._focus is None or standalone._exposure is None:
             self._fail('Could not take single exposure: no ktl connection is available.')
             return
+        self._name_object(standalone)
         self._standalone_focus_sequence = standalone
         exp_kwargs = self.window.control_panel.get_exposure_config()
         self._start_focus_worker(
@@ -441,6 +450,70 @@ class Controller(QtCore.QObject):
         """
         log.error(message, exc_info=exc)
 
+    def _name_object(self, focus_sequence):
+        """
+        Set ``focus_sequence``'s
+        :attr:`~nickel_focus.focus.FocusSequence.object_name` -- recorded with
+        each exposure, with the focus, as the camera's ``OBJECT`` -- to the
+        Slew tab's target name, if the telescope is pointed at that target.
+
+        The name is used only if the Slew tab's target coordinates are within
+        :attr:`MAX_TARGET_OFFSET_ARCMIN` of the telescope's current position
+        (its latest ``POCORAA``/``POCODECA`` broadcast).  Otherwise -- or if
+        the two can't be compared -- the object stays ``'unknown'`` and a
+        warning is logged; the Slew tab's name is left as it is.  With no
+        target name, the object is ``'unknown'``.
+        """
+        name = self.window.control_panel.get_target_name()
+        if name is None:
+            return
+        offset = self._target_offset()
+        if offset is None:
+            log.warning(
+                f"Could not compare the Slew tab's target ({name}) with the telescope's "
+                "current position; recording the object as 'unknown'."
+            )
+            return
+        if offset > self.MAX_TARGET_OFFSET_ARCMIN:
+            log.warning(
+                f"The telescope is {offset:.1f} arcmin from the Slew tab's target ({name}), more "
+                f"than {self.MAX_TARGET_OFFSET_ARCMIN:g} arcmin; recording the object as "
+                "'unknown'."
+            )
+            return
+        focus_sequence.object_name = name
+
+    def _target_offset(self):
+        """
+        The separation, in arcminutes, between the Slew tab's target
+        coordinates and the telescope's current position, or None if either
+        is missing or can't be parsed.
+        """
+        ra_text, dec_text = self.window.control_panel.get_target_coordinates()
+        current = self._current_pointing()
+        if current is None:
+            return None
+        try:
+            target = SkyCoord(ra=ra_text, dec=dec_text, unit=('hourangle', 'deg'))
+        except ValueError:
+            return None
+        return target.separation(current).arcmin
+
+    def _current_pointing(self):
+        """
+        The telescope's current position from the latest ``POCORAA``/
+        ``POCODECA`` broadcasts, or None if there are none or they can't be
+        parsed.
+        """
+        ra = self._latest.get(('nickelpoco', 'POCORAA'))
+        dec = self._latest.get(('nickelpoco', 'POCODECA'))
+        if ra is None or dec is None:
+            return None
+        try:
+            return SkyCoord(ra=ra, dec=dec, unit=('hourangle', 'deg'))
+        except ValueError:
+            return None
+
     def _find_nearest(self, obj_search_str, file=None):
         """
         Shared implementation for
@@ -474,7 +547,7 @@ class Controller(QtCore.QObject):
         dec_text = dec.to_string(unit='deg', sep=':', pad=True, alwayssign=True, precision=2)
         text = f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})'
         log.info(text)
-        self.window.control_panel.show_nearest_target(ra_text, dec_text)
+        self.window.control_panel.show_nearest_target(ra_text, dec_text, name)
 
     def _start_focus_worker(self, focus_sequence, mode, exp_kwargs=None, focus_value=None):
         """

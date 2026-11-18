@@ -59,14 +59,16 @@ short summary of the purpose of each tab.  </p>
 <p>The left side of the <b>Slew</b> tab shows the telescope's <b>Current
 coordinates</b>; these update as the telescope reports them (at most five
 times a second).  To acquire a target with
-known coordinates, enter a sexagesimal RA and Dec under <b>Target
-coordinates</b> (e.g., 05:30:00 and +20:15:00) and press <b>Move to Target</b>.
+known coordinates, enter a sexagesimal RA and Dec under <b>Target</b> (e.g.,
+05:30:00 and +20:15:00), and optionally its <b>Name</b>, and press <b>Move to
+Target</b>.
 The <b>Log</b> tab reports when the telescope arrives or why the move could not
 be made.  You must enable movement and tracking (using POCO)
 to control the telescope via the GUI.</p>
 
 <p> The right side allows you to quickly find a target near the telescope's
-current position, and the target coordinates will be updated for you.
+current position, and the target's name and coordinates will be updated for
+you.
 Typically, you will use the <b>Focusing *</b> button, which finds the nearest
 focus star.  You can also use <b>Pointing *</b> to find the nearest pointing
 star.  These stars are selected from a catalog of stars that comes with the
@@ -99,6 +101,15 @@ data-acquisition GUI, and they're the same on all three tabs.  Choosing a
 data-acquisition GUI, a new <b>Exposure time</b> turns the box light red until
 you press <b>Enter</b>, which sends it to the camera; until then, the
 previous exposure time stays in effect.  </p>
+
+<p> Each exposure's object name (the camera's <b>OBJECT</b>) is set for you,
+as the target's name and the focus value, e.g. <b>Focusing03:
+focus=345.0</b>.  The name is the <b>Name</b> on the <b>Slew</b> tab: filled in
+when you find a star there (with <b>Focusing *</b>, <b>Pointing *</b>, or
+<b>Object</b>), and yours to edit.  Typing new target coordinates clears it.
+If there's no name, or the telescope is more than 2 arcminutes from the
+<b>Slew</b> tab's target coordinates, the name is recorded as <b>unknown</b>
+(with a warning on the <b>Log</b> tab in the latter case).  </p>
 
 <p>
 There are two ways to take a focus sequence:
@@ -148,10 +159,13 @@ different star, hover the mouse over it in the image panel (left) and press the
 sequence; the FWHM values and best-fitting curve are updated based on the new
 measurements.  The image panel also has an <b>Exposure</b> drop-down menu (top
 left) which can be used to step through every exposure in the sequence (listed
-in order of focus value).  You can also change the image stretch using the
-<b>Stretch</b> dropdown menu (<b>ZScale</b>, <b>Min/Max</b>, <b>Sqrt</b>,
-<b>Log</b>, <b>Asinh</b>), zoom the image using the mouse wheel, and refit the
-image to the window using <b>Recenter</b>.  </p>
+in order of focus value, each by its file name and object name, e.g.
+<b>n3246.fits - Focusing03: focus=345.0</b>; a long entry is shortened in the
+middle, and hovering over the menu shows it in full).  You can also change the
+image stretch using the drop-down menu at the top right (<b>ZScale</b>,
+<b>Min/Max</b>, <b>Sqrt</b>, <b>Log</b>, <b>Asinh</b>), zoom the image using the
+mouse wheel, and refit the image to the window by pressing <b>r</b> with the
+mouse over the image.  </p>
 
 <p> The <b>Single</b> tab takes one exposure at the given <b>Focus value</b>.
 After a sequence finishes, the focus value is set to the fitted best focus, so

@@ -609,7 +609,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         # bar itself is deliberately never disabled, so the Log tab
         # stays reachable while a sequence runs.
         self._config_widgets = [
-            self.slew_target_ra_edit, self.slew_target_dec_edit, self.slew_file_edit,
+            self.slew_target_name_edit, self.slew_target_ra_edit, self.slew_target_dec_edit,
+            self.slew_file_edit,
             self.slew_browse_button, self.slew_search_edit, self.single_focus_spin,
             self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice,
             self.grid_start_spin, self.grid_step_spin, self.grid_nstep_spin,
@@ -672,10 +673,11 @@ class FocusControlPanel(QtWidgets.QWidget):
     def _build_slew_tab(self):
         """
         Build the Slew tab as two untitled :class:`PySide6.QtWidgets.QGroupBox`
-        sub-panels: current/target RA-Dec and "Move to Target" on the left,
-        starlist file/browse, a target-name search pattern, and a single row of
-        three "Find nearest ..." buttons ("Object", "Pointing *", "Focusing *"
-        -- ``*`` standing in for "star") on the right.  Unlike the other action
+        sub-panels: current RA-Dec, the target (name, RA-Dec), and "Move to
+        Target" on the left; starlist file/browse, a target-name search
+        pattern, and a single row of three "Find nearest ..." buttons
+        ("Object", "Pointing *", "Focusing *" -- ``*`` standing in for "star")
+        on the right.  Unlike the other action
         tabs, the two panels here are separate sub-workflows (move to a known
         position vs. find a target), and each ends in its own button(s) rather
         than sharing one row below both.
@@ -688,8 +690,15 @@ class FocusControlPanel(QtWidgets.QWidget):
         # the width cost.
         self.slew_current_ra_label = QtWidgets.QLabel('—')
         self.slew_current_dec_label = QtWidgets.QLabel('—')
+        self.slew_target_name_edit = QtWidgets.QLineEdit()
         self.slew_target_ra_edit = QtWidgets.QLineEdit()
         self.slew_target_dec_edit = QtWidgets.QLineEdit()
+        # The name is filled in by "Find nearest ..." and can be edited.
+        # Typing coordinates (textEdited fires only for the user's own
+        # edits) means the target is no longer the one named, so the name
+        # is cleared.
+        for edit in (self.slew_target_ra_edit, self.slew_target_dec_edit):
+            edit.textEdited.connect(self.slew_target_name_edit.clear)
         # Wide enough for a full sexagesimal value (e.g. '+00:00:00.0')
         # to show without scrolling -- a bare default QLineEdit is only
         # wide enough for a few characters. `sizeHint()` on a QLineEdit
@@ -708,6 +717,8 @@ class FocusControlPanel(QtWidgets.QWidget):
             [('RA:', self.slew_current_ra_label)],
             [('Dec:', self.slew_current_dec_label)],
         )
+        name_row = QtWidgets.QFormLayout()
+        name_row.addRow('Name:', self.slew_target_name_edit)
         target_row = _two_column_row(
             [('RA:', self.slew_target_ra_edit)],
             [('Dec:', self.slew_target_dec_edit)],
@@ -722,7 +733,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         position_layout = QtWidgets.QVBoxLayout()
         _add_centered_label(position_layout, 'Current coordinates')
         position_layout.addLayout(current_row)
-        _add_centered_label(position_layout, 'Target coordinates')
+        _add_centered_label(position_layout, 'Target')
+        position_layout.addLayout(name_row)
         position_layout.addLayout(target_row)
         position_layout.addLayout(_button_row(self.slew_move_button))
         position_layout.addStretch(1)
@@ -972,7 +984,8 @@ class FocusControlPanel(QtWidgets.QWidget):
             '<b>Source selection</b> — the brightest star is measured '
             "automatically by default (see the Log for its coordinates); "
             "hover over a different star in the image and press 'm' to "
-            'measure that one instead.<br><br>'
+            "measure that one instead. Press 'r' over the image to fit the "
+            'whole frame in view again.<br><br>'
             '<b>Acquire / Load</b> — run the action configured in that '
             'tab.<br>'
             '<b>Interrupt</b> — stop a running Grid/Auto sequence between '
@@ -1232,10 +1245,10 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.slew_current_ra_label.setText(ra_text)
         self.slew_current_dec_label.setText(dec_text)
 
-    def show_nearest_target(self, ra_text, dec_text):
+    def show_nearest_target(self, ra_text, dec_text, name):
         """
-        Populate the Slew tab's target RA/Dec fields with a found nearest
-        target.
+        Populate the Slew tab's target Name and RA/Dec fields with a found
+        nearest target.
 
         Parameters
         ----------
@@ -1243,9 +1256,25 @@ class FocusControlPanel(QtWidgets.QWidget):
             The nearest target's right ascension, already formatted for display.
         dec_text : :obj:`str`
             The nearest target's declination, already formatted for display.
+        name : :obj:`str`
+            The nearest target's name, from its catalog.
         """
+        self.slew_target_name_edit.setText(name)
         self.slew_target_ra_edit.setText(ra_text)
         self.slew_target_dec_edit.setText(dec_text)
+
+    def get_target_name(self):
+        """
+        The Slew tab's target name (filled in by "Find nearest ...", possibly
+        edited, and cleared when the target coordinates are typed in), or None
+        if it's empty.
+        """
+        name = self.slew_target_name_edit.text().strip()
+        return name or None
+
+    def get_target_coordinates(self):
+        """The Slew tab's target ``(ra_text, dec_text)``, as entered."""
+        return self.slew_target_ra_edit.text(), self.slew_target_dec_edit.text()
 
     def show_best_focus(self, best_focus):
         """

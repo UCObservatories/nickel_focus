@@ -133,6 +133,35 @@ values:
   (deliberately: settings changes are quick, and blocking the GUI while a
   slow or unresponsive camera finishes is acceptable). A rejected write is
   reported via `_fail`, and the fields go back to the camera's value.
+- **`OBJECT`**, not shown among the fields, is written before every
+  exposure a sequence or the Single tab takes, as
+  `'<name>: focus=<focus>'` (`FocusSequence.exposure_object`; the focus
+  read just before the exposure, to one decimal place), capped at
+  `FocusSequence.OBJECT_MAX_LENGTH` (68, the most a FITS string value holds)
+  by shortening only the name, ending in `'...'`. The name is the
+  Slew tab's target **Name** (`slew_target_name_edit`,
+  `FocusControlPanel.get_target_name()`): filled in by
+  `show_nearest_target`, editable, and cleared when the user types in the
+  target RA/Dec fields. `Controller._name_object` sets it on each new
+  sequence or standalone exposure, but only if the Slew tab's target
+  coordinates are within `Controller.MAX_TARGET_OFFSET_ARCMIN` (2') of the
+  telescope's current position (its latest `POCORAA`/`POCODECA`
+  broadcast); otherwise, or if the two can't be compared, it logs a warning
+  and leaves the object `'unknown'` (`FocusSequence.object_name`'s default,
+  which the CLI uses) -- without changing the Slew tab's name.
+- The image panel's **Exposure** drop-down lists each exposure as
+  `'<file name> - <OBJECT>'` (`ImagePanel.exposure_label`), the object read
+  from the file's header (`focus.exposure_object_name`, carried as
+  `StepResult.object_name`) -- so replayed exposures show theirs too --
+  or `'<file name> - focus=<focus>'` if it has none. The drop-down's width
+  doesn't follow its entries: it's sized from
+  `ImagePanel.EXPOSURE_MIN_CHARACTERS` (3, so it never sets the window's
+  minimum width) and stretches to fill its row, between the "Exposure:"
+  label and the stretch drop-down at the right (which has no label, only a
+  tooltip). It's an `ElidingComboBox`: the closed box shortens a long entry
+  in the middle ("…") to its current width, keeping the file name and focus
+  visible; the open list widens to fit the longest entry; and hovering
+  shows the full entry as a tooltip.
 - Acquire still applies the fields with `configure()` before exposing, as a
   safeguard (normally a no-op). Fields are disabled while anything runs, but
   broadcasts still update them.
@@ -238,7 +267,7 @@ implementation history.
 | `gui/model/slew_worker.py` | `QThread` subclass that runs one `NickelTelescopePointing.slew_to` call off the GUI thread, since a slew can block for up to five minutes. |
 | `gui/views/main_window.py` | Top-level `QMainWindow`; lays out the panels (status bar stacked above the image panel; splitters between left/right and between the two right-hand panels). |
 | `gui/views/status_bar.py` | One row: a Quit button (disabled while anything is running) and five indicators (Slew, Track, On Target, Focus, Exp), each a `StatusIndicator`: a green/yellow/red circle, as set by the Controller, next to left-aligned text. |
-| `gui/views/image_panel.py` | Displays collected exposures one at a time: pan, zoom, stretch selection, and source selection (hover and press 'm') for reanalysis. |
+| `gui/views/image_panel.py` | Displays collected exposures one at a time: pan, zoom ('r' recenters to fit the frame), stretch selection, and source selection (hover and press 'm') for reanalysis; `ElidingComboBox` for the exposure drop-down. |
 | `gui/views/focus_curve_panel.py` | Live scatter plot of FWHM vs. focus value, with the fitted quadratic and its vertex once enough points exist. |
 | `gui/views/focus_control_panel.py` | Tabbed sequence configuration -- Slew (target entry, "Move to Target", "Find nearest object/pointing/focus star") plus Single/Grid/Auto/Replay -- and Log/Help tabs; emits the signals that request an action. `set_hardware_tabs_enabled` grays out the four ktl-driven tabs (and switches to Replay) on the Controller's say-so. |
 
@@ -438,4 +467,5 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `a37e42c` | 2026-11-17 | Status indicators and current position follow keyword broadcasts (`KTLService.subscribe` → `gui/ktl_bridge.py` → queued signal), replacing the 1 Hz poll; position redraws limited to every 200 ms. |
 | `50b703f` | 2026-11-17 | Exposure fields follow the camera both ways: broadcasts update all three tabs (outside changes logged); edits write to the camera at once, with the exposure time light red until Enter; unknown speed/binning values added to the options. |
 | `8691767` | 2026-11-17 | Log tab repeats the console -- same level (`nickel_focus_gui` now applies `-v`/`--log_file`/`--log_level`), format, and colors, in a fixed-width font sized to ~80 columns -- keeps 5000 lines, is never cleared, and has no status/step lines; KTL's log included. |
-| *pending* | 2026-11-17 | Speed and binning are rows of radio buttons (`RadioChoice`) instead of drop-downs; an unrecognized camera value gets its own button. |
+| `894c444` | 2026-11-17 | Speed and binning are rows of radio buttons (`RadioChoice`) instead of drop-downs; an unrecognized camera value gets its own button. |
+| *pending* | 2026-11-17 | Every exposure from a sequence or the Single tab sets `OBJECT` to the Slew tab's new, editable target Name (or `unknown`, with a warning if the telescope is >2' from the target) and the focus; Exposure drop-down entries show file and object names, at a fixed width, shortened in the middle when long (full text in the list and tooltip); `OBJECT` capped at 68 characters; Recenter button and Stretch label removed, 'r' recenters. |

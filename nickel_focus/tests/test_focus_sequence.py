@@ -161,3 +161,20 @@ def test_reanalyze_with_coordinate_method(focus_sweep):
     coord_results = list(seq.reanalyze(method=(50., 50.)))
     assert [r.fwhm for r in coord_results] == pytest.approx(brightest_fwhm), \
         'coordinate-based selection of the only source should match "brightest"'
+
+
+def test_exposure_object_name_reads_the_header(tmp_path):
+    from astropy.io import fits
+    import numpy as np
+    named = tmp_path / 'named.fits'
+    header = fits.Header()
+    header['OBJECT'] = 'Pointing12: focus=345.0'
+    fits.writeto(named, np.zeros((4, 4)), header=header)
+    unnamed = tmp_path / 'unnamed.fits'
+    fits.writeto(unnamed, np.zeros((4, 4)))
+
+    assert focus.exposure_object_name(named) == 'Pointing12: focus=345.0', \
+        "the OBJECT header value should be returned"
+    assert focus.exposure_object_name(unnamed) is None, 'a header without OBJECT gives None'
+    assert focus.exposure_object_name(tmp_path / 'missing.fits') is None, \
+        'an unreadable file gives None'

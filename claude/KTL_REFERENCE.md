@@ -391,7 +391,7 @@ and one `NSciCam` and share them.
 | `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`; the target as binary radians) | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
 | `services.NSciCam` | `EXPSTATE`, `EXPOSE`, `FITSFILE`, `EXPRESULT`, `DISP0CLK`; plus its helpers' keywords | `exposure_state()`, `exposure_result()`, `fits_file()` (`read`); `exposure_state_is(state, timeout)`, `exposure_ended(timeout)` (`EXPSTATE` `Ready` or `Error`), `fits_file_changed(previous, timeout)` (`check`); `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE`, `FITSFILE`, `EXPOSURE`, `AMPCONF`, `BINNING`; heartbeat `DISP0CLK`. |
 | `services.nscicam.ExposurePath` (`NSciCam.path`) | `FITSFILE`, `RECORD`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous` (`FITSFILE`), `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
-| `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING` | `configure`, `exptime`, `current_settings`; `setting_value(key, ascii)` (class method) converts a broadcast value | Reads `AMPCONFLIST` at construction. `keywords` maps each setting to its keyword. |
+| `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING`, `OBJECT` | `configure` (incl. `object_name` → `OBJECT`), `exptime`, `current_settings`; `setting_value(key, ascii)` (class method) converts a broadcast value | Reads `AMPCONFLIST` at construction. `keywords` maps each setting to its keyword. |
 
 | Where | Uses | Notes |
 | --- | --- | --- |
@@ -436,6 +436,7 @@ object (§2.1).
 | `nscicam.AMPCONF` | `ExposureConfig`, Controller | Read/written as the read speed; subscribed to for the exposure fields, and written when a speed is chosen. |
 | `nscicam.AMPCONFLIST` | `ExposureConfig` | Read once, when `NSciCam` is constructed, for the valid read speeds. |
 | `nscicam.BINNING` | `ExposureConfig`, Controller | Read/written as the binning; subscribed to for the exposure fields, and written when a binning is chosen. |
+| `nscicam.OBJECT` | `ExposureConfig`, `focus.FocusSequence` | Written before every exposure a sequence (or the GUI's Single tab) takes: `'<object name>: focus=<focus>'` (`FocusSequence.exposure_object`). Not displayed. |
 
 ### 4.1 What the services' help says about these keywords
 
@@ -465,6 +466,7 @@ listed as `index name`; the name is the `ascii` value and the index the
 | `RECORDDIR`, `SCRATCHDIR` | string | | R/W | Directories for recorded/scratch files. |
 | `FITSPREFIX`, `FITSSUFFIX` | string | | R/W | Filename prefix/suffix. Separate `FITSPREFIX` values are kept for `RECORD` = No/Yes. |
 | `EXPOSURE` | double | `%.3f` s, range 0 .. ∞ | R/W | The camera may increase the requested time slightly to a valid value. |
+| `OBJECT` | string | | R/W | "Object name", recorded with the exposure. |
 | `AMPCONF` | string | | R/W | Amplifier and read speed; valid values come from `AMPCONFLIST`. Our `Fast`/`Slow` aliases (`1.0MHz`/`0.05MHz`) are both valid, and match the choices the data-acquisition GUI offers observers. |
 | `AMPCONFLIST` | string | comma-separated | R | Valid `AMPCONF` values. Not in the help; at the telescope (`gshow`, 2026-11-17): `5.0MHz,3.0MHz,1.0MHz,0.05MHz`. |
 | `BINNING` | enum | `0 1,1`, `1 2,2`, `2 4,4` | R/W | Matches `ExposureConfig.expbin_options` and the GUI's binning options. |
@@ -489,3 +491,4 @@ use it.
 | `7efcccd` | 2026-11-17 | §3.2, §4: the slew target is written as binary radians; §4.1: `AMPCONFLIST`'s values confirmed at the telescope. |
 | `1ac2ce3` | 2026-11-17 | §3.4: expression syntax (quoting, `$service.KEYWORD`, `or`); §4, §4.1: exposures use `FITSFILE` for their path and fail on `EXPSTATE == Error`. |
 | `8691767` | 2026-11-17 | §3.7: KTL's log routed into `nickel_focus.log`, its level following `--verbosity`. |
+| *pending* | 2026-11-17 | §4, §4.1: `OBJECT` written before each exposure (object name and focus). |

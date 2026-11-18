@@ -15,13 +15,55 @@ from astropy.visualization import (
 from nickel_focus.gui.qt import QtCore, QtWidgets
 
 
+class ElidingComboBox(QtWidgets.QComboBox):
+    """
+    A combo box for entries that may be longer than it is wide.
+
+    - The closed box shows its current entry shortened in the *middle* (with
+      "…") to fit its width, so both ends -- e.g. a file name and a focus value
+      -- stay visible.
+    - The open list is widened to fit the longest entry, even past the box.
+    - Hovering over the box shows its full current entry as a tooltip.
+    """
+
+    def paintEvent(self, event):
+        painter = QtWidgets.QStylePainter(self)
+        option = QtWidgets.QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ComboBox, option)
+        field = self.style().subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_ComboBox, option,
+            QtWidgets.QStyle.SubControl.SC_ComboBoxEditField, self
+        )
+        option.currentText = self.fontMetrics().elidedText(
+            option.currentText, QtCore.Qt.TextElideMode.ElideMiddle, field.width()
+        )
+        painter.drawControl(QtWidgets.QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+    def showPopup(self):
+        view = self.view()
+        scroll_bar = view.verticalScrollBar().sizeHint().width()
+        view.setMinimumWidth(view.sizeHintForColumn(0) + 2 * view.frameWidth() + scroll_bar)
+        super().showPopup()
+
+    def event(self, event):
+        if event.type() == QtCore.QEvent.Type.ToolTip:
+            if self.currentText():
+                QtWidgets.QToolTip.showText(event.globalPos(), self.currentText(), self)
+            else:
+                QtWidgets.QToolTip.hideText()
+            return True
+        return super().event(event)
+
+
 class ImagePanel(QtWidgets.QWidget):
     """
     Shows the exposures collected by a focus sequence, one at a time.
 
-    Baseline interactions: pan via scroll bars, wheel zoom,
-    a "Recenter" button that returns to a fit-to-view zoom, and a stretch
-    selector.  The measured source is boxed on every frame -- red normally,
+    Baseline interactions: pan via scroll bars, wheel zoom, the 'r' key
+    (lowercase only) to return to a fit-to-view zoom, and a stretch selector
+    (at the right of the top row, which the exposure drop-down otherwise
+    fills).  The measured source is boxed on every frame -- red normally,
     yellow (with an "Outlier centroid" label) if
     :attr:`~nickel_focus.focus.StepResult.is_outlier` is set.  A drop-down lists
     every exposure added so far, always kept sorted by focus value, and tracks
@@ -43,8 +85,9 @@ class ImagePanel(QtWidgets.QWidget):
     so a stray click meant only to bring the window forward was enough to kick
     off a reanalysis.
 
-    "Recenter" always fits the whole frame; it doesn't center on the measured
-    source.
+    Recentering ('r') always fits the whole frame; it doesn't center on the
+    measured source.  Unlike 'm', it works whether or not a sequence is
+    running.
     """
 
     #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'm' is
@@ -61,6 +104,13 @@ class ImagePanel(QtWidgets.QWidget):
     #: to short, single-word names -- a longer combo entry (e.g.
     #: "ZScale + Sqrt") widens the whole combo box, and with it the
     #: window's minimum width, enough to overflow a smaller screen.
+    EXPOSURE_MIN_CHARACTERS = 3
+    """
+    The exposure drop-down's minimum width, in characters.  Its width doesn't
+    depend on its entries; beyond this minimum it takes whatever room the row
+    has.  Kept small so it never sets the window's minimum width.
+    """
+
     STRETCHES = {
         'ZScale': lambda data: ImageNormalize(
             data, interval=ZScaleInterval(), stretch=LinearStretch()
@@ -109,10 +159,18 @@ class ImagePanel(QtWidgets.QWidget):
         # needs to be set once.
         self.ax.set_anchor('N')
 
-        self.exposure_combo = QtWidgets.QComboBox()
+        self.exposure_combo = ElidingComboBox()
+        # The combo box's width must not follow its entries (whose object
+        # names can be long): size it from a fixed number of characters
+        # instead, and let the layout's stretch give it the rest of the row.
+        # A long entry is shortened in the middle (see ElidingComboBox).
+        self.exposure_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.exposure_combo.setMinimumContentsLength(self.EXPOSURE_MIN_CHARACTERS)
         self.stretch_combo = QtWidgets.QComboBox()
         self.stretch_combo.addItems(list(self.STRETCHES))
-        self.recenter_button = QtWidgets.QPushButton('Recenter')
+        self.stretch_combo.setToolTip('Image stretch')
 
         self.h_scroll = QtWidgets.QScrollBar(QtCore.Qt.Orientation.Horizontal)
         self.v_scroll = QtWidgets.QScrollBar(QtCore.Qt.Orientation.Vertical)
@@ -125,9 +183,7 @@ class ImagePanel(QtWidgets.QWidget):
         # proportion to it. Every other widget here defaults to 0 (no
         # extra space), so the combo box is the only one that grows.
         top.addWidget(self.exposure_combo, 1)
-        top.addWidget(QtWidgets.QLabel('Stretch:'))
         top.addWidget(self.stretch_combo)
-        top.addWidget(self.recenter_button)
 
         grid = QtWidgets.QGridLayout()
         grid.addWidget(self.canvas, 0, 0)
@@ -150,7 +206,6 @@ class ImagePanel(QtWidgets.QWidget):
         # more on what that means).
         self.exposure_combo.currentIndexChanged.connect(self._on_combo_changed)
         self.stretch_combo.currentTextChanged.connect(self._on_stretch_changed)
-        self.recenter_button.clicked.connect(self.recenter)
         self.h_scroll.valueChanged.connect(self._on_scroll)
         self.v_scroll.valueChanged.connect(self._on_scroll)
         # `mpl_connect` is matplotlib's *own* callback registry, not a
@@ -172,6 +227,16 @@ class ImagePanel(QtWidgets.QWidget):
         """
         self._selection_enabled = bool(enabled)
 
+    @staticmethod
+    def exposure_label(result):
+        """
+        The exposure drop-down's entry for ``result``: the file name and the
+        exposure's object name (e.g. ``'n3246.fits - Pointing12: focus=345.0'``),
+        or, if the file records none, its focus value instead.
+        """
+        detail = result.object_name or f'focus={result.focus_value:.1f}'
+        return f'{result.exposure.name} - {detail}'
+
     def add_result(self, result):
         """
         Add a newly-collected :class:`~nickel_focus.focus.StepResult` to the
@@ -186,9 +251,8 @@ class ImagePanel(QtWidgets.QWidget):
         self._results.insert(insert_at, result)
         self._latest_result = result
 
-        label = f'{result.exposure.stem} — Focus {result.focus_value:.0f}'
         self.exposure_combo.blockSignals(True)
-        self.exposure_combo.insertItem(insert_at, label)
+        self.exposure_combo.insertItem(insert_at, self.exposure_label(result))
         if tracking_latest:
             self.exposure_combo.setCurrentIndex(insert_at)
         self.exposure_combo.blockSignals(False)
@@ -221,9 +285,8 @@ class ImagePanel(QtWidgets.QWidget):
         if was_latest:
             self._latest_result = result
 
-        label = f'{result.exposure.stem} — Focus {result.focus_value:.0f}'
         self.exposure_combo.blockSignals(True)
-        self.exposure_combo.setItemText(existing_index, label)
+        self.exposure_combo.setItemText(existing_index, self.exposure_label(result))
         self.exposure_combo.blockSignals(False)
 
         if was_current:
@@ -273,7 +336,7 @@ class ImagePanel(QtWidgets.QWidget):
         self.canvas.draw_idle()
 
     def recenter(self):
-        """Reset to a fit-to-view zoom."""
+        """Reset to a fit-to-view zoom (the 'r' key)."""
         self.set_zoom(1.0)
 
     def set_zoom(self, zoom):
@@ -361,12 +424,19 @@ class ImagePanel(QtWidgets.QWidget):
 
     def _on_key_press(self, event):
         """
-        matplotlib ``key_press_event`` callback: pressing 'm' over the canvas,
-        while selection is enabled, emits
-        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`
-        with the data coordinates under the cursor (see the class docstring for
-        why a key press rather than a click).
+        matplotlib ``key_press_event`` callback.
+
+        - 'r' (lowercase only) recenters (see
+          :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.recenter`),
+          at any time.
+        - 'm' over the image, while selection is enabled, emits
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`
+          with the data coordinates under the cursor (see the class docstring
+          for why a key press rather than a click).
         """
+        if event.key == 'r':
+            self.recenter()
+            return
         if event.key != 'm' or not self._selection_enabled or event.inaxes != self.ax:
             return
         if event.xdata is None or event.ydata is None:

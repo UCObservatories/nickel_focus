@@ -133,10 +133,10 @@ def test_status_bar_lines_up_with_and_sits_close_to_the_image_panel_rows(qapp):
     exp_rect = window_rect(status_bar.indicators['exp'])
     combo_row = image_panel.layout().itemAt(0).layout()
     label_rect = window_rect(combo_row.itemAt(0).widget())
-    recenter_rect = window_rect(image_panel.recenter_button)
+    stretch_rect = window_rect(image_panel.stretch_combo)
 
     assert quit_rect.left() == label_rect.left(), 'left edges should line up'
-    assert exp_rect.right() == recenter_rect.right(), 'right edges should line up'
+    assert exp_rect.right() == stretch_rect.right(), 'right edges should line up'
     gap = window_rect(image_panel.exposure_combo).top() - quit_rect.bottom()
     assert gap <= 4, f'the status bar should sit tight against the Exposure row (gap {gap}px)'
     window.close()

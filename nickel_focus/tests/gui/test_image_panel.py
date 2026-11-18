@@ -6,7 +6,8 @@ from matplotlib.backend_bases import KeyEvent, MouseEvent
 from matplotlib.colors import to_rgba
 
 from nickel_focus import focus
-from nickel_focus.gui.views.image_panel import ImagePanel
+from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
+from nickel_focus.gui.views.image_panel import ElidingComboBox, ImagePanel
 
 
 def _step_results(focus_sweep):
@@ -263,3 +264,138 @@ def test_image_is_anchored_to_the_top_of_the_canvas(qapp, focus_sweep):
     panel.add_result(_step_results(focus_sweep)[0])
 
     assert panel.ax.get_anchor() == 'N', 'the image should be anchored to the top of the canvas'
+
+
+def test_exposure_entries_show_file_and_object(qapp, focus_sweep):
+    panel = ImagePanel()
+    result = dataclasses.replace(
+        _step_results(focus_sweep)[0], object_name='Pointing12: focus=345.0'
+    )
+
+    panel.add_result(result)
+
+    assert panel.exposure_combo.itemText(0) == \
+        f'{result.exposure.name} - Pointing12: focus=345.0', \
+        'the entry should be the file name and the object name'
+
+
+def test_exposure_entries_fall_back_to_the_focus(qapp, focus_sweep):
+    panel = ImagePanel()
+    result = _step_results(focus_sweep)[0]  # these files record no OBJECT
+
+    panel.add_result(result)
+
+    assert panel.exposure_combo.itemText(0) == \
+        f'{result.exposure.name} - focus={result.focus_value:.1f}', \
+        'without an object name, the entry should show the focus value'
+
+
+def test_exposure_dropdown_width_does_not_follow_its_entries(qapp, focus_sweep):
+    panel = ImagePanel()
+    before = panel.exposure_combo.sizeHint().width()
+    long_name = 'AVeryLongObjectNameFromSomeoneElsesStarlist' * 3 + ': focus=345.0'
+
+    panel.add_result(dataclasses.replace(_step_results(focus_sweep)[0], object_name=long_name))
+
+    assert panel.exposure_combo.sizeHint().width() == before, \
+        'a long entry should not change the size of the exposure drop-down'
+
+
+def test_top_row_is_exposure_label_dropdown_and_stretch(qapp):
+    panel = ImagePanel()
+    row = panel.layout().itemAt(0).layout()
+
+    widgets = [row.itemAt(i).widget() for i in range(row.count())]
+
+    assert len(widgets) == 3 and isinstance(widgets[0], QtWidgets.QLabel), \
+        'the top row should be just the Exposure label, its drop-down, and the stretch drop-down'
+    assert widgets[1] is panel.exposure_combo and widgets[2] is panel.stretch_combo, \
+        'the stretch drop-down should be at the right'
+    assert row.stretch(1) == 1 and row.stretch(2) == 0, \
+        'the exposure drop-down should fill the remaining width'
+    assert not hasattr(panel, 'recenter_button'), 'there should be no Recenter button'
+
+
+def _key_event(panel, key):
+    return KeyEvent('key_press_event', panel.canvas, key, x=10, y=10)
+
+
+def test_r_key_recenters(qapp, focus_sweep):
+    panel = ImagePanel()
+    panel.add_result(_step_results(focus_sweep)[0])
+    panel.set_zoom(3.)
+    panel.set_selection_enabled(False)  # recentering works even while a sequence runs
+
+    panel.canvas.callbacks.process('key_press_event', _key_event(panel, 'r'))
+
+    assert panel._zoom == 1.0, "pressing 'r' should return to a fit-to-view zoom"
+
+
+def test_capital_r_does_not_recenter(qapp, focus_sweep):
+    panel = ImagePanel()
+    panel.add_result(_step_results(focus_sweep)[0])
+    panel.set_zoom(3.)
+
+    panel.canvas.callbacks.process('key_press_event', _key_event(panel, 'R'))
+
+    assert panel._zoom == 3.0, "the recenter key is case sensitive: 'R' should do nothing"
+
+
+LONG_ENTRY = 'n3247.fits - 2MASS J04361038+2259560 (Taurus field star): focus=345.0'
+
+
+def _shown_combo(qapp, width=220):
+    combo = ElidingComboBox()
+    combo.addItem(LONG_ENTRY)
+    combo.resize(width, combo.sizeHint().height())
+    combo.show()
+    qapp.processEvents()
+    return combo
+
+
+def test_long_entry_is_shortened_in_the_middle(qapp, monkeypatch):
+    combo = _shown_combo(qapp)
+    drawn = []
+    original = QtWidgets.QStylePainter.drawControl
+
+    def record(painter, element, option):
+        if element == QtWidgets.QStyle.ControlElement.CE_ComboBoxLabel:
+            drawn.append(option.currentText)
+        return original(painter, element, option)
+
+    monkeypatch.setattr(QtWidgets.QStylePainter, 'drawControl', record)
+    combo.repaint()
+
+    assert drawn, 'setup: the label should have been drawn'
+    text = drawn[-1]
+    assert '…' in text and len(text) < len(LONG_ENTRY), 'a long entry should be shortened'
+    assert text.startswith('n3247.fits') and text.endswith('focus=345.0'), \
+        'the file name and the focus should both stay visible'
+    combo.close()
+
+
+def test_popup_is_wide_enough_for_long_entries(qapp):
+    combo = _shown_combo(qapp)
+
+    combo.showPopup()
+    qapp.processEvents()
+
+    view = combo.view()
+    assert view.width() >= view.sizeHintForColumn(0), \
+        'the open list should be wide enough to show the full entry'
+    assert view.width() > combo.width(), 'the open list may be wider than the box'
+    combo.hidePopup()
+    combo.close()
+
+
+def test_tooltip_shows_the_full_entry(qapp, monkeypatch):
+    combo = _shown_combo(qapp)
+    shown = []
+    monkeypatch.setattr(QtWidgets.QToolTip, 'showText',
+                        lambda pos, text, widget=None, *args: shown.append(text))
+
+    combo.event(QtGui.QHelpEvent(QtCore.QEvent.Type.ToolTip, QtCore.QPoint(5, 5),
+                                 combo.mapToGlobal(QtCore.QPoint(5, 5))))
+
+    assert shown == [LONG_ENTRY], 'hovering should show the full current entry'
+    combo.close()

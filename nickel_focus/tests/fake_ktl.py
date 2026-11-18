@@ -348,6 +348,7 @@ class Simulator:
         define(cam, 'EXPOSE', 'None', on_write=self._on_expose)
         define(cam, 'EXPRESULT', '')
         define(cam, 'FITSFILE', '')
+        define(cam, 'OBJECT', '')
         define(cam, 'EXPOSURE', 5.0)
         define(cam, 'AMPCONF', '0.05MHz')
         define(cam, 'AMPCONFLIST', '5.0MHz,3.0MHz,1.0MHz,0.05MHz')  # as at the telescope
@@ -443,9 +444,10 @@ class Simulator:
 
     def _on_expose(self, value):
         """
-        ``EXPOSE = Go``: write a frame for the current focus, step ``EXPSTATE``
-        through the exposure, and report the finished file in ``FITSFILE``
-        (as a pending value, so it appears only once waited for).
+        ``EXPOSE = Go``: write a frame for the current focus (with ``OBJECT`` in
+        its header), step ``EXPSTATE`` through the exposure, and report the
+        finished file in ``FITSFILE`` (as a pending value, so it appears only
+        once waited for).
         """
         if value != 'Go':
             return
@@ -457,7 +459,11 @@ class Simulator:
             self._set('nscicam', 'EXPRESULT', f'{path} {self.exposure_error}')
             self._set('nscicam', 'EXPSTATE', 'Start', pending=['Exposing', 'Error'])
             return
-        fits.writeto(path, self.make_frame(self.focus), overwrite=True)
+        header = fits.Header()
+        object_name = self.keyword('nscicam', 'OBJECT').value
+        if object_name:
+            header['OBJECT'] = object_name  # as the camera records it
+        fits.writeto(path, self.make_frame(self.focus), header=header, overwrite=True)
         self._set('nscicam', 'EXPRESULT', str(path))
         self._set('nscicam', 'EXPSTATE', 'Start', pending=['Exposing', 'Readout', 'Ready'])
         if self.reports_file:

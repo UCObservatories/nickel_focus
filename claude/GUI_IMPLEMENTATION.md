@@ -3054,3 +3054,110 @@ mutually exclusive radio buttons, side by side, instead of drop-downs.
 - Docs: `GUI_REFERENCE.md` (§2) and the plan's §3.6.
 
 Full suite: `357 passed, 8 skipped`.
+
+## Exposures record OBJECT (2026-11-17)
+
+Every exposure taken by a focus sequence or the Single tab now sets the
+camera's `OBJECT` keyword (not shown among the exposure fields) to
+`'<name>: focus=<focus>'`.
+
+- `ExposureConfig.configure(..., object_name=None)` writes `OBJECT`;
+  `Exposure.expose` passes it through.
+- `FocusSequence.object_name` (default `'unknown'`) and
+  `FocusSequence.exposure_object()`, which formats the name with the focus
+  read just before the exposure (`Focus.current`, to one decimal place).
+  `take_exposure` -- used by every live step and by `take_single_exposure`
+  -- passes it to `expose`. Replay never exposes, so never writes it; the
+  CLI's sequences use `'unknown'`.
+- The name comes from the Slew tab: `show_nearest_target` now takes the
+  found target's name and remembers it; typing in the target RA/Dec fields
+  (`textEdited`, user edits only) forgets it; `get_target_name()` returns
+  it or None. `Controller._name_object` sets each new sequence's (and
+  standalone exposure's) `object_name` from it.
+- Fake `ktl`: `OBJECT` keyword. New tests: `configure`/`expose` write it;
+  each step's `OBJECT` carries its focus; `'unknown'` by default; the Slew
+  tab keeps a found name, forgets it on typed coordinates, and restores it
+  on a new find; and, through the Controller, a sequence and a Single
+  exposure record the found target, typed coordinates give `'unknown'`.
+- Docs: `GUI_REFERENCE.md` (§2), `KTL_REFERENCE.md` (§4, §4.1), and the user
+  manual.
+
+Full suite: `365 passed, 8 skipped`.
+
+## Slew tab target Name, 2' check on OBJECT, exposure entries with object names (2026-11-17)
+
+Follow-up to the previous entry, at the user's request.
+
+- **Slew tab:** the "Target coordinates" heading is now "Target", with a new
+  **Name** field (`slew_target_name_edit`) above the target RA/Dec.
+  `show_nearest_target` fills it in; the user can edit it; typing in the
+  RA/Dec fields clears it (typed coordinates are no longer the named
+  target). `get_target_name()` returns its text, or None if empty, and
+  `get_target_coordinates()` the RA/Dec text. The old hidden
+  `_slew_target_name` is gone.
+- **2' check:** `Controller._name_object` uses the name only if the Slew
+  tab's target coordinates are within `MAX_TARGET_OFFSET_ARCMIN` (2') of the
+  telescope's current position, taken from the latest `POCORAA`/`POCODECA`
+  broadcasts (`_current_pointing`, `_target_offset`; no keyword read);
+  otherwise, or if they can't be compared, it logs a warning and leaves the
+  object `'unknown'`, without changing the Name field.
+- **Exposure drop-down:** entries are `'<file name> - <OBJECT>'`
+  (`ImagePanel.exposure_label`), or `'<file name> - focus=<focus>'` without
+  an object. The object comes from the file's FITS header
+  (`focus.exposure_object_name`, new `StepResult.object_name`), so replayed
+  exposures show theirs too; the simulated camera writes it into its
+  frames' headers. The drop-down's size no longer follows its entries
+  (`AdjustToMinimumContentsLengthWithIcon`, `EXPOSURE_MIN_CHARACTERS` = 3,
+  the largest that leaves the window's minimum width unchanged at 522 px on
+  macOS); it stretches to fill its row as before. A long entry is clipped
+  at the right edge (see the plan for how long names might be handled).
+- **Noted in the plan (§5.1):** slew targets are written as given (J2000
+  for catalog targets) to keywords the help describes as apparent; if so,
+  precession (~20') puts the telescope short of catalog targets, and the
+  2' check could fail when the telescope is pointed correctly by other
+  means.
+- Tests: Slew tab Name (filled, editable, cleared by typed coordinates,
+  heading); `_name_object` on target, within 1.5', off by 3' (warning, name
+  kept), with no position to compare, and with an edited name; the Single
+  tab's entry text; `exposure_object_name`; entry text with and without an
+  object; the drop-down's size unchanged by a long entry.
+- Docs: `GUI_REFERENCE.md` (§2), the user manual (Slew tab, object names,
+  Exposure drop-down), and the plan (§5.1).
+
+Full suite: `375 passed, 8 skipped`.
+
+## Image panel top row; long exposure entries; OBJECT cap (2026-11-17)
+
+- **Top row:** the Recenter button and the "Stretch:" label are gone; the
+  row is now "Exposure:", the exposure drop-down (stretching to fill the
+  row), and the stretch drop-down at the right (tooltip "Image stretch").
+  The 'r' key (either case) recenters, at any time, via `_on_key_press`;
+  'm' is unchanged. The Help text and user manual describe 'r'. The
+  status-bar alignment test now lines the Exp indicator up with the
+  stretch drop-down's right edge.
+- **Long exposure entries:** the exposure drop-down is a new
+  `image_panel.ElidingComboBox`, which draws its current entry shortened in
+  the middle (`QFontMetrics.elidedText`, `ElideMiddle`) to the edit field's
+  width, so the file name and the focus stay visible; widens its popup to
+  fit the longest entry (`showPopup`); and shows the full current entry as
+  a tooltip (handling `QEvent.ToolTip` itself, since entries are updated
+  with signals blocked). Rendered at the default size: `n3247.fits - 2MASS
+  J04361038…rus field star): focus=345.0`.
+- **OBJECT cap:** `FocusSequence.OBJECT_MAX_LENGTH` (68, the most a FITS
+  string value holds); `exposure_object` shortens only the name, ending in
+  `'...'` (ASCII, as FITS headers require), so the `: focus=...` part is
+  always kept.
+- Tests: top-row layout (no Recenter button, no label, stretch at the
+  right, exposure drop-down stretching), 'r'/'R' recentering while
+  selection is disabled, middle elision keeping both ends, popup width,
+  tooltip text, and the 68-character cap.
+- Docs: `GUI_REFERENCE.md` (§2, §3), the user manual.
+
+Full suite: `382 passed, 8 skipped`.
+
+## Recenter hotkey is case sensitive (2026-11-17)
+
+At the user's request, only lowercase 'r' recenters the image (it had
+accepted 'r' or 'R'). `ImagePanel._on_key_press` checks `event.key == 'r'`;
+the 'R' test now checks that it does nothing. The Help text, user manual,
+and `GUI_REFERENCE.md` already named 'r'.

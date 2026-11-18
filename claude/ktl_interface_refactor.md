@@ -635,7 +635,22 @@ run there.
    `_expstate_state` maps any `EXPSTATE` other than `Ready` to yellow,
    including `Error` (and `Unknown`). *Option:* show `Error` (and perhaps
    `Unknown`) red.
-4. **Indicators go stale, not red, if a service stops broadcasting
+4. **Slew targets may need converting from J2000 to apparent coordinates.**
+   `NickelTelescopePointing.slew_to` writes the Slew tab's target -- for a
+   starlist or catalog target, its (J2000) coordinates -- straight to
+   `POCORAD`/`POCODECD`, which the help describes as *apparent* coordinates
+   (REF §4.1); the current position (`POCORAA`/`POCODECA`) is likewise
+   apparent. If so, precession since J2000 (about 20' by now) means the
+   telescope would stop well short of a catalog target. It also affects the
+   2' check on exposures' `OBJECT` (`Controller._name_object`), which
+   compares the target as entered with the current position: it passes
+   after a slew from the focus GUI (both use the same numbers), but would
+   fail if the telescope were pointed at the target correctly by other
+   means. *To confirm:* slew to a catalog star and compare where the
+   telescope ends up. *Option:* transform catalog coordinates to apparent
+   (e.g. with astropy) before writing them, and in the 2' check.
+
+5. **Indicators go stale, not red, if a service stops broadcasting
    entirely** (as opposed to restarting, which the heartbeat handles; §4.3).
    They just stop changing. `ktl`'s heartbeat state would tell, but only by
    polling `Keyword.isAlive()` (REF §3.6); `KTL_SUGGESTIONS.md` §5 proposes

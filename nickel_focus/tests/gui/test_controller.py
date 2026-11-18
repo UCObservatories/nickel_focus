@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 import types
 
+from astropy.coordinates import Angle
 import numpy as np
 import pytest
 
@@ -12,7 +13,7 @@ from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.qt import QtCore
 from nickel_focus.gui.views.main_window import MainWindow
 from nickel_focus.gui.controller import Controller
-from nickel_focus.tests.gui.keyboard import type_and_enter
+from nickel_focus.tests.gui.keyboard import type_and_enter, type_text
 
 
 def _configure_replay_tab(panel, focus_sweep):
@@ -1089,6 +1090,147 @@ def test_edit_without_a_camera_only_syncs_the_tabs(qapp):
 
     assert [c['exptime'] for c in _exposure_configs(panel)] == [8.0] * 3, \
         'without a camera, an entered exposure time should still appear on every tab'
+
+
+# -- the exposures' OBJECT -----------------------------------------------------
+
+def _run_grid(controller, window):
+    panel = window.control_panel
+    panel.tabs.setCurrentWidget(panel.grid_tab)
+    panel.grid_start_spin.setValue(340)
+    panel.grid_step_spin.setValue(5)
+    panel.grid_nstep_spin.setValue(3)
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+
+
+def _point_at_target(controller, window, sim, offset_arcmin=0.):
+    """Point the simulated telescope at the Slew tab's target, offset in Dec."""
+    ra_text, dec_text = window.control_panel.get_target_coordinates()
+    sim.ra = Angle(ra_text, unit='hourangle').hour
+    sim.dec = Angle(dec_text, unit='deg').deg + offset_arcmin / 60
+    _deliver_broadcasts(controller)
+
+
+def _find_focus_star(controller, window, sim):
+    sim.ra, sim.dec = 0.5, 28.1  # near Focusing00
+    _deliver_broadcasts(controller)
+    controller.find_nearest_focus()
+    return window.control_panel.get_target_name()
+
+
+def test_sequence_object_is_the_found_target(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    sim = fake_hardware['sim']
+    name = _find_focus_star(controller, window, sim)
+    _point_at_target(controller, window, sim)
+
+    _run_grid(controller, window)
+
+    assert name.startswith('Focusing'), 'setup: a focus star should have been found'
+    assert sim.keyword('nscicam', 'OBJECT').writes == [
+        f'{name}: focus=340.0', f'{name}: focus=345.0', f'{name}: focus=350.0'
+    ], "each exposure's OBJECT should be the found target's name and its focus"
+
+
+def test_an_edited_name_is_recorded(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    sim = fake_hardware['sim']
+    _find_focus_star(controller, window, sim)
+    _point_at_target(controller, window, sim)
+    type_text(window.control_panel.slew_target_name_edit, 'HD 12345')
+
+    _run_grid(controller, window)
+
+    assert sim.keyword('nscicam', 'OBJECT').writes[0] == 'HD 12345: focus=340.0', \
+        'a name the user typed should be recorded'
+
+
+def test_object_is_unknown_when_the_telescope_is_off_target(qapp, caplog, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    sim = fake_hardware['sim']
+    name = _find_focus_star(controller, window, sim)
+    _point_at_target(controller, window, sim, offset_arcmin=3.)
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        _run_grid(controller, window)
+
+    assert sim.keyword('nscicam', 'OBJECT').writes[0] == 'unknown: focus=340.0', \
+        "more than 2 arcmin from the target, the object should be recorded as 'unknown'"
+    assert any(
+        r.levelname == 'WARNING' and '3.0 arcmin' in r.getMessage() and name in r.getMessage()
+        for r in caplog.records
+    ), 'the user should be warned that the telescope is off target'
+    assert window.control_panel.get_target_name() == name, \
+        "the Slew tab's name should be left as it is"
+
+
+def test_object_is_unknown_within_but_near_the_limit(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    sim = fake_hardware['sim']
+    name = _find_focus_star(controller, window, sim)
+    _point_at_target(controller, window, sim, offset_arcmin=1.5)
+
+    _run_grid(controller, window)
+
+    assert sim.keyword('nscicam', 'OBJECT').writes[0] == f'{name}: focus=340.0', \
+        'within 2 arcmin of the target, its name should be recorded'
+
+
+def test_sequence_object_is_unknown_for_typed_coordinates(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    sim = fake_hardware['sim']
+    _find_focus_star(controller, window, sim)
+    type_text(window.control_panel.slew_target_ra_edit, '01:00:00')
+
+    _run_grid(controller, window)
+
+    assert window.control_panel.get_target_name() is None, \
+        'typing coordinates should clear the target name'
+    assert sim.keyword('nscicam', 'OBJECT').writes[0] == 'unknown: focus=340.0', \
+        "typed coordinates should give the object name 'unknown'"
+
+
+def test_object_is_unknown_without_a_position_to_compare(qapp, caplog, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    window.control_panel.show_nearest_target('00:30:00.00', '+28:00:00.00', 'Focusing00')
+    controller._latest.pop(('nickelpoco', 'POCORAA'), None)  # no position received
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        _run_grid(controller, window)
+
+    assert fake_hardware['sim'].keyword('nscicam', 'OBJECT').writes[0] == \
+        'unknown: focus=340.0', "with nothing to compare against, the object should be 'unknown'"
+    assert any(
+        r.levelname == 'WARNING' and 'Could not compare' in r.getMessage()
+        for r in caplog.records
+    ), 'the user should be warned that the target could not be checked'
+
+
+def test_single_exposure_object_is_the_found_target(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    sim = fake_hardware['sim']
+    sim.ra, sim.dec = 0.5, 29.75  # near Pointing00
+    _deliver_broadcasts(controller)
+    controller.find_nearest_pointing()
+    name = window.control_panel.get_target_name()
+    _point_at_target(controller, window, sim)
+
+    controller.take_single_exposure(345.)
+    _wait_for_focus_worker(controller)
+
+    assert sim.keyword('nscicam', 'OBJECT').writes == [f'{name}: focus=345.0'], \
+        "the Single tab's exposure should record the found target and its focus"
+    entry = window.image_panel.exposure_combo.itemText(0)
+    assert entry == f'fake0001.fits - {name}: focus=345.0', \
+        "the exposure's entry should show its file name and object, from its header"
 
 
 # -- the shared services --------------------------------------------------------

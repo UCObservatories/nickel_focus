@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from astropy.io import fits
 from astropy.visualization import ImageNormalize, ZScaleInterval, LinearStretch
 from IPython import embed
 from matplotlib import pyplot, patches
@@ -246,6 +247,10 @@ class StepResult:
         Whether this step's centroid is an outlier relative to the rest of the
         sequence collected so far; see
         :meth:`~nickel_focus.focus.FocusPlot.is_outlier`.
+    object_name : :obj:`str` or None
+        The exposure's ``OBJECT`` header value (see
+        :func:`~nickel_focus.focus.exposure_object_name`), or None if it has
+        none.
     """
     index: int
     focus_value: float
@@ -255,6 +260,20 @@ class StepResult:
     stamp: np.ndarray
     centroid: tuple
     is_outlier: bool
+    object_name: str | None = None
+
+
+def exposure_object_name(path):
+    """
+    The ``OBJECT`` value in a FITS file's primary header (for a new exposure,
+    what the camera's ``OBJECT`` keyword held), or None if the header has none
+    or the file can't be read.
+    """
+    try:
+        value = fits.getheader(path).get('OBJECT')
+    except OSError:
+        return None
+    return None if value is None or str(value).strip() == '' else str(value).strip()
 
 
 class FocusSequence:
@@ -275,11 +294,19 @@ class FocusSequence:
     ``_exposure`` (:class:`~nickel_focus.exposure.Exposure`) are built only if
     both services are given; otherwise both are None, as for sequences that
     never touch hardware (e.g., replaying exposures already on disk).
+
+    Attributes
+    ----------
+    object_name : :obj:`str`
+        The name of the object being observed, recorded with each exposure
+        (see :meth:`~nickel_focus.focus.FocusSequence.exposure_object`);
+        ``'unknown'`` unless set.
     """
     def __init__(self, poco=None, cam=None):
         connect = poco is not None and cam is not None
         self._focus = Focus(poco) if connect else None
         self._exposure = exposure.Exposure(cam) if connect else None
+        self.object_name = 'unknown'
         self.method = None
         self.reset()
 
@@ -368,6 +395,7 @@ class FocusSequence:
                 stamp=source_stamp,
                 centroid=coords,
                 is_outlier=FocusPlot.is_outlier(self.centroids),
+                object_name=exposure_object_name(self.exposures[-1]),
             )
             self.step_iter += 1
             yield result
@@ -423,6 +451,7 @@ class FocusSequence:
                 stamp=source_stamp,
                 centroid=coords,
                 is_outlier=FocusPlot.is_outlier(self.centroids),
+                object_name=exposure_object_name(exposure_file),
             )
 
     def take_single_exposure(self, focus_value, method='brightest', **exp_kwargs):
@@ -473,6 +502,7 @@ class FocusSequence:
             stamp=source_stamp,
             centroid=coords,
             is_outlier=False,
+            object_name=exposure_object_name(exposure_file),
         )
 
     def execute(self, goto=True, method='brightest', plot=True, **exp_kwargs):
@@ -513,8 +543,35 @@ class FocusSequence:
             'Method used to increment the focus setting is not implemented by the base class!'
         )
 
+    OBJECT_MAX_LENGTH = 68
+    """
+    The longest ``OBJECT`` written: the most a FITS header string value can
+    hold.
+    """
+
+    def exposure_object(self):
+        """
+        The camera's ``OBJECT`` for the next exposure: the object name and the
+        current focus position, ``'<object_name>: focus=<focus>'`` (focus to
+        one decimal place).
+
+        At most :attr:`OBJECT_MAX_LENGTH` characters: a longer object name is
+        shortened, ending in ``'...'``, so the focus is always kept.
+        """
+        suffix = f': focus={self._focus.current:.1f}'
+        name = self.object_name
+        room = self.OBJECT_MAX_LENGTH - len(suffix)
+        if len(name) > room:
+            name = name[:room - 3] + '...'
+        return name + suffix
+
     def take_exposure(self):
-        self._exposure.expose()
+        """
+        Take an exposure at the current focus, with ``OBJECT`` set by
+        :meth:`~nickel_focus.focus.FocusSequence.exposure_object`, and return
+        its file path.
+        """
+        self._exposure.expose(object_name=self.exposure_object())
         return self._exposure.path.previous
 
     @staticmethod
