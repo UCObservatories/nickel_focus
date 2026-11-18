@@ -3337,3 +3337,108 @@ since `test_qt_shim.py` hides PySide6 from imports until its own teardown.
 50% longer (≈65 s to ≈93 s) because of the per-test collection.
 
 Full suite: `429 passed, 8 skipped`.
+
+## Pointing offsets (2026-11-18)
+
+Plan: `claude/pointing_offset_plan.md` (its §11 records the as-built
+details). After a Single exposure, 'p' over the star that should be
+centered gives the offset that centers it; the Slew tab's "Offset by ..."
+button applies it through the guider offsets and marks the telescope on
+target.
+
+- `pointing.py` (new, no GUI or ktl): `PointingOffset` (star, center,
+  `east`/`north` in arcsec, exposure; `size`, `text()`), `offset_text`
+  (`'12.3″ E, 4.5″ N'`), `image_center` (`((nx-1)/2, (ny-1)/2)`),
+  `nearest_source` (within `SNAP_RADIUS`, 10 binned pixels), and
+  `pointing_offset` (RA and Dec increase toward decreasing pixel number, so
+  `east = -(x - x0)*scale`, `north = -(y - y0)*scale`; refuses an unknown
+  binning or more than `MAX_POINTING_OFFSET`, 300″).
+- `StepResult.sources`: every detected centroid (`focus.source_centroids`
+  of `image_quality`'s table), so 'p' needs no new detection.
+- `services/nickelpoco.py`: `apply_guider_offset` (arm `POCGDFIN`, write
+  `POCGDIX`/`POCGDIY` as binary radians, wait for `POCGDFIN != 1`, fail on
+  `-1`), `mark_guider_on_target` (`POCGDOT = 1`, then `POCOT == 0`),
+  `guider_offset_radians`; unverified module constants
+  `GUIDER_OFFSET_IN_SERIES`, `GUIDER_OFFSET_SIGN`, `GUIDER_OFFSET_COS_DEC`,
+  `GUIDER_MOVE_TIMEOUT`, `ON_TARGET_TIMEOUT`.
+- `slew.NickelTelescopePointing.apply_offset`: checks movement and
+  tracking, logs, offsets, marks on target (not reaching on target only
+  warns).
+- `gui/model/pointing_offset_worker.py`: `PointingOffsetWorker`, like
+  `SlewWorker`.
+- `ImagePanel`: 'p' (`pointingStarSelected`, gated like 'm'),
+  `show_pointing_offset`/`clear_pointing_offset` (cyan circle, line, center
+  cross, label; drawn only on its own exposure; `reset` discards it),
+  `current_result`.
+- `FocusControlPanel`: `slew_offset_button` below "Move to Target"
+  (`Offset by —`, disabled; `show_pointing_offset(text)` labels and
+  enables it while nothing runs), `applyPointingOffsetRequested`; Help-tab
+  text.
+- `Controller`: `pointing_offset`, `offset_worker`,
+  `_on_pointing_star_selected`, `apply_pointing_offset`,
+  `_clear_pointing_offset` (after the worker finishes, on a slew, and on a
+  new sequence), and `_busy()`, now used for every one-operation-at-a-time
+  check.
+- Fake `ktl`: `POCGDFIN`, `POCGDIX`/`POCGDIY`, `POCGDOT` behave as above,
+  with failure switches.
+- The longest label (`Offset by 300.0″ W, 300.0″ S`) was checked earlier:
+  it fits the button without widening the window.
+- Tests: `tests/test_pointing.py` (24) and GUI tests for the panel,
+  button, and Controller (17). Docs: `GUI_REFERENCE.md`,
+  `KTL_REFERENCE.md`, `ktl_interface_refactor.md` §5.2, the user manual,
+  README.
+
+Follow-up, after a first try with Replay: the offset is drawn on every
+displayed exposure the same size as its own (`pointing.image_center` of the
+frame equals `offset.center`), not only on the one it was measured on, so
+it stays visible while browsing a sequence; and its label goes below the
+star when the star is south of the center (larger row), where the line
+runs up from the star and would otherwise cross the label. Tests: drawn on
+the sequence's other exposures, not on a different-size one, and the
+label's side for a star north and south of the center.
+
+Full suite: `473 passed, 8 skipped`.
+
+## Unmeasurable exposures shown; Single-tab FWHM (2026-11-18)
+
+A photometry failure used to keep the exposure from being displayed: with
+no star detected, `photutils.detect_sources` returns None, and
+`find_sources` failed with an `AttributeError`, failing the whole step.
+
+- `photometry.find_sources` now raises `ValueError('No sources were
+  detected in the image.')` in that case.
+- `focus.measure_exposure(file, method)` wraps `image_quality`: on any
+  failure it logs a warning ("Could not measure the image quality of
+  <file>: <reason>  Showing it without a measurement.") and returns the
+  image less its median, with `fwhm`/`centroid`/`stamp` None, no `sources`,
+  and `photometry_error`. A file that can't be read still raises. All three
+  `StepResult` constructions use it.
+- `StepResult`: `fwhm`, `stamp`, `centroid` may be None;
+  `photometry_error`; `measured` property.
+- `step()`/`reanalyze()` yield an unmeasured exposure (so it's shown) and
+  then raise `ValueError` ("Could not measure <file> (<reason>); stopping the
+  sequence/reanalysis."), since a fit or the Auto search can't go on without
+  it. `take_single_exposure` simply returns it.
+- `fit_best_focus` leaves out exposures with no measurement (e.g. one just
+  before an Interrupt); `fwhm_text(None)` is `'not measured'`; new
+  `fwhm_arcsec(fwhm, binning)`. The CLI's live plot skips an unmeasured
+  exposure.
+- GUI: the image panel shows an unmeasured exposure without a box; the
+  curve panel ignores it; the Controller logs it ("its FWHM could not be
+  measured"); 'p' on it reports that no star was found.
+- Single tab: `single_fwhm_label` below "Use current focus", spanning the
+  row so it lines up with "Focus value:" (`_group_box` now takes a `None`
+  label for a spanning row). `set_single_fwhm(pixels, arcsec)` shows
+  `FWHM: 3.21 (pix); 1.07 (arcsec)`, with `—` for an unknown value; the
+  Controller sets it after each Single exposure and after reanalyzing one
+  (`_show_single_fwhm`). It doesn't change the tab's minimum width.
+- Tests: no-source detection; `measure_exposure` (failure kept, unreadable
+  file raises); `step`/`reanalyze` yield then stop; `fit_best_focus` and the
+  FWHM helpers with no measurement; image and curve panels; the label
+  (placement, alignment, formatting); and through the Controller, the
+  label after an exposure and a reanalysis, an unmeasurable Single exposure
+  (shown, logged, 'p' finds no star), and a Grid sequence that shows the
+  exposure and then stops. Docs: `GUI_REFERENCE.md`, the user manual, the
+  Help tab.
+
+Full suite: `488 passed, 8 skipped`.

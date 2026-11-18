@@ -187,3 +187,12 @@ def test_right_axis_stays_on_the_right_after_redraws(qapp, focus_sweep):
         "the right axis's label should stay on the right"
     assert panel.ax_arcsec.yaxis.get_ticks_position() == 'right', \
         "the right axis's ticks should stay on the right"
+
+
+def test_unmeasured_results_are_not_plotted(qapp, focus_sweep):
+    result = _step_results(focus_sweep)[0]
+    panel = FocusCurvePanel()
+
+    panel.add_result(dataclasses.replace(result, fwhm=None, centroid=None, stamp=None))
+
+    assert panel._results == [], 'a result with no FWHM should not be added to the curve'

@@ -160,7 +160,8 @@ and `--suffix` to locate the archived files.
 ### `nickel_focus_gui`
 
 Launch a Qt-based GUI to perform the same focusing functionality — slewing,
-single exposures, grid sequences, and automated sequences — with live plots of
+pointing corrections, single exposures, grid sequences, and automated
+sequences — with live plots of
 the current frame, per-exposure source stamps, and the evolving focus curve.
 Requires the `gui` extra dependencies (PySide6). Takes no arguments beyond the
 shared logging options above.

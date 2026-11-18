@@ -97,6 +97,60 @@ class NickelTelescopePointing:
             'No reply from nickelpoco.POCOT; cannot tell whether the telescope reached the target.'
         )
 
+    def apply_offset(self, east, north):
+        """
+        Offset the telescope's pointing, then mark the new position as on
+        target, after checking that the telescope may move.
+
+        The offset goes through the guider offsets (see
+        :meth:`~nickel_focus.services.nickelpoco.NickelPoco.apply_guider_offset`),
+        and then ``POCGDOT`` marks the telescope on target (see
+        :meth:`~nickel_focus.services.nickelpoco.NickelPoco.mark_guider_on_target`).
+        If the telescope doesn't then report being on target, a warning is
+        logged, but the offset itself succeeded, so nothing is raised.
+
+        Parameters
+        ----------
+        east, north : :obj:`float`
+            The offset, in arcseconds on the sky: positive points the
+            telescope further East and North.
+
+        Raises
+        ------
+        ValueError
+            Raised if telescope movement is disabled, tracking is disabled, or
+            the offset doesn't finish or fails.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the telescope service doesn't reply.
+        """
+        # Imported here, not at the top, so that pointing (and the plotting
+        # it imports through focus) isn't loaded just to slew.
+        from nickel_focus.pointing import offset_text
+
+        require(
+            self.poco.movement_allowed(timeout=0.5), 'Telescope movement is disabled!',
+            'No reply from nickelpoco.POCSTOP; cannot tell whether telescope movement is allowed.'
+        )
+        require(
+            self.poco.tracking(timeout=0.5), 'Tracking is disabled!',
+            'No reply from nickelpoco.POCTRCK; cannot tell whether the telescope is tracking.'
+        )
+        log.info(f'Applying pointing offset: {offset_text(east, north)}')
+        self.poco.apply_guider_offset(east, north)
+        on_target = self.poco.mark_guider_on_target()
+        if on_target:
+            log.info('Pointing offset applied; marked on target.')
+        elif on_target is None:
+            log.warning(
+                'Pointing offset applied, but nickelpoco.POCOT did not reply, so whether the '
+                'telescope is marked on target is unknown.'
+            )
+        else:
+            log.warning(
+                'Pointing offset applied, but the telescope did not report being on target '
+                '(nickelpoco.POCOT) after it was marked on target.'
+            )
+
 
 def find_nearest_target(telescope_coo, obj_search_str=None, file=None):
     """

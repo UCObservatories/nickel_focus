@@ -379,7 +379,8 @@ def _group_box(rows):
     rows : list
         ``(label, field)`` pairs, in the order they should appear; ``field`` may
         be a widget or a layout (a :class:`PySide6.QtWidgets.QFormLayout` row
-        accepts either).
+        accepts either).  With ``label`` None, ``field`` spans the whole row,
+        starting under the labels rather than the fields.
 
     Returns
     -------
@@ -387,7 +388,10 @@ def _group_box(rows):
     """
     form = QtWidgets.QFormLayout()
     for label, field in rows:
-        form.addRow(label, field)
+        if label is None:
+            form.addRow(field)
+        else:
+            form.addRow(label, field)
     group = QtWidgets.QGroupBox()
     group.setLayout(form)
     _tighten_margins(group)
@@ -475,7 +479,10 @@ class FocusControlPanel(QtWidgets.QWidget):
     :func:`~nickel_focus.slew.find_nearest_target`, mirroring
     :class:`~nickel_focus.scripts.slew_to_nearest.NickelSlewToNearest`: a live
     "current position" display and a manually-editable RA/Dec target with its
-    own "Move to Target" button on the left; a starlist file/browse field, an
+    own "Move to Target" button on the left, with an "Offset by ..." button
+    below it that applies a pending pointing offset (see
+    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_pointing_offset`);
+    a starlist file/browse field, an
     object-name search string, and the three "Find nearest..." buttons (which
     populate the target fields rather than moving the telescope themselves) on
     the right.  Unlike the other tabs, it has no ``get_*_config`` counterpart --
@@ -546,6 +553,10 @@ class FocusControlPanel(QtWidgets.QWidget):
         Emitted when the Slew tab's "Find nearest focus star" is clicked; like
         ``findNearestPointingRequested``, but with
         ``obj_search_str='Focusing'``.
+    applyPointingOffsetRequested : :class:`PySide6.QtCore.Signal`
+        Emitted when the Slew tab's "Offset by ..." button is clicked; the
+        Controller should apply its pending pointing offset (see
+        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_pointing_offset`).
     useCurrentFocusRequested : :class:`PySide6.QtCore.Signal`
         Emitted when the Single tab's "Use current focus" is clicked; the
         Controller should fill the focus value with the telescope's current
@@ -565,11 +576,21 @@ class FocusControlPanel(QtWidgets.QWidget):
     findNearestPointingRequested = QtCore.Signal()
     findNearestFocusRequested = QtCore.Signal()
     useCurrentFocusRequested = QtCore.Signal()
+    applyPointingOffsetRequested = QtCore.Signal()
     exposureSettingEdited = QtCore.Signal(str, object)
+
+    NO_POINTING_OFFSET = 'Offset by —'
+    """The pointing-offset button's label while no offset is pending."""
 
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        # Whether something is running, and whether a pointing offset is
+        # pending: the pointing-offset button needs both (see
+        # _update_offset_button).
+        self._running = False
+        self._offset_pending = False
 
         self.slew_tab = self._build_slew_tab()
         self.single_tab = self._build_single_tab()
@@ -680,8 +701,8 @@ class FocusControlPanel(QtWidgets.QWidget):
     def _build_slew_tab(self):
         """
         Build the Slew tab as two untitled :class:`PySide6.QtWidgets.QGroupBox`
-        sub-panels: current RA-Dec, the target (name, RA-Dec), and "Move to
-        Target" on the left; starlist file/browse, a target-name search
+        sub-panels: current RA-Dec, the target (name, RA-Dec), "Move to
+        Target", and "Offset by ..." on the left; starlist file/browse, a target-name search
         pattern, and a single row of three "Find nearest ..." buttons
         ("Object", "Pointing *", "Focusing *" -- ``*`` standing in for "star")
         on the right.  Unlike the other action
@@ -743,7 +764,14 @@ class FocusControlPanel(QtWidgets.QWidget):
         _add_centered_label(position_layout, 'Target')
         position_layout.addLayout(name_row)
         position_layout.addLayout(target_row)
+        # Applies a pending pointing offset; disabled until there is one
+        # (see show_pointing_offset), and labeled with it.
+        self.slew_offset_button = QtWidgets.QPushButton(self.NO_POINTING_OFFSET)
+        self.slew_offset_button.setEnabled(False)
+        self.slew_offset_button.clicked.connect(self.applyPointingOffsetRequested.emit)
+
         position_layout.addLayout(_button_row(self.slew_move_button))
+        position_layout.addLayout(_button_row(self.slew_offset_button))
         position_layout.addStretch(1)
         position_group = QtWidgets.QGroupBox()
         position_group.setLayout(position_layout)
@@ -810,7 +838,8 @@ class FocusControlPanel(QtWidgets.QWidget):
     def _build_single_tab(self):
         """
         Build the Single tab as two side-by-side sub-panels -- exposure
-        settings, focus value (with a "Use current focus" button below it) --
+        settings, focus value (with a "Use current focus" button below it, and
+        the latest exposure's FWHM below that) --
         with "Acquire" below both, spanning the full tab width rather than
         belonging to either one.
         """
@@ -821,9 +850,14 @@ class FocusControlPanel(QtWidgets.QWidget):
         ) = _exposure_field_rows()
         self.single_current_focus_button = QtWidgets.QPushButton('Use current focus')
         self.single_current_focus_button.clicked.connect(self.useCurrentFocusRequested.emit)
+        # The latest Single exposure's FWHM (see set_single_fwhm).
+        self.single_fwhm_label = QtWidgets.QLabel()
+        self.set_single_fwhm(None, None)
         focus_rows = [
             ('Focus value:', self.single_focus_spin),
             ('', self.single_current_focus_button),
+            # The whole row, so it starts under "Focus value:".
+            (None, self.single_fwhm_label),
         ]
 
         self.single_acquire_button = QtWidgets.QPushButton('Acquire')
@@ -980,11 +1014,18 @@ class FocusControlPanel(QtWidgets.QWidget):
             'directly, or use "Find nearest..." to search a starlist '
             '(the packaged pointing/focus catalog by default) and fill '
             'them in, then press "Move to Target."<br><br>'
+            '<b>Pointing offset</b> — after a Single exposure, hover over '
+            "the star that should be at the center of the image and press 'p'. "
+            'A line from the star to the image center shows the offset, which '
+            'the Slew tab\'s "Offset by ..." button then applies (and marks '
+            'the telescope on target). Take another Single exposure to '
+            'check, and repeat if needed.<br><br>'
             '<b>Single</b> — take one exposure at the given focus. '
             'Defaults to the most recent fitted best focus, so acquiring '
             'it as-is moves to best focus; change the value first to '
             'test any other focus, or press "Use current focus" to expose '
-            'at the focus the telescope is at now.<br><br>'
+            'at the focus the telescope is at now. The FWHM of the latest '
+            'Single exposure is shown below.<br><br>'
             '<b>Exposure settings</b> (Single, Grid, Auto) — show the '
             "camera's current settings, including changes made from other "
             'programs, and are the same on all three tabs. Choosing a speed '
@@ -1229,12 +1270,39 @@ class FocusControlPanel(QtWidgets.QWidget):
 
     def set_running(self, running):
         """Toggle widget states for whether an action is currently running."""
+        self._running = running
         for widget in self._config_widgets:
             widget.setEnabled(not running)
         for button in self._acquire_buttons:
             button.setEnabled(not running)
         for button in self._interrupt_buttons:
             button.setEnabled(running)
+        self._update_offset_button()
+
+    def show_pointing_offset(self, text):
+        """
+        Show a pending pointing offset on the Slew tab's offset button, e.g.
+        ``'Offset by 12.3″ E, 4.5″ N'``, enabling it while nothing is running;
+        or, with ``text`` None, return it to
+        :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.NO_POINTING_OFFSET`
+        and disable it.
+
+        Parameters
+        ----------
+        text : :obj:`str` or None
+            The offset, already formatted (see
+            :meth:`~nickel_focus.pointing.PointingOffset.text`), or None if
+            no offset is pending.
+        """
+        self._offset_pending = text is not None
+        self.slew_offset_button.setText(
+            self.NO_POINTING_OFFSET if text is None else f'Offset by {text}'
+        )
+        self._update_offset_button()
+
+    def _update_offset_button(self):
+        """Enable the offset button only with an offset pending and nothing running."""
+        self.slew_offset_button.setEnabled(self._offset_pending and not self._running)
 
     def set_stopping(self):
         """
@@ -1298,6 +1366,26 @@ class FocusControlPanel(QtWidgets.QWidget):
         telescope position (and clamped to the field's range).
         """
         self.single_focus_spin.setValue(round(focus_value))
+
+    def set_single_fwhm(self, pixels, arcsec):
+        """
+        Show the latest Single exposure's FWHM below "Use current focus", e.g.
+        ``'FWHM: 3.21 (pix); 1.07 (arcsec)'``.  Either value may be None
+        (not measured, or the binning is unknown), shown as ``—``; with
+        both None (e.g. before any exposure) the label reads
+        ``'FWHM: — (pix); — (arcsec)'``.
+
+        Parameters
+        ----------
+        pixels : :obj:`float` or None
+            The FWHM in pixels.
+        arcsec : :obj:`float` or None
+            The FWHM in arcseconds.
+        """
+        def text(value):
+            return '—' if value is None else f'{value:.2f}'
+
+        self.single_fwhm_label.setText(f'FWHM: {text(pixels)} (pix); {text(arcsec)} (arcsec)')
 
     def show_best_focus(self, best_focus):
         """

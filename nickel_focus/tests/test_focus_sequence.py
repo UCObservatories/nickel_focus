@@ -240,3 +240,85 @@ def test_fwhm_text(fwhm, binning, expected):
 def test_common_binning(binnings, expected):
     assert focus.common_binning(binnings) == expected, \
         f'{binnings} should have common binning {expected}'
+
+
+# -- exposures that can't be measured -------------------------------------------
+
+def _write_blank(path):
+    """A frame with noise but no star, which can't be measured."""
+    from astropy.io import fits
+    data = np.random.default_rng(1).normal(1000., 10., (101, 101)).astype(np.uint16)
+    fits.writeto(path, data, overwrite=True)
+    return data
+
+
+def test_measure_exposure_keeps_the_image_when_photometry_fails(tmp_path, caplog):
+    path = tmp_path / 'blank.fits'
+    data = _write_blank(path)
+
+    with caplog.at_level(logging.WARNING, logger='nickel_focus'):
+        measurement = focus.measure_exposure(path)
+
+    assert measurement['fwhm'] is None, 'an unmeasurable exposure should have no FWHM'
+    assert measurement['centroid'] is None and measurement['stamp'] is None, \
+        'an unmeasurable exposure should have no source'
+    assert measurement['sources'].shape == (0, 2), 'there should be no detected sources'
+    assert (measurement['raw'] == data).all(), 'the raw image should still be returned'
+    assert measurement['frame'] == pytest.approx(data.astype(float) - np.median(data)), \
+        'the frame shown should be the image less its median'
+    assert 'No sources were detected' in measurement['photometry_error'], \
+        'the reason should be recorded'
+    assert any('Could not measure the image quality of blank.fits' in r.getMessage()
+               for r in caplog.records), 'the failure should be logged as a warning'
+
+
+def test_measure_exposure_still_fails_for_an_unreadable_file(tmp_path):
+    path = tmp_path / 'missing.fits'
+    with pytest.raises(OSError):
+        focus.measure_exposure(path)
+
+
+def test_step_yields_an_unmeasured_exposure_then_stops(focus_sweep):
+    files = list(focus_sweep['files'][:3])
+    _write_blank(files[1])
+    seq = focus.ArchiveFocusSequence(focus_sweep['focus_values'][:3], files)
+
+    results = []
+    with pytest.raises(ValueError, match='Could not measure n2001.fits'):
+        for result in seq.step():
+            results.append(result)
+
+    assert len(results) == 2, 'the unmeasured exposure should still be yielded, then stop'
+    assert results[0].measured and not results[1].measured, \
+        'only the blank exposure should be unmeasured'
+    assert results[1].raw is not None, 'the unmeasured exposure should still carry its image'
+
+
+def test_reanalyze_yields_an_unmeasured_exposure_then_stops(focus_sweep):
+    seq = focus.ArchiveFocusSequence(focus_sweep['focus_values'][:3], focus_sweep['files'][:3])
+    list(seq.step())
+    _write_blank(focus_sweep['files'][0])
+
+    results = []
+    with pytest.raises(ValueError, match='stopping the reanalysis'):
+        for result in seq.reanalyze():
+            results.append(result)
+    assert len(results) == 1 and not results[0].measured, \
+        'the unmeasured exposure should be yielded before the reanalysis stops'
+
+
+def test_fit_best_focus_ignores_unmeasured_exposures():
+    focus_values = [340., 345., 350., 355., 360.]
+    quality = [4., 3.25, 3., 3.25, 4.]
+    best, _ = focus.FocusSequence.fit_best_focus(focus_values + [365.], quality + [None])
+    assert best == pytest.approx(350.), 'an unmeasured exposure should be left out of the fit'
+    with pytest.raises(ValueError, match='Insufficient'):
+        focus.FocusSequence.fit_best_focus([340., 345., 350.], [4., None, 3.])
+
+
+def test_fwhm_helpers_handle_no_measurement():
+    assert focus.fwhm_text(None, 2) == 'not measured', 'no FWHM should read as not measured'
+    assert focus.fwhm_arcsec(None, 2) is None, 'no FWHM should have no arcsec value'
+    assert focus.fwhm_arcsec(3., None) is None, 'an unknown binning should have no arcsec value'
+    assert focus.fwhm_arcsec(3., 2) == pytest.approx(3. * 0.1665 * 2), \
+        'the arcsec value should use the binned plate scale'

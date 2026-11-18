@@ -12,6 +12,7 @@ from astropy.visualization import (
     AsinhStretch,
 )
 
+from nickel_focus import pointing
 from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
 
 
@@ -65,7 +66,8 @@ class ImagePanel(QtWidgets.QWidget):
     (at the right of the top row, which the exposure drop-down otherwise
     fills).  The measured source is boxed on every frame -- red normally,
     yellow (with an "Outlier centroid" label) if
-    :attr:`~nickel_focus.focus.StepResult.is_outlier` is set.  A drop-down lists
+    :attr:`~nickel_focus.focus.StepResult.is_outlier` is set.  An exposure
+    that couldn't be measured is shown without a box.  A drop-down lists
     every exposure added so far, always kept sorted by focus value, and tracks
     the most recently *added* exposure until the user manually picks a different
     one, so browsing older exposures isn't interrupted by new ones arriving --
@@ -85,9 +87,20 @@ class ImagePanel(QtWidgets.QWidget):
     so a stray click meant only to bring the window forward was enough to kick
     off a reanalysis.
 
+    Pressing 'p' the same way (also only while selection is enabled) emits
+    :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`,
+    marking the star that should be at the center of the image.  A pending
+    pointing offset (see
+    :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.show_pointing_offset`)
+    is drawn on every exposure the same size as the one it was measured on
+    (e.g. all of a sequence's, since they share the field): a cyan line from
+    the star (a circle) to the image center (a cross), labeled with the
+    offset -- above the star, or below it if the star is south of (below)
+    the center, so the label never crosses the line.
+
     Recentering ('r') always fits the whole frame; it doesn't center on the
-    measured source.  Unlike 'm', it works whether or not a sequence is
-    running.
+    measured source.  Unlike 'm' and 'p', it works whether or not a sequence
+    is running.
 
     While the mouse is over the image, a small readout just below and to the
     right of the pointer shows the pixel under it and that pixel's *raw* value
@@ -104,6 +117,14 @@ class ImagePanel(QtWidgets.QWidget):
     #: pressed, only while selection is enabled (see
     #: :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`).
     sourceSelected = QtCore.Signal(float, float)
+
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'p' is
+    #: pressed, only while selection is enabled (see
+    #: :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`).
+    pointingStarSelected = QtCore.Signal(float, float)
+
+    POINTING_COLOR = 'cyan'
+    """The color of a pending pointing offset's line, markers, and label."""
 
     #: Available stretch options, by name, as callables returning an
     #: `astropy.visualization.ImageNormalize` for a given data array.
@@ -156,6 +177,7 @@ class ImagePanel(QtWidgets.QWidget):
         self._zoom = 1.0
         self._stretch_name = next(iter(self.STRETCHES))
         self._selection_enabled = False
+        self._pointing_offset = None  # the pending pointing.PointingOffset, or None
 
         self.figure = Figure(figsize=(5, 5))
         # No ticks/labels/title are ever drawn (the exposure/focus value
@@ -254,9 +276,35 @@ class ImagePanel(QtWidgets.QWidget):
 
     # -- public API used by the Controller -------------------------------
 
+    @property
+    def current_result(self):
+        """The displayed :class:`~nickel_focus.focus.StepResult`, or None."""
+        return self._current
+
+    def show_pointing_offset(self, offset):
+        """
+        Draw a pending pointing offset (a
+        :class:`~nickel_focus.pointing.PointingOffset`), replacing any earlier
+        one.  It's drawn on whichever exposure is displayed, as long as that
+        exposure is the same size as the one it was measured on (so the star
+        and center positions apply to it).
+        """
+        self._pointing_offset = offset
+        if self._current is not None:
+            self._render(reset_view=False)
+
+    def clear_pointing_offset(self):
+        """Remove the pending pointing offset, if any, from the display."""
+        if self._pointing_offset is None:
+            return
+        self._pointing_offset = None
+        if self._current is not None:
+            self._render(reset_view=False)
+
     def set_selection_enabled(self, enabled):
         """
-        Enable or disable source selection with the 'm' key. The Controller is
+        Enable or disable source selection with the 'm' key, and pointing-star
+        selection with the 'p' key. The Controller is
         responsible for calling this appropriately (enabled before a
         sequence/single exposure starts or after one finishes, disabled while
         one is running).
@@ -365,6 +413,7 @@ class ImagePanel(QtWidgets.QWidget):
         self._latest_result = None
         self._current = None
         self._data_shape = None
+        self._pointing_offset = None
         self.exposure_combo.blockSignals(True)
         self.exposure_combo.clear()
         self.exposure_combo.blockSignals(False)
@@ -471,15 +520,18 @@ class ImagePanel(QtWidgets.QWidget):
           :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`
           with the data coordinates under the cursor (see the class docstring
           for why a key press rather than a click).
+        - 'p', likewise, emits
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`.
         """
         if event.key == 'r':
             self.recenter()
             return
-        if event.key != 'm' or not self._selection_enabled or event.inaxes != self.ax:
+        signals = {'m': self.sourceSelected, 'p': self.pointingStarSelected}
+        if event.key not in signals or not self._selection_enabled or event.inaxes != self.ax:
             return
         if event.xdata is None or event.ydata is None:
             return
-        self.sourceSelected.emit(float(event.xdata), float(event.ydata))
+        signals[event.key].emit(float(event.xdata), float(event.ydata))
 
     def readout_text(self, xdata, ydata):
         """
@@ -572,26 +624,60 @@ class ImagePanel(QtWidgets.QWidget):
         # which puts North up and East to the left on the sky.
         self.ax.imshow(data, cmap='gray', origin='upper', norm=normalize)
 
-        stamp_size = int(result.fwhm * 10)
-        half = stamp_size / 2
-        color = 'yellow' if result.is_outlier else 'red'
-        rect = patches.Rectangle(
-            (result.centroid[0] - half, result.centroid[1] - half), stamp_size, stamp_size,
-            linewidth=2, edgecolor=color, facecolor='none'
-        )
-        self.ax.add_patch(rect)
-        if result.is_outlier:
-            # Above the box: y increases downward on screen.
-            self.ax.text(
-                result.centroid[0], result.centroid[1] - half - 5, 'Outlier centroid',
-                color='yellow', fontsize=10, ha='center', va='bottom'
+        # An exposure that couldn't be measured has no source to box.
+        if result.measured:
+            stamp_size = int(result.fwhm * 10)
+            half = stamp_size / 2
+            color = 'yellow' if result.is_outlier else 'red'
+            rect = patches.Rectangle(
+                (result.centroid[0] - half, result.centroid[1] - half), stamp_size, stamp_size,
+                linewidth=2, edgecolor=color, facecolor='none'
             )
+            self.ax.add_patch(rect)
+            if result.is_outlier:
+                # Above the box: y increases downward on screen.
+                self.ax.text(
+                    result.centroid[0], result.centroid[1] - half - 5, 'Outlier centroid',
+                    color='yellow', fontsize=10, ha='center', va='bottom'
+                )
+
+        offset = self._pointing_offset
+        if offset is not None and pointing.image_center(data.shape) == offset.center:
+            self._draw_pointing_offset(offset)
 
         if reset_view:
             self._data_shape = data.shape
             self._update_scrollbar_ranges()
         self._apply_view_limits()
         self.canvas.draw_idle()
+
+    def _draw_pointing_offset(self, offset):
+        """
+        Draw ``offset``: a line from the star (a circle) to the image center
+        (a cross), labeled with the offset beside the star, on the side away
+        from the line.
+        """
+        (x_star, y_star), (x0, y0) = offset.star, offset.center
+        color = self.POINTING_COLOR
+        self.ax.plot([x_star, x0], [y_star, y0], color=color, linewidth=1.5)
+        self.ax.plot(
+            [x_star], [y_star], marker='o', markersize=12, markerfacecolor='none',
+            markeredgecolor=color, markeredgewidth=1.5, linestyle='none'
+        )
+        self.ax.plot(
+            [x0], [y0], marker='+', markersize=14, markeredgecolor=color,
+            markeredgewidth=1.5, linestyle='none'
+        )
+        # y increases downward on screen, so a star south of the center
+        # (larger y) has the line running up from it: put the label below
+        # the star there, and above it otherwise.  Offset in points, so the
+        # label clears the circle whatever the zoom.
+        below = y_star > y0
+        self.ax.annotate(
+            offset.text(), (x_star, y_star), xytext=(0, -10 if below else 10),
+            textcoords='offset points', color=color, fontsize=10, ha='center',
+            va='top' if below else 'bottom'
+        )
 
     def _view_extent(self):
         """Return ``(view_w, view_h)`` in data pixels at the current zoom."""

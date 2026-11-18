@@ -388,7 +388,7 @@ and one `NSciCam` and share them.
 
 | Class | Keywords | Methods | Notes |
 | --- | --- | --- | --- |
-| `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`; the target as binary radians) | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
+| `services.NickelPoco` | `POCSTOP`, `POCTRCK`, `POCOT`, `POCORAA`/`POCODECA`, `POCORAD`/`POCODECD`, `POCSECPA`/`POCSECPD`, `POCSECLK`, `POCGDFIN`, `POCGDIX`/`POCGDIY`, `POCGDOT` | `movement_allowed`/`tracking`/`on_target`/`secondary_locked(timeout)` (`check`); `pointing()`, `secondary_position()`, `secondary_demand()` (`read`); `set_secondary_lock`, `set_secondary_demand`, `set_pointing_demand` (`write`; the target as binary radians); `apply_guider_offset(east, north)`, `mark_guider_on_target()`, `guider_offset_radians` | Monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`; heartbeat `POCHEART`. Never writes `POCSTOP`. |
 | `services.NSciCam` | `EXPSTATE`, `EXPOSE`, `FITSFILE`, `EXPRESULT`, `DISP0CLK`; plus its helpers' keywords | `exposure_state()`, `exposure_result()`, `fits_file()` (`read`); `exposure_state_is(state, timeout)`, `exposure_ended(timeout)` (`EXPSTATE` `Ready` or `Error`), `fits_file_changed(previous, timeout)` (`check`); `start_exposure()` (`EXPOSE = Go`) | Monitors `EXPSTATE`, `FITSFILE`, `EXPOSURE`, `AMPCONF`, `BINNING`; heartbeat `DISP0CLK`. |
 | `services.nscicam.ExposurePath` (`NSciCam.path`) | `FITSFILE`, `RECORD`, `SCRATCHDIR`, `RECORDDIR`, `FITSPREFIX`, `OBSNUM`, `FITSSUFFIX` | `previous` (`FITSFILE`), `next`, `for_obsnum` | `for_obsnum` compares `RECORD` with `== 'Yes'` (case-sensitive). |
 | `services.nscicam.ExposureConfig` (`NSciCam.cfg`) | `RECORD`, `EXPOSURE`, `AMPCONF`, `AMPCONFLIST`, `BINNING`, `OBJECT` | `configure` (incl. `object_name` → `OBJECT`), `exptime`, `current_settings`; `setting_value(key, ascii)` (class method) converts a broadcast value | Reads `AMPCONFLIST` at construction. `keywords` maps each setting to its keyword. |
@@ -398,7 +398,7 @@ and one `NSciCam` and share them.
 | `focus.Focus` | `NickelPoco` | Each check goes through `require` (false → `ValueError`, no reply → `KTLTimeoutError`). `set_to` checks `movement_allowed(0.5)`, unlocks (`POCSECLK` → `off`), writes `POCSECPD`, then `secondary_locked(30)`. |
 | `focus.FocusSequence.set_focus` | `NSciCam` | `exposure_state_is('Ready', 0.5)` before every focus move a sequence makes, then `Focus.set_to`. |
 | `exposure.Exposure` | `NSciCam` | `expose` waits for `Ready` (15 s), configures, notes `FITSFILE`, writes `Go`, waits for `Start` (30 s), then for `Ready` or `Error` (exposure time + 90 s) -- `Error` fails, quoting `EXPRESULT` -- and finally for `FITSFILE` to change (`FILE_TIMEOUT`, 30 s). |
-| `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target as binary radians, then `on_target(300)`. Logs the target in sexagesimal. |
+| `slew.NickelTelescopePointing` | `NickelPoco` | `slew_to` checks `movement_allowed`/`tracking`/`on_target` (0.5 s each), writes the target as binary radians, then `on_target(300)`. Logs the target in sexagesimal. `apply_offset(east, north)` checks `movement_allowed`/`tracking` (0.5 s each), then `apply_guider_offset` (arm `POCGDFIN` -- write it, `waitFor('== 1')` -- write `POCGDIX`/`POCGDIY` as binary radians, `waitFor('!= 1')`, then read it: `-1` fails), then `mark_guider_on_target` (write `POCGDOT = 1`, `on_target(60)`; not reaching it only warns). The axes' signs, a cos(Dec) factor, whether the axes go one at a time, and the 60 s timeouts are unverified module constants in `services/nickelpoco.py`. |
 | GUI `Controller` (subscriptions) | both | Status indicators and position display: `subscribe`s to `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`, `POCSECPA`, `POCORAA`, `POCODECA`, `EXPSTATE`; values reach the GUI thread through a queued Qt signal (`gui/ktl_bridge.py`). No polling. |
 | GUI `Controller` (exposure fields) | `NSciCam` | `subscribe`s to `EXPOSURE`, `AMPCONF`, `BINNING`, so the Single/Grid/Auto fields follow the camera; a committed edit is written at once with `cfg.configure(...)`, on the GUI thread (no timeout). |
 
@@ -412,11 +412,14 @@ object (§2.1).
 | --- | --- | --- |
 | `nickelpoco.POCSTOP` | `focus.Focus`, `slew.NickelTelescopePointing`, Controller | `waitFor('== allowed')` before moving the focus or slewing; subscribed to for the Slew indicator. |
 | `nickelpoco.POCTRCK` | `slew.NickelTelescopePointing`, Controller | `waitFor('== on')` before slewing; subscribed to for the Track indicator. |
-| `nickelpoco.POCOT` | `slew.NickelTelescopePointing`, Controller | `waitFor('== 0')` before and after slewing; subscribed to for the On Target indicator. |
+| `nickelpoco.POCOT` | `slew.NickelTelescopePointing`, Controller | `waitFor('== 0')` before and after slewing, and after `POCGDOT`; subscribed to for the On Target indicator. |
 | `nickelpoco.POCORAA` | `slew.NickelTelescopePointing`, Controller | Read for the current RA (`NickelPoco.pointing()`); subscribed to for the Slew tab's position display. |
 | `nickelpoco.POCODECA` | `slew.NickelTelescopePointing`, Controller | Read for the current Dec, likewise; subscribed to likewise. |
 | `nickelpoco.POCORAD` | `slew.NickelTelescopePointing` | Written with the target RA, as binary radians. |
 | `nickelpoco.POCODECD` | `slew.NickelTelescopePointing` | Written with the target Dec, as binary radians. |
+| `nickelpoco.POCGDFIN` | `slew.NickelTelescopePointing` | Written (any value; it becomes `1`) to arm a guider offset, then `waitFor('== 1')`; after the offsets, `waitFor('!= 1')` and read: `0` done, `-1` failed. Monitored from its first `waitFor`. |
+| `nickelpoco.POCGDIX`/`POCGDIY` | `slew.NickelTelescopePointing` | Written with the pointing offset (X East, Y North), as binary radians. |
+| `nickelpoco.POCGDOT` | `slew.NickelTelescopePointing` | Written `1` after a pointing offset, to mark the new position on target; then `POCOT` is waited for. |
 | `nickelpoco.POCSECPA` | `focus.Focus`, Controller | Read for the current focus; subscribed to for the Focus indicator's text. |
 | `nickelpoco.POCSECPD` | `focus.Focus` | Read to skip a no-op move; written with the requested focus. |
 | `nickelpoco.POCSECLK` | `focus.Focus`, Controller | Written `off` to unlock; `waitFor('== on')` for the move to finish; subscribed to for the Focus indicator's color. |
@@ -455,6 +458,10 @@ listed as `index name`; the name is the `ascii` value and the index the
 | `POCODECA` | double | ascii degrees, `%02d:%02d:%04.1f`; binary radians | R | Actual observed Dec. The format has no explicit sign field; how a negative Dec -- especially between 0° and −1° -- appears in ascii is **[C-layer]**. |
 | `POCORAD` | double | ascii hours, `%02d:%02d:%05.2f`; binary radians | R/W | Desired apparent RA ("POCHAD − sidereal time"). |
 | `POCODECD` | double | ascii degrees, `%02d:%02d:%04.1f`; binary radians | R/W | Desired apparent Dec. |
+| `POCGDFIN` | int | `%d`: `1` moving, `0` finished, `-1` failed | R/W | "Guider move finished." Writing any value sets it to `1`. |
+| `POCGDIX` | double | `%.8f`, radians | W | "Increase the guider's offset in X by this amount"; X is RA when the guider rotation `POCGDRO` is 0. Whether it is in plate units or true RA isn't stated. |
+| `POCGDIY` | double | `%.8f`, radians | W | Likewise for Y (Dec). |
+| `POCGDOT` | int | `%d` | W | "Tell poco that the current position of the telescope matches the desired position, and the guide offsets should be set accordingly." |
 | `POCSECPA` | double | `%.8f`, "made-up units" | R | Actual secondary-mirror position. |
 | `POCSECPD` | double | `%.8f`, "made-up units" | R/W | Desired secondary-mirror position. |
 | `POCSECLK` | bool | `0 off`, `1 on` | R/W | Secondary-mirror lock. |
@@ -492,3 +499,4 @@ use it.
 | `1ac2ce3` | 2026-11-17 | §3.4: expression syntax (quoting, `$service.KEYWORD`, `or`); §4, §4.1: exposures use `FITSFILE` for their path and fail on `EXPSTATE == Error`. |
 | `8691767` | 2026-11-17 | §3.7: KTL's log routed into `nickel_focus.log`, its level following `--verbosity`. |
 | `79166ad` | 2026-11-17 | §4, §4.1: `OBJECT` written before each exposure (object name and focus). |
+| *pending* | 2026-11-18 | §4, §4.1: pointing offsets through the guider keywords (`POCGDFIN`, `POCGDIX`/`POCGDIY`, `POCGDOT`). |

@@ -532,3 +532,126 @@ def test_raw_frame_keeps_the_files_16_bit_type(qapp, tmp_path):
     panel.add_result(result)
     assert panel.readout_text(0, 0) == f'0, 0: {data[0, 0]}', \
         'the readout should show the 16-bit value as an integer'
+
+
+# -- Pointing offset ------------------------------------------------------------
+
+def _pointing_offset_for(result, star=(10., 12.)):
+    from nickel_focus import pointing
+    return pointing.pointing_offset(star, result.frame.shape, 1, exposure=result.exposure)
+
+
+def _offset_labels(panel):
+    return [t.get_text() for t in panel.ax.texts if '″' in t.get_text()]
+
+
+def test_p_key_emits_signal_only_when_selection_enabled(qapp, focus_sweep):
+    panel = ImagePanel()
+    panel.add_result(_step_results(focus_sweep)[0])
+    received = []
+    panel.pointingStarSelected.connect(lambda x, y: received.append((x, y)))
+    marked = []
+    panel.sourceSelected.connect(lambda x, y: marked.append((x, y)))
+
+    event = KeyEvent('key_press_event', panel.canvas, 'p')
+    event.inaxes = panel.ax
+    event.xdata, event.ydata = 42.0, 17.0
+
+    panel._on_key_press(event)
+    assert received == [], "'p' should be ignored while selection is disabled"
+
+    panel.set_selection_enabled(True)
+    panel._on_key_press(event)
+    assert received == [(42.0, 17.0)], \
+        "'p' should emit the data coordinates under the cursor once enabled"
+    assert marked == [], "'p' should not mark a star for measurement"
+
+
+def test_pointing_offset_is_drawn_on_every_exposure(qapp, focus_sweep):
+    results = _step_results(focus_sweep)
+    panel = ImagePanel()
+    for r in results[:2]:
+        panel.add_result(r)
+    offset = _pointing_offset_for(results[1])
+
+    panel.show_pointing_offset(offset)
+    assert _offset_labels(panel) == [offset.text()], \
+        'the offset should be labeled on the exposure it was measured on'
+    line = [l for l in panel.ax.lines if len(l.get_xdata()) == 2]
+    assert len(line) == 1 and list(line[0].get_xdata()) == [offset.star[0], offset.center[0]], \
+        'a line should join the star and the image center'
+
+    panel.exposure_combo.setCurrentIndex(0)
+    assert _offset_labels(panel) == [offset.text()], \
+        "the offset should also be drawn on the sequence's other exposures"
+
+
+def test_pointing_offset_is_not_drawn_on_a_different_size_exposure(qapp, focus_sweep):
+    result = _step_results(focus_sweep)[0]
+    other = dataclasses.replace(
+        result, exposure=result.exposure.with_name('other.fits'), frame=result.frame[:-2, :-2],
+        focus_value=result.focus_value + 1
+    )
+    panel = ImagePanel()
+    panel.add_result(result)
+    panel.add_result(other)
+    panel.show_pointing_offset(_pointing_offset_for(result))
+
+    assert panel.current_result is other, 'setup: the other exposure should be displayed'
+    assert _offset_labels(panel) == [] and len(panel.ax.lines) == 0, \
+        "the offset should not be drawn on an exposure whose center differs"
+
+
+@pytest.mark.parametrize('star,below', [((10., 12.), False), ((10., 80.), True)])
+def test_offset_label_avoids_the_line(qapp, focus_sweep, star, below):
+    # The frames are 101x101, so the center is at y = 50: y = 12 is North of
+    # it (above), y = 80 South (below).
+    result = _step_results(focus_sweep)[0]
+    panel = ImagePanel()
+    panel.add_result(result)
+    panel.show_pointing_offset(_pointing_offset_for(result, star=star))
+
+    label = next(t for t in panel.ax.texts if '″' in t.get_text())
+    dy = label.xyann[1]
+    if below:
+        assert dy < 0 and label.get_va() == 'top', \
+            'for a star South of the center, the label should be below the star'
+    else:
+        assert dy > 0 and label.get_va() == 'bottom', \
+            'for a star North of the center, the label should be above the star'
+
+
+def test_clearing_the_pointing_offset_removes_it(qapp, focus_sweep):
+    result = _step_results(focus_sweep)[0]
+    panel = ImagePanel()
+    panel.add_result(result)
+    panel.show_pointing_offset(_pointing_offset_for(result))
+
+    panel.clear_pointing_offset()
+    assert _offset_labels(panel) == [] and len(panel.ax.lines) == 0, \
+        'clearing the offset should remove its drawing'
+
+    panel.show_pointing_offset(_pointing_offset_for(result))
+    panel.reset()
+    panel.add_result(result)
+    assert _offset_labels(panel) == [], 'resetting the panel should discard the offset'
+
+
+def test_current_result_is_the_displayed_exposure(qapp, focus_sweep):
+    results = _step_results(focus_sweep)
+    panel = ImagePanel()
+    assert panel.current_result is None, 'with nothing displayed there should be no result'
+    panel.add_result(results[0])
+    assert panel.current_result is results[0], 'the displayed exposure should be current'
+
+
+def test_unmeasured_exposure_is_shown_without_a_box(qapp, focus_sweep):
+    result = dataclasses.replace(
+        _step_results(focus_sweep)[0], fwhm=None, centroid=None, stamp=None,
+        photometry_error='No sources were detected in the image.'
+    )
+    panel = ImagePanel()
+    panel.add_result(result)
+
+    assert len(panel.ax.get_images()) == 1, 'an unmeasured exposure should still be shown'
+    assert len(panel.ax.patches) == 0, 'an unmeasured exposure should have no measurement box'

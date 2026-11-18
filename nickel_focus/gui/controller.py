@@ -15,12 +15,14 @@ from astropy.coordinates import Angle, SkyCoord
 
 from nickel_focus import focus
 from nickel_focus import log
+from nickel_focus import pointing
 from nickel_focus import slew
 from nickel_focus.services import NickelPoco, NSciCam, ktl_available
 from nickel_focus.services.nscicam import ExposureConfig
 from nickel_focus.gui.ktl_bridge import KTLBridge
 from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.model.focus_worker import FocusWorker
+from nickel_focus.gui.model.pointing_offset_worker import PointingOffsetWorker
 from nickel_focus.gui.model.slew_worker import SlewWorker
 from nickel_focus.gui.qt import QtCore
 
@@ -56,7 +58,18 @@ class Controller(QtCore.QObject):
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_object`/
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_pointing`/
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_focus` (a single
-    fast ktl read plus a starlist search, not a move) do not.
+    fast ktl read plus a starlist search, not a move) do not.  Applying a
+    pointing offset
+    (:meth:`~nickel_focus.gui.controller.Controller.apply_pointing_offset`, via
+    :class:`~nickel_focus.gui.model.pointing_offset_worker.PointingOffsetWorker`)
+    moves the telescope too, so it takes part in the same way.
+
+    A pointing offset is measured by pressing 'p' over a star on the image
+    panel (see
+    :meth:`~nickel_focus.gui.controller.Controller._on_pointing_star_selected`):
+    the star should be at the image center.  It stays pending -- drawn on the
+    image and shown on the Slew tab's offset button -- until it's applied, or
+    replaced by a new one, or until a slew or new sequence clears it.
 
     The :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicators and
     the Slew tab's live position display follow the telescope's and camera's
@@ -135,6 +148,8 @@ class Controller(QtCore.QObject):
         self.focus_worker = None    # the FocusWorker currently running, or None
         self.method = 'brightest'   # the photometry method currently in effect
         self.slew_worker = None     # the SlewWorker currently running, or None
+        self.offset_worker = None   # the PointingOffsetWorker currently running, or None
+        self.pointing_offset = None  # the pending pointing.PointingOffset, or None
 
         # The throwaway `focus.FocusSequence` used only to take/reanalyze
         # a standalone Single-tab exposure (its hardware handles, not its
@@ -181,6 +196,8 @@ class Controller(QtCore.QObject):
         window.control_panel.findNearestPointingRequested.connect(self.find_nearest_pointing)
         window.control_panel.findNearestFocusRequested.connect(self.find_nearest_focus)
         window.image_panel.sourceSelected.connect(self._on_source_selected)
+        window.image_panel.pointingStarSelected.connect(self._on_pointing_star_selected)
+        window.control_panel.applyPointingOffsetRequested.connect(self.apply_pointing_offset)
         window.status_bar.quitRequested.connect(self.quit)
         window.control_panel.exposureSettingEdited.connect(self._on_exposure_setting_edited)
         window.control_panel.useCurrentFocusRequested.connect(self.use_current_focus)
@@ -219,7 +236,7 @@ class Controller(QtCore.QObject):
         """
         Build a sequence from the control panel's configuration and run it.
         """
-        if self.focus_worker is not None or self.slew_worker is not None:
+        if self._busy():
             return  # hardware exclusivity: something is already running
 
         focus_sequence_type = self.window.control_panel.get_focus_sequence_type()
@@ -254,6 +271,7 @@ class Controller(QtCore.QObject):
         self._name_object(focus_sequence)
         self.focus_sequence = focus_sequence
         self._standalone_focus_sequence = None
+        self._clear_pointing_offset()
         self.window.image_panel.reset()
         self.window.curve_panel.reset()
 
@@ -298,8 +316,7 @@ class Controller(QtCore.QObject):
             else self._standalone_focus_sequence
         )
         if (
-            self.focus_worker is not None or self.slew_worker is not None or target is None
-            or not target.exposures
+            self._busy() or target is None or not target.exposures
         ):
             return
         if target is self.focus_sequence:
@@ -321,7 +338,7 @@ class Controller(QtCore.QObject):
         the shared services) for its hardware handles, independent of any
         loaded :attr:`~nickel_focus.gui.controller.Controller.focus_sequence`.
         """
-        if self.focus_worker is not None or self.slew_worker is not None:
+        if self._busy():
             return  # hardware exclusivity: something is already running
         standalone = focus.FocusSequence(poco=self.poco, cam=self.cam)
         if standalone._focus is None or standalone._exposure is None:
@@ -387,7 +404,7 @@ class Controller(QtCore.QObject):
         :meth:`~nickel_focus.gui.controller.Controller.set_method`): the new
         field's stars are unrelated to the old pixel position.
         """
-        if self.focus_worker is not None or self.slew_worker is not None:
+        if self._busy():
             return  # hardware exclusivity: something is already running
         if self.telescope is None:
             self._fail('Could not move to target: no ktl connection is available.')
@@ -399,12 +416,34 @@ class Controller(QtCore.QObject):
             return
 
         self._clear_marked_source()
+        self._clear_pointing_offset()
         self.slew_worker = SlewWorker(self.telescope, target.ra, target.dec)
         self.slew_worker.slewFinished.connect(self._on_slew_finished)
         self.slew_worker.slewFailed.connect(self._fail)
         self.slew_worker.finished.connect(self._on_slew_worker_finished)
         self._set_running(True)
         self.slew_worker.start()
+
+    def apply_pointing_offset(self):
+        """
+        Apply the pending pointing offset -- the Slew tab's "Offset by ..."
+        button -- on a background thread
+        (:class:`~nickel_focus.gui.model.pointing_offset_worker.PointingOffsetWorker`),
+        then clear it, whether or not it succeeded (see
+        :meth:`~nickel_focus.slew.NickelTelescopePointing.apply_offset`).
+        """
+        if self._busy() or self.pointing_offset is None:
+            return
+        if self.telescope is None:
+            self._fail('Could not apply the pointing offset: no ktl connection is available.')
+            return
+        offset = self.pointing_offset
+        self.offset_worker = PointingOffsetWorker(self.telescope, offset.east, offset.north)
+        self.offset_worker.offsetFinished.connect(self._on_offset_finished)
+        self.offset_worker.offsetFailed.connect(self._fail)
+        self.offset_worker.finished.connect(self._on_offset_worker_finished)
+        self._set_running(True)
+        self.offset_worker.start()
 
     def find_nearest_object(self, file_text, search_text):
         """
@@ -619,7 +658,9 @@ class Controller(QtCore.QObject):
         )
         if is_reanalyze:
             self.window.image_panel.update_result(result)
-            if not reanalyzing_standalone:
+            if reanalyzing_standalone:
+                self._show_single_fwhm(result)
+            else:
                 # The curve was already cleared in reanalyze(), so each
                 # re-measured result is simply added back in as it
                 # arrives, rather than replacing an old point in place --
@@ -638,9 +679,10 @@ class Controller(QtCore.QObject):
             step_text += f'/{total}'
         step_text += (
             f' — Focus {result.focus_value:.0f}, '
-            f'FWHM {focus.fwhm_text(result.fwhm, result.binning)}, '
-            f'Source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
+            f'FWHM {focus.fwhm_text(result.fwhm, result.binning)}'
         )
+        if result.measured:
+            step_text += f', Source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
         if result.is_outlier:
             step_text += '  [outlier]'
         log.info(step_text)
@@ -667,7 +709,9 @@ class Controller(QtCore.QObject):
         :attr:`~nickel_focus.gui.controller.Controller._standalone_focus_sequence`'s
         bookkeeping with it (so
         :meth:`~nickel_focus.gui.controller.Controller.reanalyze` has something
-        to work with), and report it.
+        to work with), show its FWHM on the Single tab, and report it.  An
+        exposure that couldn't be measured is still displayed (the reason has
+        already been logged as a warning).
         """
         self.window.image_panel.add_result(result)
         seq = self._standalone_focus_sequence
@@ -678,12 +722,25 @@ class Controller(QtCore.QObject):
         seq.source_stamps.append(result.stamp)
         seq.centroids.append(result.centroid)
         seq.step_iter = 1
-        text = (
-            f'Took exposure at focus {result.focus_value:.0f}: measured FWHM '
-            f'{focus.fwhm_text(result.fwhm, result.binning)}, '
-            f'source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
-        )
+        self._show_single_fwhm(result)
+        if result.measured:
+            text = (
+                f'Took exposure at focus {result.focus_value:.0f}: measured FWHM '
+                f'{focus.fwhm_text(result.fwhm, result.binning)}, '
+                f'source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
+            )
+        else:
+            text = (
+                f'Took exposure at focus {result.focus_value:.0f}; its FWHM could not be '
+                'measured.'
+            )
         log.info(text)
+
+    def _show_single_fwhm(self, result):
+        """Show a Single exposure's FWHM, in pixels and arcsec, on the Single tab."""
+        self.window.control_panel.set_single_fwhm(
+            result.fwhm, focus.fwhm_arcsec(result.fwhm, result.binning)
+        )
 
     def _on_focus_worker_finished(self):
         """
@@ -712,6 +769,75 @@ class Controller(QtCore.QObject):
         """
         self.set_method((x, y))
         self.reanalyze()
+
+    def _on_pointing_star_selected(self, x, y):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`:
+        find the detected star nearest ``(x, y)`` on the displayed exposure,
+        and make the offset that would move it to the image center the
+        pending one.  If there's no star close enough, or the offset can't be
+        determined or is too large, a warning is logged and any earlier
+        pending offset is kept.
+        """
+        result = self.window.image_panel.current_result
+        if result is None:
+            return
+        star = pointing.nearest_source(result.sources, x, y)
+        if star is None:
+            log.warning(
+                f'No star found within {pointing.SNAP_RADIUS:.0f} pixels of ({x:.1f}, {y:.1f}); '
+                'the pointing offset is unchanged.'
+            )
+            return
+        try:
+            offset = pointing.pointing_offset(
+                star, result.frame.shape, result.binning, exposure=result.exposure
+            )
+        except ValueError as e:
+            log.warning(f'No pointing offset: {e}.')
+            return
+        self.pointing_offset = offset
+        self.window.image_panel.show_pointing_offset(offset)
+        self.window.control_panel.show_pointing_offset(offset.text())
+        log.info(
+            f'Pointing offset to center the star at ({star[0]:.1f}, {star[1]:.1f}): '
+            f'{offset.text()}.  Press "Offset by ..." on the Slew tab to apply it.'
+        )
+
+    def _clear_pointing_offset(self):
+        """Discard the pending pointing offset, if any, and its display."""
+        self.pointing_offset = None
+        self.window.image_panel.clear_pointing_offset()
+        self.window.control_panel.show_pointing_offset(None)
+
+    def _on_offset_finished(self):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.model.pointing_offset_worker.PointingOffsetWorker.offsetFinished`:
+        remind the observer to check the result.
+        """
+        log.info('Take a Single exposure to check the pointing.')
+
+    def _on_offset_worker_finished(self):
+        """
+        Handle the offset worker's ``finished`` signal: release the worker,
+        clear the (now applied, or failed) pending offset, and restore
+        hardware exclusivity.  See
+        :meth:`~nickel_focus.gui.controller.Controller._on_focus_worker_finished`.
+        """
+        if self.offset_worker is not None:
+            self.offset_worker.wait()
+        self.offset_worker = None
+        self._clear_pointing_offset()
+        self._set_running(False)
+
+    def _busy(self):
+        """Whether a sequence, exposure, slew, or offset is running."""
+        return (
+            self.focus_worker is not None or self.slew_worker is not None
+            or self.offset_worker is not None
+        )
 
     def _on_slew_finished(self):
         """

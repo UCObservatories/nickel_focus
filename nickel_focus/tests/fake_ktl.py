@@ -18,7 +18,8 @@ e.g., that every read had a timeout or that a read-only service never
 wrote.  :class:`Simulator` defines the keywords of the
 ``nickelpoco`` and ``nscicam`` services and makes writes behave like the
 hardware: commanding the focus moves the secondary and re-locks it, commanding
-a slew moves the telescope, and starting an exposure steps ``EXPSTATE`` through
+a slew moves the telescope, a guider offset finishes (``POCGDFIN``) and
+``POCGDOT`` puts the telescope on target, and starting an exposure steps ``EXPSTATE`` through
 an exposure and writes a synthesized frame.
 
 This validates the *software logic* built on the keyword protocol -- it cannot
@@ -317,6 +318,24 @@ class Simulator:
         change.
     reports_file : :obj:`bool`
         Whether a successful exposure updates ``FITSFILE``.
+    guider_offsets : :obj:`list`
+        Each guider offset written, as ``(keyword, radians)`` (``POCGDIX`` or
+        ``POCGDIY``).  An offset written any way but as binary radians is an
+        error.
+    guider_arms : :obj:`bool`
+        Whether writing ``POCGDFIN`` arms it (sets it to ``1``); if not, it
+        reads ``0``.
+    guider_move_succeeds : :obj:`bool`
+        Whether a guider offset finishes (``POCGDFIN`` goes to ``0``) or fails
+        (``-1``).
+    guider_move_finishes : :obj:`bool`
+        Whether a guider offset finishes at all; if not, ``POCGDFIN`` stays
+        ``1``.
+    on_target_marks : :obj:`int`
+        How many times ``POCGDOT`` has been written.
+    marks_on_target : :obj:`bool`
+        Whether writing ``POCGDOT`` brings ``POCOT`` to ``0``; if not, it stays
+        ``1``.
     """
 
     def __init__(self, make_frame=None, directory=None, focus=340.):
@@ -327,6 +346,12 @@ class Simulator:
         self.reaches_target = True
         self.exposure_error = None
         self.reports_file = True
+        self.guider_offsets = []
+        self.guider_arms = True
+        self.guider_move_succeeds = True
+        self.guider_move_finishes = True
+        self.on_target_marks = 0
+        self.marks_on_target = True
         self.ktl = FakeKTL()
 
         poco = 'nickelpoco'
@@ -342,6 +367,10 @@ class Simulator:
         define(poco, 'POCSECPD', focus, on_write=self._on_focus)
         define(poco, 'POCSECLK', 'on')
         define(poco, 'POCHEART', 0)
+        define(poco, 'POCGDFIN', 0, on_write=self._on_guider_arm)
+        define(poco, 'POCGDIX', 0., on_write=lambda value: self._on_guider_offset('POCGDIX'))
+        define(poco, 'POCGDIY', 0., on_write=lambda value: self._on_guider_offset('POCGDIY'))
+        define(poco, 'POCGDOT', 0, on_write=self._on_guider_on_target)
 
         cam = 'nscicam'
         define(cam, 'EXPSTATE', 'Ready')
@@ -441,6 +470,28 @@ class Simulator:
             self._set('nickelpoco', 'POCOT', 1, pending=[0])
         else:
             self._set('nickelpoco', 'POCOT', 1, pending=[-1])
+
+    def _on_guider_arm(self, value):
+        """``POCGDFIN`` written: it reads ``1`` (if :attr:`guider_arms`)."""
+        self._set('nickelpoco', 'POCGDFIN', 1 if self.guider_arms else 0)
+
+    def _on_guider_offset(self, name):
+        """
+        ``POCGDIX``/``POCGDIY`` written: the move finishes when waited for
+        (``POCGDFIN`` goes to ``0`` or ``-1``), unless it never does.
+        """
+        keyword = self.keyword('nickelpoco', name)
+        if keyword.binary_writes[-1:] != [True]:
+            raise AssertionError(f'{name} must be written as binary radians.')
+        self.guider_offsets.append((name, float(keyword.value)))
+        if self.guider_move_finishes:
+            result = 0 if self.guider_move_succeeds else -1
+            self.keyword('nickelpoco', 'POCGDFIN').pending = [result]
+
+    def _on_guider_on_target(self, value):
+        """``POCGDOT`` written: ``POCOT`` goes to ``0`` (if :attr:`marks_on_target`)."""
+        self.on_target_marks += 1
+        self._set('nickelpoco', 'POCOT', 1, pending=[0] if self.marks_on_target else [])
 
     def _on_expose(self, value):
         """

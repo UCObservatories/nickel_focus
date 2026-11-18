@@ -1386,3 +1386,229 @@ def test_unresponsive_service_is_logged_and_left_unconnected(qapp, caplog, fake_
     ), 'the unresponsive service should be logged as a warning'
     assert _indicator_states(window)['exp'] == 'error', \
         'the Exp indicator should be red without the camera service'
+
+
+# -- Pointing offset ------------------------------------------------------------
+
+def _wait_for_offset_worker(controller, timeout_ms=5000):
+    worker = controller.offset_worker
+    if worker is None:
+        return
+    loop = QtCore.QEventLoop()
+    worker.finished.connect(loop.quit)
+    QtCore.QTimer.singleShot(timeout_ms, loop.quit)
+    loop.exec()
+
+
+def _single_exposure_with_offset(fake_hardware):
+    """A Controller whose Single exposure has a pending pointing offset."""
+    window = MainWindow()
+    controller = Controller(window)
+    controller.take_single_exposure(345.)
+    _wait_for_focus_worker(controller)
+    x, y = window.image_panel.current_result.centroid
+    # Slightly off the star: 'p' snaps to its centroid.
+    window.image_panel.pointingStarSelected.emit(x + 1.5, y - 1.)
+    return window, controller
+
+
+def test_p_key_sets_a_pending_offset(qapp, fake_hardware):
+    window, controller = _single_exposure_with_offset(fake_hardware)
+    result = window.image_panel.current_result
+    offset = controller.pointing_offset
+
+    assert offset is not None, "'p' near a star should make a pending pointing offset"
+    assert offset.star == pytest.approx(result.centroid), \
+        'the offset should be measured from the star centroid, not the cursor'
+    assert offset.exposure == result.exposure, 'the offset should belong to the displayed exposure'
+    assert window.image_panel._pointing_offset is offset, 'the offset should be drawn on the image'
+    button = window.control_panel.slew_offset_button
+    assert button.text() == f'Offset by {offset.text()}', 'the Slew tab should show the offset'
+    assert button.isEnabled(), 'the offset button should be enabled once an offset is pending'
+    assert f'{offset.text()}.' in _log_text(window), 'the offset should be logged'
+
+
+def test_p_key_away_from_any_star_keeps_the_offset(qapp, fake_hardware):
+    window, controller = _single_exposure_with_offset(fake_hardware)
+    offset = controller.pointing_offset
+
+    window.image_panel.pointingStarSelected.emit(1., 1.)
+
+    assert controller.pointing_offset is offset, \
+        "'p' away from any star should leave the pending offset unchanged"
+    assert 'No star found within' in _log_text(window), 'missing the star should be a warning'
+
+
+def test_p_key_with_unknown_binning_warns(qapp, focus_sweep):
+    # The Replay files record no binning, so no offset can be measured.
+    window, controller = _make_controller(focus_sweep)
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+    x, y = window.image_panel.current_result.centroid
+
+    window.image_panel.pointingStarSelected.emit(x, y)
+
+    assert controller.pointing_offset is None, 'without the binning there should be no offset'
+    assert 'binning is unknown' in _log_text(window), 'the reason should be logged'
+
+
+def test_apply_pointing_offset_runs_against_fake_telescope(qapp, fake_hardware):
+    window, controller = _single_exposure_with_offset(fake_hardware)
+    sim = fake_hardware['sim']
+    offset = controller.pointing_offset
+
+    window.control_panel.slew_offset_button.click()
+    _wait_for_offset_worker(controller)
+
+    assert sim.guider_offsets == [
+        ('POCGDIX', pytest.approx(Angle(offset.east, unit='arcsec').radian)),
+        ('POCGDIY', pytest.approx(Angle(offset.north, unit='arcsec').radian)),
+    ], 'the pending offset should be written to the guider offsets'
+    assert sim.on_target_marks == 1, 'the telescope should be marked on target'
+    assert controller.offset_worker is None, 'the worker should be cleared once finished'
+    assert controller.pointing_offset is None, 'an applied offset should no longer be pending'
+    button = window.control_panel.slew_offset_button
+    assert button.text() == 'Offset by —' and not button.isEnabled(), \
+        'the button should return to the placeholder, disabled'
+    assert window.image_panel._pointing_offset is None, 'the offset should no longer be drawn'
+    assert 'Take a Single exposure to check the pointing.' in _log_text(window), \
+        'the observer should be reminded to check'
+
+
+def test_a_failed_pointing_offset_is_reported_and_cleared(qapp, fake_hardware):
+    window, controller = _single_exposure_with_offset(fake_hardware)
+    fake_hardware['sim'].guider_move_succeeds = False
+
+    controller.apply_pointing_offset()
+    _wait_for_offset_worker(controller)
+
+    assert 'Could not apply the pointing offset' in _log_text(window), \
+        'a failed offset should be reported'
+    assert controller.pointing_offset is None, 'a failed offset should be cleared too'
+    assert fake_hardware['sim'].on_target_marks == 0, 'a failed offset must not be marked on target'
+
+
+def test_pointing_offset_is_a_noop_while_something_is_running(qapp, fake_hardware):
+    window, controller = _single_exposure_with_offset(fake_hardware)
+    controller.slew_worker = types.SimpleNamespace()  # pretend a slew is running
+
+    controller.apply_pointing_offset()
+
+    assert controller.offset_worker is None, 'an offset request should be ignored while busy'
+    assert fake_hardware['sim'].guider_offsets == [], 'the telescope should never be offset'
+    controller.slew_worker = None
+
+
+def test_slewing_clears_the_pending_offset(qapp, fake_hardware):
+    window, controller = _single_exposure_with_offset(fake_hardware)
+
+    controller.move_to_target('05:30:00', '+20:15:00')
+    _wait_for_slew_worker(controller)
+
+    assert controller.pointing_offset is None, 'a slew should clear the pending offset'
+    assert window.control_panel.slew_offset_button.text() == 'Offset by —', \
+        'a slew should return the button to the placeholder'
+
+
+def test_a_new_sequence_clears_the_pending_offset(qapp, fake_hardware, focus_sweep):
+    window, controller = _single_exposure_with_offset(fake_hardware)
+    _configure_replay_tab(window.control_panel, focus_sweep)
+
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+
+    assert controller.pointing_offset is None, 'a new sequence should clear the pending offset'
+    assert window.control_panel.slew_offset_button.text() == 'Offset by —', \
+        'a new sequence should return the button to the placeholder'
+
+
+def test_pointing_offset_without_ktl_reports_clear_failure(qapp):
+    from nickel_focus import pointing
+    window = MainWindow()
+    controller = Controller(window)
+    controller.pointing_offset = pointing.PointingOffset((1., 2.), (3., 4.), 1., 2.)
+
+    controller.apply_pointing_offset()
+
+    assert controller.offset_worker is None, 'no worker should start without a ktl connection'
+    assert 'no ktl connection' in _log_text(window).lower(), \
+        'the failure should explain that there is no ktl connection'
+
+
+# -- Single-tab FWHM, and exposures that can't be measured ------------------------
+
+def _blank_frames(fake_hardware):
+    """Make the simulated camera produce frames with no star."""
+    rng = np.random.default_rng(3)
+    fake_hardware['sim'].make_frame = lambda focus_value: rng.normal(1000., 10., (101, 101))
+
+
+def test_single_exposure_shows_its_fwhm_on_the_single_tab(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    label = window.control_panel.single_fwhm_label
+    assert label.text() == 'FWHM: — (pix); — (arcsec)', \
+        'before any exposure, the FWHM label should show placeholders'
+
+    controller.take_single_exposure(345.)
+    _wait_for_focus_worker(controller)
+
+    result = window.image_panel.current_result
+    arcsec = focus.fwhm_arcsec(result.fwhm, result.binning)
+    assert result.binning is not None, 'setup: the simulated exposure should record its binning'
+    assert label.text() == f'FWHM: {result.fwhm:.2f} (pix); {arcsec:.2f} (arcsec)', \
+        'the Single tab should show the measured FWHM in pixels and arcsec'
+
+
+def test_reanalyzing_a_single_exposure_updates_its_fwhm(qapp, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+    controller.take_single_exposure(345.)
+    _wait_for_focus_worker(controller)
+    window.control_panel.set_single_fwhm(None, None)
+
+    x, y = window.image_panel.current_result.centroid
+    window.image_panel.sourceSelected.emit(x, y)
+    _wait_for_focus_worker(controller)
+
+    assert window.control_panel.single_fwhm_label.text() != 'FWHM: — (pix); — (arcsec)', \
+        'remeasuring the Single exposure should update its FWHM'
+
+
+def test_unmeasurable_single_exposure_is_still_displayed(qapp, fake_hardware):
+    _blank_frames(fake_hardware)
+    window = MainWindow()
+    controller = Controller(window)
+
+    controller.take_single_exposure(345.)
+    _wait_for_focus_worker(controller)
+
+    result = window.image_panel.current_result
+    assert result is not None and not result.measured, \
+        'an exposure that cannot be measured should still be displayed'
+    assert window.control_panel.single_fwhm_label.text() == 'FWHM: — (pix); — (arcsec)', \
+        'with no measurement, the FWHM label should show placeholders'
+    text = _log_text(window)
+    assert 'Could not measure the image quality' in text, 'the reason should be logged'
+    assert 'its FWHM could not be measured' in text, 'the exposure itself should be reported'
+    assert 'Could not take single exposure' not in text, 'the exposure should not count as failed'
+
+    window.image_panel.pointingStarSelected.emit(50., 50.)
+    assert controller.pointing_offset is None, "'p' should find no star on a blank exposure"
+    assert 'No star found within' in _log_text(window), "'p' should say there is no star"
+
+
+def test_unmeasurable_sequence_exposure_is_displayed_before_stopping(qapp, fake_hardware):
+    _blank_frames(fake_hardware)
+    window = MainWindow()
+    controller = Controller(window)
+    panel = window.control_panel
+    panel.tabs.setCurrentWidget(panel.grid_tab)
+
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+
+    assert len(window.image_panel._results) == 1, \
+        'the unmeasurable exposure should be displayed before the sequence stops'
+    assert window.curve_panel._results == [], 'it should not be added to the focus curve'
+    assert 'stopping the sequence' in _log_text(window), 'the sequence should report stopping'

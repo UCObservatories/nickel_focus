@@ -690,6 +690,12 @@ run there.
 - **Whether the data-acquisition GUI tracks `EXPOSURE`/`AMPCONF`/
   `BINNING`**, so that an edit made in the focus GUI shows up there
   (Goal 2).
+- **Pointing offsets** (`NickelPoco.apply_guider_offset`,
+  `mark_guider_on_target`; see `claude/pointing_offset_plan.md` §4 and §10):
+  the module constants in `services/nickelpoco.py` --
+  `GUIDER_OFFSET_IN_SERIES`, `GUIDER_OFFSET_SIGN`, `GUIDER_OFFSET_COS_DEC`,
+  `GUIDER_MOVE_TIMEOUT`, `ON_TARGET_TIMEOUT` -- plus the value `POCGDOT`
+  expects, and whether writing `POCGDIX` already waits for the move.
 
 ### 5.3 Possible later improvements
 

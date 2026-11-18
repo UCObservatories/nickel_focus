@@ -41,8 +41,13 @@ def find_sources(data, max_iterations=5, grow=7, atol=0.1, rtol=0.01):
         The estimated background in the image
     source_mask : :class:`photutils.segmentation.core.SegmentationImage`
         Segmentation image.
+
+    Raises
+    ------
+    ValueError
+        Raised if no sources are detected.
     """
-    previous_threshold = None               # Previous threshold value
+    previous_threshold = None              # Previous threshold value
     bkg = 0.0                               # Background
     # Sigma-clipping object
     sigma_clip = SigmaClip(sigma=3.0, maxiters=10)
@@ -57,6 +62,10 @@ def find_sources(data, max_iterations=5, grow=7, atol=0.1, rtol=0.01):
         threshold = segmentation.detect_threshold(_data, n_sigma=5.0, sigma_clip=sigma_clip)
         # Detect sources above the threshold
         sources = segmentation.detect_sources(_data, threshold, n_pixels=10)
+        if sources is None:
+            # photutils returns None, rather than an empty segmentation
+            # image, when nothing is above the threshold.
+            raise ValueError('No sources were detected in the image.')
         # Grow the mask
         grown_source_mask = binary_dilation(sources.data_masked, structure=structure)
         # Get the background and add it to the total

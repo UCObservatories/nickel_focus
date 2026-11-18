@@ -185,8 +185,8 @@ def test_each_tab_has_the_requested_buttons(qapp):
         return sorted(b.text() for b in tab.findChildren(QtWidgets.QPushButton))
 
     assert button_texts(panel.slew_tab) == sorted([
-        'Browse…', 'Move to Target', 'Object', 'Pointing *', 'Focusing *',
-    ]), 'the Slew tab should have its file-browse, move, and three find-nearest buttons'
+        'Browse…', 'Move to Target', 'Offset by —', 'Object', 'Pointing *', 'Focusing *',
+    ]), 'the Slew tab should have its file-browse, move, offset, and three find-nearest buttons'
     assert button_texts(panel.single_tab) == ['Acquire', 'Use current focus'], \
         'the Single tab should have Acquire and Use current focus'
     assert button_texts(panel.grid_tab) == ['Acquire', 'Interrupt'], \
@@ -737,3 +737,100 @@ def test_use_current_focus_button_is_disabled_while_running(qapp):
 
     assert not panel.single_current_focus_button.isEnabled(), \
         'the button should be disabled while anything runs, like the field it fills'
+
+
+# -- Pointing offset ------------------------------------------------------------
+
+def test_offset_button_is_below_move_to_target(qapp):
+    panel = FocusControlPanel()
+    layout = panel.slew_move_button.parentWidget().layout()
+    rows = [layout.itemAt(i).layout() for i in range(layout.count())]
+    move_row = next(i for i, row in enumerate(rows)
+                    if row is not None and row.indexOf(panel.slew_move_button) >= 0)
+
+    assert rows[move_row + 1].indexOf(panel.slew_offset_button) >= 0, \
+        'the offset button should be in the row directly below Move to Target'
+
+
+def test_offset_button_starts_with_the_placeholder_and_disabled(qapp):
+    panel = FocusControlPanel()
+    panel.set_running(False)
+
+    assert panel.slew_offset_button.text() == 'Offset by —', \
+        'with no offset pending, the button should show the placeholder'
+    assert not panel.slew_offset_button.isEnabled(), \
+        'with no offset pending, the button should be disabled'
+
+
+def test_offset_button_shows_a_pending_offset(qapp):
+    panel = FocusControlPanel()
+    panel.set_running(False)
+
+    panel.show_pointing_offset('12.3″ E, 4.5″ N')
+    assert panel.slew_offset_button.text() == 'Offset by 12.3″ E, 4.5″ N', \
+        'the button should show the pending offset'
+    assert panel.slew_offset_button.isEnabled(), \
+        'with an offset pending and nothing running, the button should be enabled'
+
+    panel.set_running(True)
+    assert not panel.slew_offset_button.isEnabled(), \
+        'the button should be disabled while anything runs'
+    panel.set_running(False)
+    assert panel.slew_offset_button.isEnabled(), \
+        'the button should be enabled again once nothing runs, with the offset still pending'
+
+    panel.show_pointing_offset(None)
+    assert panel.slew_offset_button.text() == 'Offset by —', \
+        'clearing the offset should return the button to the placeholder'
+    assert not panel.slew_offset_button.isEnabled(), \
+        'clearing the offset should disable the button'
+
+
+def test_offset_button_emits_a_request(qapp):
+    panel = FocusControlPanel()
+    panel.set_running(False)
+    panel.show_pointing_offset('1.0″ E, 1.0″ N')
+    requests = []
+    panel.applyPointingOffsetRequested.connect(lambda: requests.append(True))
+
+    panel.slew_offset_button.click()
+
+    assert requests == [True], 'clicking the button should request the offset'
+
+
+# -- Single-tab FWHM ---------------------------------------------------------------
+
+def test_fwhm_label_is_below_use_current_focus(qapp):
+    panel = FocusControlPanel()
+    form = panel.single_focus_spin.parentWidget().layout()
+
+    button_row = form.getWidgetPosition(panel.single_current_focus_button)[0]
+    label_row, role = form.getWidgetPosition(panel.single_fwhm_label)
+
+    assert label_row == button_row + 1, 'the FWHM should be directly below Use current focus'
+    assert role == QtWidgets.QFormLayout.ItemRole.SpanningRole, \
+        'the FWHM should span the row, so it starts under "Focus value:"'
+    panel.resize(800, 300)
+    panel.show()
+    focus_label = form.labelForField(panel.single_focus_spin)
+    assert panel.single_fwhm_label.x() == focus_label.x(), \
+        'the FWHM should line up with the "Focus value:" label'
+    panel.close()
+    assert panel.single_fwhm_label.text() == 'FWHM: — (pix); — (arcsec)', \
+        'before any exposure, the FWHM should show placeholders'
+
+
+def test_set_single_fwhm(qapp):
+    panel = FocusControlPanel()
+
+    panel.set_single_fwhm(3.214, 1.0702)
+    assert panel.single_fwhm_label.text() == 'FWHM: 3.21 (pix); 1.07 (arcsec)', \
+        'the FWHM should be shown in pixels and arcsec, to two decimals'
+
+    panel.set_single_fwhm(3.214, None)
+    assert panel.single_fwhm_label.text() == 'FWHM: 3.21 (pix); — (arcsec)', \
+        'with an unknown binning, the arcsec value should be a placeholder'
+
+    panel.set_single_fwhm(None, None)
+    assert panel.single_fwhm_label.text() == 'FWHM: — (pix); — (arcsec)', \
+        'with no measurement, both values should be placeholders'

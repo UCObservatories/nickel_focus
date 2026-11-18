@@ -235,14 +235,17 @@ class StepResult:
         The focus value used for this exposure.
     exposure : :class:`pathlib.Path`
         Path to the exposure's FITS file.
-    fwhm : :obj:`float`
-        Measured image quality (FWHM) of the selected source.
+    fwhm : :obj:`float` or None
+        Measured image quality (FWHM) of the selected source, or None if the
+        exposure couldn't be measured (see ``photometry_error``).
     frame : :class:`numpy.ndarray`
-        Background-subtracted image data for the full exposure.
-    stamp : :class:`numpy.ndarray`
-        Cutout of ``frame`` around the selected source.
-    centroid : :obj:`tuple`
-        The (x,y) centroid of the selected source.
+        Background-subtracted image data for the full exposure (if it couldn't
+        be measured, the image less its median).
+    stamp : :class:`numpy.ndarray` or None
+        Cutout of ``frame`` around the selected source, or None if not
+        measured.
+    centroid : :obj:`tuple` or None
+        The (x,y) centroid of the selected source, or None if not measured.
     is_outlier : :obj:`bool`
         Whether this step's centroid is an outlier relative to the rest of the
         sequence collected so far; see
@@ -259,18 +262,95 @@ class StepResult:
         subtraction), in the file's own type -- 16-bit unsigned integers for
         the Nickel camera, a quarter of the size of ``frame`` -- or None if
         not kept.
+    sources : :class:`numpy.ndarray` or None
+        The ``(x, y)`` centroids of every source detected in the exposure, as
+        an ``(N, 2)`` array (see :func:`source_centroids`; empty if the
+        exposure couldn't be measured), or None if not kept.
+    photometry_error : :obj:`str` or None
+        Why the exposure couldn't be measured, or None if it was (see
+        :func:`measure_exposure`).
     """
     index: int
     focus_value: float
     exposure: Path
-    fwhm: float
+    fwhm: float | None
     frame: np.ndarray
-    stamp: np.ndarray
-    centroid: tuple
+    stamp: np.ndarray | None
+    centroid: tuple | None
     is_outlier: bool
     object_name: str | None = None
     binning: int | None = None
     raw: np.ndarray | None = None
+    sources: np.ndarray | None = None
+    photometry_error: str | None = None
+
+    @property
+    def measured(self):
+        """Whether the exposure's image quality was measured."""
+        return self.fwhm is not None
+
+
+def source_centroids(src_data):
+    """
+    The ``(x, y)`` centroids of the sources in a
+    :func:`~nickel_focus.photometry.image_quality` source table, as an
+    ``(N, 2)`` array.
+    """
+    return np.column_stack(
+        [np.asarray(src_data['CENX'], dtype=float), np.asarray(src_data['CENY'], dtype=float)]
+    )
+
+
+def measure_exposure(exposure_file, method='brightest'):
+    """
+    Measure an exposure's image quality (see
+    :func:`~nickel_focus.photometry.image_quality`) for a
+    :class:`StepResult`, without letting a failed measurement keep the image
+    from being shown.
+
+    If the measurement fails (e.g. no source is detected), a warning is
+    logged and the image is still returned, less its median, with no
+    measurement.
+
+    Parameters
+    ----------
+    exposure_file : :obj:`str`, :class:`pathlib.Path`
+        The exposure's FITS file.
+    method : :obj:`str`, :obj:`tuple`, optional
+        The photometry method passed to
+        :func:`~nickel_focus.photometry.image_quality`.
+
+    Returns
+    -------
+    :obj:`dict`
+        The :class:`StepResult` fields that come from the image: ``fwhm``,
+        ``frame``, ``raw``, ``sources``, ``stamp``, ``centroid``, and
+        ``photometry_error`` (None if the measurement succeeded).
+
+    Raises
+    ------
+    OSError
+        Raised (by :mod:`astropy.io.fits`) if the file itself can't be read.
+    """
+    try:
+        data, bkg, src_data, img_quality, stamp, coords = image_quality(
+            exposure_file, method=method
+        )
+    except Exception as e:
+        with fits.open(exposure_file) as hdu:
+            raw = np.array(hdu[0].data)
+        log.warning(
+            f'Could not measure the image quality of {Path(exposure_file).name}: {e}  '
+            'Showing it without a measurement.'
+        )
+        return dict(
+            fwhm=None, frame=raw.astype(float) - np.median(raw), raw=raw,
+            sources=np.empty((0, 2)), stamp=None, centroid=None, photometry_error=str(e)
+        )
+    return dict(
+        fwhm=img_quality, frame=data.astype(float) - bkg, raw=data,
+        sources=source_centroids(src_data), stamp=stamp, centroid=coords, photometry_error=None
+    )
 
 
 ARCSEC_PER_UNBINNED_PIXEL = 0.1665
@@ -289,15 +369,28 @@ def common_binning(binnings):
     return unique.pop()
 
 
+def fwhm_arcsec(fwhm, binning):
+    """
+    An FWHM in pixels converted to arcseconds (see
+    :data:`ARCSEC_PER_UNBINNED_PIXEL`), or None if either is unknown.
+    """
+    if fwhm is None or binning is None:
+        return None
+    return fwhm * ARCSEC_PER_UNBINNED_PIXEL * binning
+
+
 def fwhm_text(fwhm, binning):
     """
     An FWHM for display: in pixels, and also in arcseconds if ``binning`` is
     known (see :data:`ARCSEC_PER_UNBINNED_PIXEL`), e.g. ``'3.21 pix (1.07
-    arcsec)'`` or ``'3.21 pix'``.
+    arcsec)'`` or ``'3.21 pix'``; ``'not measured'`` if ``fwhm`` is None.
     """
+    if fwhm is None:
+        return 'not measured'
     text = f'{fwhm:.2f} pix'
-    if binning is not None:
-        text += f' ({fwhm * ARCSEC_PER_UNBINNED_PIXEL * binning:.2f} arcsec)'
+    arcsec = fwhm_arcsec(fwhm, binning)
+    if arcsec is not None:
+        text += f' ({arcsec:.2f} arcsec)'
     return text
 
 
@@ -456,34 +549,42 @@ class FocusSequence:
         ------
         StepResult
             The result of the most recently completed step.
+
+        Raises
+        ------
+        ValueError
+            Raised after yielding an exposure that couldn't be measured (see
+            :func:`measure_exposure`), which is still yielded so it can be
+            shown: the sequence can't go on without its measurement.
         """
         self.method = method
         while self.continue_sequence():
             self.observed_focus += [self.step_focus()]
             self.exposures += [self.take_exposure()]
-            data, bkg, src_data, img_quality, source_stamp, coords = image_quality(
-                self.exposures[-1], method=method
-            )
-            self.source_stamps += [source_stamp]
-            self.img_quality += [img_quality]
+            measurement = measure_exposure(self.exposures[-1], method=method)
+            self.source_stamps += [measurement['stamp']]
+            self.img_quality += [measurement['fwhm']]
             self.binnings += [exposure_binning(self.exposures[-1])]
-            self.centroids += [coords]
+            self.centroids += [measurement['centroid']]
 
             result = StepResult(
                 index=self.step_iter,
                 focus_value=self.observed_focus[-1],
                 exposure=self.exposures[-1],
-                fwhm=img_quality,
-                frame=data.astype(float) - bkg,
-                raw=data,
-                stamp=source_stamp,
-                centroid=coords,
-                is_outlier=FocusPlot.is_outlier(self.centroids),
+                is_outlier=(
+                    measurement['fwhm'] is not None and FocusPlot.is_outlier(self.centroids)
+                ),
                 object_name=exposure_object_name(self.exposures[-1]),
                 binning=self.binnings[-1],
+                **measurement,
             )
             self.step_iter += 1
             yield result
+            if not result.measured:
+                raise ValueError(
+                    f'Could not measure {result.exposure.name} ({result.photometry_error}); '
+                    'stopping the sequence.'
+                )
 
     def reanalyze(self, method='brightest'):
         """
@@ -510,6 +611,12 @@ class FocusSequence:
         StepResult
             The updated result for each already-collected exposure, in the order
             they were originally taken.
+
+        Raises
+        ------
+        ValueError
+            Raised after yielding an exposure that couldn't be measured, as
+            for :meth:`~nickel_focus.focus.FocusSequence.step`.
         """
         self.method = method
         focus_values = list(self.observed_focus)
@@ -520,30 +627,32 @@ class FocusSequence:
         self.centroids = []
 
         for i, (focus_value, exposure_file) in enumerate(zip(focus_values, exposures)):
-            data, bkg, src_data, img_quality, source_stamp, coords = image_quality(
-                exposure_file, method=method
-            )
-            self.source_stamps += [source_stamp]
-            self.img_quality += [img_quality]
-            self.centroids += [coords]
+            measurement = measure_exposure(exposure_file, method=method)
+            self.source_stamps += [measurement['stamp']]
+            self.img_quality += [measurement['fwhm']]
+            self.centroids += [measurement['centroid']]
 
-            yield StepResult(
+            result = StepResult(
                 index=i,
                 focus_value=focus_value,
                 exposure=exposure_file,
-                fwhm=img_quality,
-                frame=data.astype(float) - bkg,
-                raw=data,
-                stamp=source_stamp,
-                centroid=coords,
-                is_outlier=FocusPlot.is_outlier(self.centroids),
+                is_outlier=(
+                    measurement['fwhm'] is not None and FocusPlot.is_outlier(self.centroids)
+                ),
                 object_name=exposure_object_name(exposure_file),
                 # Already known from when the exposure was collected.
                 binning=(
                     self.binnings[i] if i < len(self.binnings)
                     else exposure_binning(exposure_file)
                 ),
+                **measurement,
             )
+            yield result
+            if not result.measured:
+                raise ValueError(
+                    f'Could not measure {Path(exposure_file).name} ({result.photometry_error}); '
+                    'stopping the reanalysis.'
+                )
 
     def take_single_exposure(self, focus_value, method='brightest', **exp_kwargs):
         """
@@ -572,7 +681,9 @@ class FocusSequence:
         -------
         StepResult
             The measurement from the single exposure.  Its ``index`` is always
-            0, since it's not part of any larger sequence.
+            0, since it's not part of any larger sequence.  If the exposure
+            couldn't be measured, it's still returned, with no measurement
+            (see :func:`measure_exposure`).
         """
         if self._focus is None or self._exposure is None:
             raise ValueError(
@@ -582,20 +693,14 @@ class FocusSequence:
         self.set_focus(focus_value)
         self._exposure.cfg.configure(**exp_kwargs)
         exposure_file = self.take_exposure()
-        data, bkg, src_data, img_quality, source_stamp, coords \
-            = image_quality(exposure_file, method=method)
         return StepResult(
             index=0,
             focus_value=self._focus.current,
             exposure=exposure_file,
-            fwhm=img_quality,
-            frame=data.astype(float) - bkg,
-            raw=data,
-            stamp=source_stamp,
-            centroid=coords,
             is_outlier=False,
             object_name=exposure_object_name(exposure_file),
             binning=exposure_binning(exposure_file),
+            **measure_exposure(exposure_file, method=method),
         )
 
     def execute(self, goto=True, method='brightest', plot=True, **exp_kwargs):
@@ -607,7 +712,9 @@ class FocusSequence:
         self.plot = FocusPlot(self.expected_steps) if plot else None
 
         for result in self.step(method=method):
-            if self.plot is not None:
+            # An exposure that couldn't be measured ends the sequence (step
+            # raises next); there's nothing to plot for it.
+            if self.plot is not None and result.measured:
                 self.plot.update_frame(
                     result.frame, result.centroid, int(result.fwhm*10), result.exposure.stem,
                     result.focus_value, result.is_outlier
@@ -669,6 +776,19 @@ class FocusSequence:
 
     @staticmethod
     def fit_best_focus(focus, img_quality):
+        """
+        Fit a quadratic to image quality vs. focus and return its vertex,
+        ``(best_focus, best_img_quality)``.  Exposures that couldn't be
+        measured (image quality None) are left out.
+
+        Raises
+        ------
+        ValueError
+            Raised if fewer than three measured exposures remain.
+        """
+        pairs = [(f, q) for f, q in zip(focus, img_quality) if q is not None]
+        focus = [f for f, _ in pairs]
+        img_quality = [q for _, q in pairs]
         if len(focus) < 3:
             raise ValueError('Insufficient number of focus values observed.')
         a, b, c = quadratic.fit_quadratic(focus, img_quality)

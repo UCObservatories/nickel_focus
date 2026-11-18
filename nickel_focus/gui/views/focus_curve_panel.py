@@ -48,7 +48,13 @@ class FocusCurvePanel(QtWidgets.QWidget):
         layout.addWidget(self.canvas)
 
     def add_result(self, result):
-        """Add one more :class:`~nickel_focus.focus.StepResult` and redraw."""
+        """
+        Add one more :class:`~nickel_focus.focus.StepResult` and redraw.  A
+        result that couldn't be measured (``fwhm`` None) has no point, so it's
+        ignored.
+        """
+        if not result.measured:
+            return
         self._results.append(result)
         self._render()
 

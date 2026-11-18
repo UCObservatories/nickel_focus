@@ -69,3 +69,10 @@ def test_evaluate_shape_warns_on_dissimilar_sigma(caplog):
         r.levelname == 'WARNING' and 'too different' in r.getMessage()
         for r in caplog.records if r.name == 'nickel_focus'
     ), 'a too-elliptical source should log a warning'
+
+
+def test_find_sources_reports_an_image_with_no_sources():
+    import pytest
+    blank = np.random.default_rng(0).normal(1000., 10., (100, 100))
+    with pytest.raises(ValueError, match='No sources were detected'):
+        photometry.find_sources(blank)

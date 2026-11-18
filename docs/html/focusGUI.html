@@ -82,6 +82,34 @@ them, then press <b>Move to Target</b>.  </p>
 src="../images/focusGUI_slew.png" width="600" alt="Slew tab"></a><figcaption>Figure
 2: Slew Tab</figcaption></figure>
 
+<h3>Correcting the pointing</h3>
+
+<p> If the star you moved to isn't at the center of the image, you can
+offset the telescope to center it:</p>
+
+<ol>
+<li>Take an exposure with the <b>Single</b> tab.</li>
+<li>Hover the mouse over the star that should be at the center of the image and
+press <b>p</b>.  The GUI uses the detected star nearest the mouse (within 10
+pixels) and draws a cyan line from it to the center of the image, labeled with
+the offset needed, e.g. <b>53.6″ E, 70.3″ N</b>.  If several exposures are
+loaded (e.g. on the <b>Replay</b> tab), the line is shown on each of them.  The
+button below <b>Move to
+Target</b> on the <b>Slew</b> tab changes from <b>Offset by —</b> to, e.g.,
+<b>Offset by 53.6″ E, 70.3″ N</b>.  If no star is close enough, or the offset
+would be more than 5 arcminutes, the <b>Log</b> tab says so and nothing
+changes.</li>
+<li>Press <b>Offset by …</b>.  The telescope moves by the offset, and the new
+position is then marked as on target.  The <b>Log</b> tab reports each
+step.</li>
+<li>Take another <b>Single</b> exposure to check.  If the star still isn't
+centered, repeat from step 2.</li>
+</ol>
+
+<p> Pressing <b>p</b> again replaces the offset; moving the telescope from the
+<b>Slew</b> tab or starting a new sequence discards it.  The offset needs the
+exposure's binning, which the camera records in each file.</p>
+
 <p />
 <hr>
 <p />
@@ -185,7 +213,15 @@ pressing <b>Acquire</b> without changing it moves the telescope to best focus
 and takes an image that can be used to confirm the best focus.  Of course, you
 can enter a different value to test any other focus.  <b>Use current focus</b>
 fills in the telescope's current focus (rounded to a whole unit), so that
-<b>Acquire</b> takes an image without moving the focus.  </p>
+<b>Acquire</b> takes an image without moving the focus.  Below it, the
+<b>FWHM</b> of the latest Single exposure is shown in pixels and arcseconds
+(<b>FWHM: — (pix); — (arcsec)</b> until there is one, or if it couldn't be
+measured).  </p>
+
+<p> An exposure is always displayed, even if its stars can't be measured (for
+example, if no star is detected); the <b>Log</b> tab gives the reason.  A
+Single exposure then simply has no FWHM.  A Grid, Auto, or Replay sequence
+needs every measurement, so it stops after showing that exposure.  </p>
 
 <p />
 <hr>
