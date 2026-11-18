@@ -106,3 +106,24 @@ def test_long_object_names_are_shortened_to_fit_fits(fake_hardware):
         'OBJECT should be capped at the 68 characters a FITS string value can hold'
     assert written.endswith('...: focus=340.0'), \
         'only the name should be shortened, so the focus is always kept'
+
+
+def test_results_carry_the_binning(fake_hardware):
+    fake_hardware['sim'].keyword('nscicam', 'BINNING').value = '4,4'
+    seq = focus.GridFocusSequence(340., 5., nstep=3, **_services(fake_hardware))
+
+    results = list(seq.step(method='brightest'))
+
+    assert [r.binning for r in results] == [4, 4, 4], \
+        "each result should carry its exposure's binning, from its header"
+
+
+def test_sequence_binning_is_kept_through_reanalysis(fake_hardware):
+    seq = focus.GridFocusSequence(340., 5., nstep=3, **_services(fake_hardware))
+    list(seq.step(method='brightest'))
+
+    results = list(seq.reanalyze(method='brightest'))
+
+    assert seq.binning == 2, "the sequence's common binning should be the camera's (2,2)"
+    assert [r.binning for r in results] == [2, 2, 2], \
+        'reanalyzed results should keep each exposure\'s binning'

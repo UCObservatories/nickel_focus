@@ -251,6 +251,9 @@ class StepResult:
         The exposure's ``OBJECT`` header value (see
         :func:`~nickel_focus.focus.exposure_object_name`), or None if it has
         none.
+    binning : :obj:`int` or None
+        The exposure's binning (1, 2, or 4; see
+        :func:`~nickel_focus.focus.exposure_binning`), or None if unknown.
     """
     index: int
     focus_value: float
@@ -261,6 +264,35 @@ class StepResult:
     centroid: tuple
     is_outlier: bool
     object_name: str | None = None
+    binning: int | None = None
+
+
+ARCSEC_PER_UNBINNED_PIXEL = 0.1665
+"""The Nickel science camera's expected plate scale, per unbinned pixel."""
+
+
+def common_binning(binnings):
+    """
+    The binning shared by every exposure in ``binnings`` (an iterable of
+    :obj:`int` or None), or None if any is unknown or they differ (or there are
+    none).
+    """
+    unique = set(binnings)
+    if len(unique) != 1 or None in unique:
+        return None
+    return unique.pop()
+
+
+def fwhm_text(fwhm, binning):
+    """
+    An FWHM for display: in pixels, and also in arcseconds if ``binning`` is
+    known (see :data:`ARCSEC_PER_UNBINNED_PIXEL`), e.g. ``'3.21 pix (1.07
+    arcsec)'`` or ``'3.21 pix'``.
+    """
+    text = f'{fwhm:.2f} pix'
+    if binning is not None:
+        text += f' ({fwhm * ARCSEC_PER_UNBINNED_PIXEL * binning:.2f} arcsec)'
+    return text
 
 
 def exposure_object_name(path):
@@ -274,6 +306,41 @@ def exposure_object_name(path):
     except OSError:
         return None
     return None if value is None or str(value).strip() == '' else str(value).strip()
+
+
+def exposure_binning(path):
+    """
+    An exposure's binning, from the scale of its "CCD pixel" WCS in the FITS
+    primary header: ``CD1_1C`` and ``CD2_2C``, which should be equal and 1, 2,
+    or 4.
+
+    Returns
+    -------
+    :obj:`int` or None
+        The binning, or None if it can't be determined -- the file can't be
+        read, either keyword is missing, or the values differ or aren't 1, 2,
+        or 4 -- in which case a warning is logged.
+    """
+    name = Path(path).name
+    try:
+        header = fits.getheader(path)
+    except OSError as e:
+        log.warning(f'Could not read the binning of {name}: {e}; treating it as unknown.')
+        return None
+    x, y = header.get('CD1_1C'), header.get('CD2_2C')
+    if x is None or y is None:
+        log.warning(
+            f'Could not read the binning of {name}: its header has no CD1_1C/CD2_2C; treating '
+            'it as unknown.'
+        )
+        return None
+    if x != y or x not in (1, 2, 4):
+        log.warning(
+            f'Unexpected binning in {name}: CD1_1C={x}, CD2_2C={y} (expected equal values of 1, '
+            '2, or 4); treating it as unknown.'
+        )
+        return None
+    return int(x)
 
 
 class FocusSequence:
@@ -314,9 +381,18 @@ class FocusSequence:
         self.observed_focus = []
         self.exposures = []
         self.img_quality = []
+        self.binnings = []
         self.step_iter = 0
         self.source_stamps = []
         self.centroids = []
+
+    @property
+    def binning(self):
+        """
+        The binning shared by every exposure collected so far, or None if any
+        is unknown or they differ (see :func:`~nickel_focus.focus.common_binning`).
+        """
+        return common_binning(self.binnings)
 
     def set_focus(self, focus_value):
         """
@@ -384,6 +460,7 @@ class FocusSequence:
             )
             self.source_stamps += [source_stamp]
             self.img_quality += [img_quality]
+            self.binnings += [exposure_binning(self.exposures[-1])]
             self.centroids += [coords]
 
             result = StepResult(
@@ -396,6 +473,7 @@ class FocusSequence:
                 centroid=coords,
                 is_outlier=FocusPlot.is_outlier(self.centroids),
                 object_name=exposure_object_name(self.exposures[-1]),
+                binning=self.binnings[-1],
             )
             self.step_iter += 1
             yield result
@@ -452,6 +530,11 @@ class FocusSequence:
                 centroid=coords,
                 is_outlier=FocusPlot.is_outlier(self.centroids),
                 object_name=exposure_object_name(exposure_file),
+                # Already known from when the exposure was collected.
+                binning=(
+                    self.binnings[i] if i < len(self.binnings)
+                    else exposure_binning(exposure_file)
+                ),
             )
 
     def take_single_exposure(self, focus_value, method='brightest', **exp_kwargs):
@@ -503,6 +586,7 @@ class FocusSequence:
             centroid=coords,
             is_outlier=False,
             object_name=exposure_object_name(exposure_file),
+            binning=exposure_binning(exposure_file),
         )
 
     def execute(self, goto=True, method='brightest', plot=True, **exp_kwargs):

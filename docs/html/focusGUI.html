@@ -138,8 +138,14 @@ src="../images/focusGUI_grid.png" width="600" alt="Grid tab"></a><figcaption>Fig
 <p> When each exposure is written to disk, it is shown in the image panel with a
 red box around the star being measured, the measured FWHM is added to the focus
 curve, and the <b>Log</b> tab reports the step number, focus value, FWHM, and
-star position.  Once there are three or more points, a quadratic fit and its
-minimum are drawn on the curve.  When the sequence finishes, the <b>Log</b> tab
+star position.  FWHMs are given in pixels and, when the exposures record their
+binning, in arcseconds too (e.g. <b>FWHM 3.21 pix (1.07 arcsec)</b>); so is
+the expected FWHM at the best focus.  Once there are three or more points, a quadratic fit and its
+minimum (an open black star) are drawn on the curve; the plot's limits always
+follow the measured points, so the best focus may lie off the plot until the
+sequence brackets it.  The right-hand axis gives the FWHM in arcseconds
+(0.1665 arcsec per unbinned pixel, times the binning recorded in each
+exposure), or repeats the pixel axis if the binning can't be determined.  When the sequence finishes, the <b>Log</b> tab
 reports the best focus and the expected FWHM there (Figure 4).  If the star's
 position in one exposure is inconsistent with the others, its box is yellow and
 labeled "Outlier centroid," and its point is drawn differently on the curve.

@@ -3161,3 +3161,58 @@ At the user's request, only lowercase 'r' recenters the image (it had
 accepted 'r' or 'R'). `ImagePanel._on_key_press` checks `event.key == 'r'`;
 the 'R' test now checks that it does nothing. The Help text, user manual,
 and `GUI_REFERENCE.md` already named 'r'.
+
+## Focus curve: arcsec axis, data-only limits, star marker (2026-11-18)
+
+- **Binning per exposure:** new `focus.exposure_binning(path)`, from the
+  "CCD pixel" WCS scale in the FITS header, `CD1_1C`/`CD2_2C` (the camera
+  writes no binning keyword; per the user, these are equal and 1, 2, or 4).
+  An unreadable file, missing keywords, unequal values, or a value other
+  than 1, 2, or 4 give None and a logged warning. Carried as the new
+  `StepResult.binning`; the simulated camera writes the keywords from its
+  `BINNING` setting.
+- **Right axis:** `FocusCurvePanel.ax_arcsec`, a `twinx` of `ax`, always
+  shown: FWHM in arcsec (`ARCSEC_PER_UNBINNED_PIXEL` = 0.1665 times the
+  binning) when every point shares one known binning, otherwise FWHM in
+  pixels, repeating the left axis (at the user's request, rather than
+  hiding it). Its limits are the left axis's scaled; clearing a twin axis
+  moves its ticks and label to the left, so they're put back on the right
+  after each clear.
+- **Limits:** after the measured points are drawn, `autoscale_view()` then
+  `set_autoscale_on(False)`, so the fitted curve and best focus never
+  change the limits.
+- **Best focus:** an open black star (`marker='*'`, `s=200`, no fill,
+  black edge).
+- Tests: `exposure_binning` (1/2/4, missing, unreadable, unequal or
+  unexpected values, each warned), results carrying the binning, data-only
+  limits (points whose vertex lies beyond them), the star marker, the
+  right axis in arcsec for each binning and in pixels when unknown or
+  mixed, shown with no points, and staying on the right across redraws.
+- Docs: `GUI_REFERENCE.md` (§3) and the user manual.
+
+Full suite: `399 passed, 8 skipped`.
+
+## FWHM reported in pixels and arcsec (2026-11-18)
+
+Every reported FWHM -- each step and single exposure, and the best fit --
+now gives arcseconds as well as pixels when the binning is known.
+
+- `focus.py`: `ARCSEC_PER_UNBINNED_PIXEL` moved here from the focus curve
+  panel (which now imports it); new `common_binning(binnings)` (the one
+  binning all share, else None) and `fwhm_text(fwhm, binning)`
+  (`'3.21 pix (1.07 arcsec)'`, or `'3.21 pix'`). `FocusSequence.binnings`
+  (per collected exposure, kept through reanalysis rather than re-reading
+  headers) and the `binning` property (their common binning).
+- Controller: step, single-exposure, and "Sequence finished" messages use
+  `fwhm_text` -- each result's own binning, and the sequence's common
+  binning for the best fit; the standalone sequence's bookkeeping records
+  the binning too. `FocusCurvePanel` uses `common_binning`.
+- CLI (`scripts/focus.py`): "Expected sigma: x pixels" became "Expected
+  FWHM: ..." (the value was always an FWHM), with arcsec when known.
+- Tests: `fwhm_text`, `common_binning`, binnings kept through reanalysis,
+  arcsec in each step and the best fit for a live sequence (binning known),
+  pixels only for a replay (no binning recorded), and the CLI's new
+  wording.
+- Docs: `GUI_REFERENCE.md` (§3) and the user manual.
+
+Full suite: `410 passed, 8 skipped`.

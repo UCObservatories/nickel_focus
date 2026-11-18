@@ -184,7 +184,7 @@ class NickelFocus(scriptbase.ScriptBase):
             binning=args.binning, plot=not args.no_plot
         )
         log.info(f'Best focus: {best_focus:.1f}')
-        log.info(f'Expected sigma: {best_img_quality:.1f} pixels')
+        log.info(f'Expected FWHM: {focus.fwhm_text(best_img_quality, seq.binning)}')
 
         if args.ofile is not None:
             # Outlier status is recomputed the same way step() does it live:

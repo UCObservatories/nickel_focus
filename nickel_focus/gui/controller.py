@@ -599,7 +599,8 @@ class Controller(QtCore.QObject):
         if total:
             step_text += f'/{total}'
         step_text += (
-            f' — Focus {result.focus_value:.0f}, FWHM {result.fwhm:.2f}, '
+            f' — Focus {result.focus_value:.0f}, '
+            f'FWHM {focus.fwhm_text(result.fwhm, result.binning)}, '
             f'Source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
         )
         if result.is_outlier:
@@ -612,7 +613,11 @@ class Controller(QtCore.QObject):
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.focusSequenceFinished`:
         report the fitted result.
         """
-        text = f'Sequence finished: best focus {best_focus:.1f}, expected FWHM {best_fwhm:.2f}'
+        binning = None if self.focus_sequence is None else self.focus_sequence.binning
+        text = (
+            f'Sequence finished: best focus {best_focus:.1f}, expected FWHM '
+            f'{focus.fwhm_text(best_fwhm, binning)}'
+        )
         log.info(text)
         self.window.control_panel.show_best_focus(best_focus)
 
@@ -631,11 +636,13 @@ class Controller(QtCore.QObject):
         seq.observed_focus.append(result.focus_value)
         seq.exposures.append(result.exposure)
         seq.img_quality.append(result.fwhm)
+        seq.binnings.append(result.binning)
         seq.source_stamps.append(result.stamp)
         seq.centroids.append(result.centroid)
         seq.step_iter = 1
         text = (
-            f'Took exposure at focus {result.focus_value:.0f}: measured FWHM {result.fwhm:.2f}, '
+            f'Took exposure at focus {result.focus_value:.0f}: measured FWHM '
+            f'{focus.fwhm_text(result.fwhm, result.binning)}, '
             f'source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
         )
         log.info(text)

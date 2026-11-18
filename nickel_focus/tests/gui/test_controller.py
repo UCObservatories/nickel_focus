@@ -729,8 +729,8 @@ def test_single_exposure_finished_logs_info(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
     controller._standalone_focus_sequence = types.SimpleNamespace(
-        observed_focus=[], exposures=[], img_quality=[], source_stamps=[], centroids=[],
-        step_iter=0)
+        observed_focus=[], exposures=[], img_quality=[], binnings=[], source_stamps=[],
+        centroids=[], step_iter=0)
     result = _make_step_result(focus_value=356.)
 
     with caplog.at_level(logging.INFO, logger='nickel_focus'):
@@ -1231,6 +1231,37 @@ def test_single_exposure_object_is_the_found_target(qapp, fake_hardware):
     entry = window.image_panel.exposure_combo.itemText(0)
     assert entry == f'fake0001.fits - {name}: focus=345.0', \
         "the exposure's entry should show its file name and object, from its header"
+
+
+# -- FWHM in pixels and arcsec ---------------------------------------------------
+
+def test_fwhm_is_reported_in_pixels_and_arcsec(qapp, caplog, fake_hardware):
+    window = MainWindow()
+    controller = Controller(window)
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        _run_grid(controller, window)
+
+    messages = [r.getMessage() for r in caplog.records]
+    steps = [m for m in messages if m.startswith('Step ')]
+    finished = [m for m in messages if m.startswith('Sequence finished')]
+    assert len(steps) == 3 and all(' pix (' in m and ' arcsec)' in m for m in steps), \
+        "each step's FWHM should be reported in pixels and arcsec (binning 2,2 is known)"
+    assert len(finished) == 1 and ' arcsec)' in finished[0], \
+        'the best-fit FWHM should be reported in pixels and arcsec'
+
+
+def test_fwhm_is_reported_in_pixels_only_without_binning(qapp, caplog, focus_sweep):
+    window, controller = _make_controller(focus_sweep)  # replayed files record no binning
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        controller.start_focus_sequence()
+        _wait_for_focus_worker(controller)
+
+    reports = [r.getMessage() for r in caplog.records
+               if r.getMessage().startswith(('Step ', 'Sequence finished'))]
+    assert reports and all('arcsec' not in m and ' pix' in m for m in reports), \
+        'without a known binning, the FWHM should be reported in pixels only'
 
 
 # -- the shared services --------------------------------------------------------

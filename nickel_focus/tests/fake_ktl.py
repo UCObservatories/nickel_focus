@@ -444,10 +444,10 @@ class Simulator:
 
     def _on_expose(self, value):
         """
-        ``EXPOSE = Go``: write a frame for the current focus (with ``OBJECT`` in
-        its header), step ``EXPSTATE`` through the exposure, and report the
-        finished file in ``FITSFILE`` (as a pending value, so it appears only
-        once waited for).
+        ``EXPOSE = Go``: write a frame for the current focus (with ``OBJECT``
+        and the binning, as ``CD1_1C``/``CD2_2C``, in its header), step
+        ``EXPSTATE`` through the exposure, and report the finished file in
+        ``FITSFILE`` (as a pending value, so it appears only once waited for).
         """
         if value != 'Go':
             return
@@ -463,6 +463,10 @@ class Simulator:
         object_name = self.keyword('nscicam', 'OBJECT').value
         if object_name:
             header['OBJECT'] = object_name  # as the camera records it
+        # The camera records binning as the scale of a "CCD pixel" WCS.
+        binning = int(str(self.keyword('nscicam', 'BINNING').value).split(',')[0])
+        header['CD1_1C'] = binning
+        header['CD2_2C'] = binning
         fits.writeto(path, self.make_frame(self.focus), header=header, overwrite=True)
         self._set('nscicam', 'EXPRESULT', str(path))
         self._set('nscicam', 'EXPSTATE', 'Start', pending=['Exposing', 'Readout', 'Ready'])

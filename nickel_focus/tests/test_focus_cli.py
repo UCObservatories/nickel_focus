@@ -28,7 +28,8 @@ def test_cli_archive_mode_runs_end_to_end(focus_sweep, caplog):
 
     messages = [r.getMessage() for r in caplog.records if r.name == 'nickel_focus']
     assert any('Best focus:' in m for m in messages), 'CLI should log the fitted best focus'
-    assert any('Expected sigma:' in m for m in messages), 'CLI should log the expected sigma'
+    assert any(m.startswith('Expected FWHM:') and m.endswith(' pix') for m in messages), \
+        'CLI should log the expected FWHM (in pixels only: these files record no binning)'
     assert not any('Wrote focus data' in m for m in messages), \
         'no output file was requested, so nothing should be written'
 
