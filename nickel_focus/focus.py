@@ -10,7 +10,9 @@ import numpy as np
 
 from nickel_focus import exposure
 from nickel_focus import log
-from nickel_focus.photometry import image_quality
+from nickel_focus.photometry import (
+    extract_stamp, measure_quality, measure_sources, source_centroid
+)
 from nickel_focus import quadratic
 from nickel_focus.services.base import require
 
@@ -210,16 +212,32 @@ class FocusPlot:
     def is_outlier(centroids, threshold=2.0):
         """
         Check whether the most recently added centroid in ``centroids`` is an
-        outlier relative to the full set collected so far, using the same
-        median-distance statistic as the original focus-finding code.
+        outlier relative to the full set collected so far (see
+        :func:`centroid_outliers`).
         """
-        _centroids = np.atleast_2d(centroids).astype(float)
-        if len(_centroids) < 3:
-            return False
-        median = np.median(_centroids, axis=0)
-        distances = np.sqrt(np.sum((_centroids - median)**2, axis=1))
-        outlier_threshold = np.mean(distances) + threshold * np.std(distances)
-        return distances[-1] > outlier_threshold
+        return bool(centroid_outliers(centroids, threshold=threshold)[-1])
+
+
+def centroid_outliers(centroids, threshold=2.0):
+    """
+    Which of a star's ``(x, y)`` centroids (one per exposure) are outliers,
+    using the median-distance statistic of the original focus-finding code:
+    a centroid is an outlier if its distance from the median position exceeds
+    the mean distance by more than ``threshold`` standard deviations.  With
+    fewer than three centroids, none is.
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        A boolean flag for each centroid.
+    """
+    _centroids = np.atleast_2d(centroids).astype(float)
+    if len(_centroids) < 3:
+        return np.zeros(len(_centroids), dtype=bool)
+    median = np.median(_centroids, axis=0)
+    distances = np.sqrt(np.sum((_centroids - median)**2, axis=1))
+    outlier_threshold = np.mean(distances) + threshold * np.std(distances)
+    return distances > outlier_threshold
 
 
 @dataclass
@@ -236,14 +254,12 @@ class StepResult:
     exposure : :class:`pathlib.Path`
         Path to the exposure's FITS file.
     fwhm : :obj:`float` or None
-        Measured image quality (FWHM) of the selected source, or None if the
+        Measured image quality of the selected source: its FWHM, in pixels
+        (see :func:`~nickel_focus.photometry.source_quality`), or None if the
         exposure couldn't be measured (see ``photometry_error``).
     frame : :class:`numpy.ndarray`
         Background-subtracted image data for the full exposure (if it couldn't
         be measured, the image less its median).
-    stamp : :class:`numpy.ndarray` or None
-        Cutout of ``frame`` around the selected source, or None if not
-        measured.
     centroid : :obj:`tuple` or None
         The (x,y) centroid of the selected source, or None if not measured.
     is_outlier : :obj:`bool`
@@ -262,10 +278,14 @@ class StepResult:
         subtraction), in the file's own type -- 16-bit unsigned integers for
         the Nickel camera, a quarter of the size of ``frame`` -- or None if
         not kept.
-    sources : :class:`numpy.ndarray` or None
-        The ``(x, y)`` centroids of every source detected in the exposure, as
-        an ``(N, 2)`` array (see :func:`source_centroids`; empty if the
-        exposure couldn't be measured), or None if not kept.
+    sources : :class:`astropy.table.Table` or None
+        The measurements of every source detected in the exposure (see
+        :func:`~nickel_focus.photometry.measure_sources`), or None if the
+        exposure couldn't be measured or they weren't kept.  See also
+        :attr:`source_positions`.
+    source_index : :obj:`int` or None
+        The row in ``sources`` of the selected source (whose ``fwhm`` and
+        ``centroid`` these are), or None if not measured.
     photometry_error : :obj:`str` or None
         Why the exposure couldn't be measured, or None if it was (see
         :func:`measure_exposure`).
@@ -275,13 +295,13 @@ class StepResult:
     exposure: Path
     fwhm: float | None
     frame: np.ndarray
-    stamp: np.ndarray | None
     centroid: tuple | None
     is_outlier: bool
     object_name: str | None = None
     binning: int | None = None
     raw: np.ndarray | None = None
-    sources: np.ndarray | None = None
+    sources: object = None
+    source_index: int | None = None
     photometry_error: str | None = None
 
     @property
@@ -289,12 +309,33 @@ class StepResult:
         """Whether the exposure's image quality was measured."""
         return self.fwhm is not None
 
+    @property
+    def source_positions(self):
+        """
+        The ``(x, y)`` centroids of every detected source, as an ``(N, 2)``
+        array (empty if there are none; see :func:`source_centroids`).
+        """
+        if self.sources is None:
+            return np.empty((0, 2))
+        return source_centroids(self.sources)
+
+    def stamp(self):
+        """
+        A cutout of ``frame`` around the selected source,
+        :data:`STAMP_SIZE_FWHM` FWHMs across (see
+        :func:`~nickel_focus.photometry.extract_stamp`), made when asked for;
+        None if not measured.
+        """
+        if not self.measured:
+            return None
+        return extract_stamp(self.frame, self.centroid, int(self.fwhm * STAMP_SIZE_FWHM))
+
 
 def source_centroids(src_data):
     """
     The ``(x, y)`` centroids of the sources in a
-    :func:`~nickel_focus.photometry.image_quality` source table, as an
-    ``(N, 2)`` array.
+    :func:`~nickel_focus.photometry.measure_sources` table, as an ``(N, 2)``
+    array.
     """
     return np.column_stack(
         [np.asarray(src_data['CENX'], dtype=float), np.asarray(src_data['CENY'], dtype=float)]
@@ -303,10 +344,10 @@ def source_centroids(src_data):
 
 def measure_exposure(exposure_file, method='brightest'):
     """
-    Measure an exposure's image quality (see
-    :func:`~nickel_focus.photometry.image_quality`) for a
-    :class:`StepResult`, without letting a failed measurement keep the image
-    from being shown.
+    Measure an exposure for a :class:`StepResult`: every source (see
+    :func:`~nickel_focus.photometry.measure_sources`), then the image quality
+    by ``method`` (see :func:`~nickel_focus.photometry.measure_quality`),
+    without letting a failed measurement keep the image from being shown.
 
     If the measurement fails (e.g. no source is detected), a warning is
     logged and the image is still returned, less its median, with no
@@ -317,14 +358,14 @@ def measure_exposure(exposure_file, method='brightest'):
     exposure_file : :obj:`str`, :class:`pathlib.Path`
         The exposure's FITS file.
     method : :obj:`str`, :obj:`tuple`, optional
-        The photometry method passed to
-        :func:`~nickel_focus.photometry.image_quality`.
+        The photometry method (see
+        :func:`~nickel_focus.photometry.image_quality`).
 
     Returns
     -------
     :obj:`dict`
         The :class:`StepResult` fields that come from the image: ``fwhm``,
-        ``frame``, ``raw``, ``sources``, ``stamp``, ``centroid``, and
+        ``frame``, ``raw``, ``sources``, ``source_index``, ``centroid``, and
         ``photometry_error`` (None if the measurement succeeded).
 
     Raises
@@ -333,9 +374,8 @@ def measure_exposure(exposure_file, method='brightest'):
         Raised (by :mod:`astropy.io.fits`) if the file itself can't be read.
     """
     try:
-        data, bkg, src_data, img_quality, stamp, coords = image_quality(
-            exposure_file, method=method
-        )
+        raw, bkg, src_data = measure_sources(exposure_file)
+        img_quality, row = measure_quality(src_data, method)
     except Exception as e:
         with fits.open(exposure_file) as hdu:
             raw = np.array(hdu[0].data)
@@ -344,17 +384,23 @@ def measure_exposure(exposure_file, method='brightest'):
             'Showing it without a measurement.'
         )
         return dict(
-            fwhm=None, frame=raw.astype(float) - np.median(raw), raw=raw,
-            sources=np.empty((0, 2)), stamp=None, centroid=None, photometry_error=str(e)
+            fwhm=None, frame=raw.astype(float) - np.median(raw), raw=raw, sources=None,
+            source_index=None, centroid=None, photometry_error=str(e)
         )
     return dict(
-        fwhm=img_quality, frame=data.astype(float) - bkg, raw=data,
-        sources=source_centroids(src_data), stamp=stamp, centroid=coords, photometry_error=None
+        fwhm=img_quality, frame=raw.astype(float) - bkg, raw=raw, sources=src_data,
+        source_index=row, centroid=source_centroid(src_data, row), photometry_error=None
     )
 
 
 ARCSEC_PER_UNBINNED_PIXEL = 0.1665
 """The Nickel science camera's expected plate scale, per unbinned pixel."""
+
+STAMP_SIZE_FWHM = 4.
+"""
+The size of a source's cutout, and of its box on a displayed image, in
+FWHMs (about 9.4 times the profile's moment width).
+"""
 
 
 def common_binning(binnings):
@@ -482,7 +528,6 @@ class FocusSequence:
         self.img_quality = []
         self.binnings = []
         self.step_iter = 0
-        self.source_stamps = []
         self.centroids = []
 
     @property
@@ -562,7 +607,6 @@ class FocusSequence:
             self.observed_focus += [self.step_focus()]
             self.exposures += [self.take_exposure()]
             measurement = measure_exposure(self.exposures[-1], method=method)
-            self.source_stamps += [measurement['stamp']]
             self.img_quality += [measurement['fwhm']]
             self.binnings += [exposure_binning(self.exposures[-1])]
             self.centroids += [measurement['centroid']]
@@ -591,8 +635,7 @@ class FocusSequence:
         Re-run photometry on every exposure this sequence has already collected,
         using a new ``method``, without taking any new exposures.
 
-        This replaces the stored ``img_quality``/``source_stamps``/
-        ``centroids`` in place; ``observed_focus`` and ``exposures`` (and thus
+        This replaces the stored ``img_quality``/``centroids`` in place; ``observed_focus`` and ``exposures`` (and thus
         which exposures exist and what focus values they were taken at) are left
         untouched.  It's meant for interactively changing which source is used
         for the FWHM measurement (e.g., after a user clicks a different star in
@@ -623,12 +666,10 @@ class FocusSequence:
         exposures = list(self.exposures)
 
         self.img_quality = []
-        self.source_stamps = []
         self.centroids = []
 
         for i, (focus_value, exposure_file) in enumerate(zip(focus_values, exposures)):
             measurement = measure_exposure(exposure_file, method=method)
-            self.source_stamps += [measurement['stamp']]
             self.img_quality += [measurement['fwhm']]
             self.centroids += [measurement['centroid']]
 
@@ -716,11 +757,13 @@ class FocusSequence:
             # raises next); there's nothing to plot for it.
             if self.plot is not None and result.measured:
                 self.plot.update_frame(
-                    result.frame, result.centroid, int(result.fwhm*10), result.exposure.stem,
+                    result.frame, result.centroid, int(result.fwhm * STAMP_SIZE_FWHM),
+                    result.exposure.stem,
                     result.focus_value, result.is_outlier
                 )
+                # Cut only now, for the plot.
                 self.plot.add_stamp(
-                    result.index, result.stamp, result.focus_value, result.fwhm,
+                    result.index, result.stamp(), result.focus_value, result.fwhm,
                     is_outlier=result.is_outlier
                 )
                 self.plot.update_curve(self.observed_focus, self.img_quality)

@@ -38,7 +38,7 @@ def test_step_yields_one_result_per_exposure(focus_sweep):
         assert result.exposure == focus_sweep['files'][i], 'wrong exposure file'
         assert result.fwhm > 0, 'measured FWHM should be positive'
         assert result.frame.shape == (101, 101), 'frame should match the written FITS shape'
-        assert result.stamp.size > 0, 'stamp cutout should not be empty'
+        assert result.stamp().size > 0, 'stamp cutout should not be empty'
         assert isinstance(result.is_outlier, (bool, np.bool_)), 'is_outlier should be boolean'
 
     # The sequence's own bookkeeping should match what step() yielded.
@@ -80,7 +80,7 @@ def test_execute_recovers_known_best_focus(focus_sweep):
     # taken nearest the true best focus, rather than against the analytic
     # input value.
     middle = focus_sweep['focus_values'].index(focus_sweep['best_focus'])
-    _, _, _, direct_fwhm, _, _ = image_quality(focus_sweep['files'][middle],
+    _, _, _, direct_fwhm, _ = image_quality(focus_sweep['files'][middle],
                                                 method='brightest')
     assert best_fwhm == pytest.approx(direct_fwhm, rel=0.3), \
         'fitted best FWHM should match a direct measurement at the true best focus'
@@ -260,9 +260,9 @@ def test_measure_exposure_keeps_the_image_when_photometry_fails(tmp_path, caplog
         measurement = focus.measure_exposure(path)
 
     assert measurement['fwhm'] is None, 'an unmeasurable exposure should have no FWHM'
-    assert measurement['centroid'] is None and measurement['stamp'] is None, \
+    assert measurement['centroid'] is None and measurement['source_index'] is None, \
         'an unmeasurable exposure should have no source'
-    assert measurement['sources'].shape == (0, 2), 'there should be no detected sources'
+    assert measurement['sources'] is None, 'there should be no detected sources'
     assert (measurement['raw'] == data).all(), 'the raw image should still be returned'
     assert measurement['frame'] == pytest.approx(data.astype(float) - np.median(data)), \
         'the frame shown should be the image less its median'

@@ -68,7 +68,7 @@ def _make_step_result(index=0, focus_value=350., fwhm=3.2, centroid=(12.3, 45.6)
                        is_outlier=False):
     return focus.StepResult(
         index=index, focus_value=focus_value, exposure=Path('n2000.fits'), fwhm=fwhm,
-        frame=np.zeros((4, 4)), stamp=np.zeros((2, 2)), centroid=centroid,
+        frame=np.zeros((4, 4)), centroid=centroid,
         is_outlier=is_outlier)
 
 
@@ -766,7 +766,7 @@ def test_single_exposure_finished_logs_info(qapp, caplog):
     window = MainWindow()
     controller = Controller(window)
     controller._standalone_focus_sequence = types.SimpleNamespace(
-        observed_focus=[], exposures=[], img_quality=[], binnings=[], source_stamps=[],
+        observed_focus=[], exposures=[], img_quality=[], binnings=[],
         centroids=[], step_iter=0)
     result = _make_step_result(focus_value=356.)
 
@@ -1612,3 +1612,186 @@ def test_unmeasurable_sequence_exposure_is_displayed_before_stopping(qapp, fake_
         'the unmeasurable exposure should be displayed before the sequence stops'
     assert window.curve_panel._results == [], 'it should not be added to the focus curve'
     assert 'stopping the sequence' in _log_text(window), 'the sequence should report stopping'
+
+
+# -- Selected stars ('a' and 'd') ----------------------------------------------
+
+def _three_star_replay(three_star_sweep):
+    """A Controller with the three-star sequence loaded through Replay."""
+    window, controller = _make_controller(three_star_sweep)
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+    return window, controller
+
+
+def _curve_points(window):
+    return list(window.curve_panel._results)
+
+
+def test_replay_starts_with_the_first_star(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+    assert len(_curve_points(window)) == 5, 'the curve should start with one star per exposure'
+    assert len(window.image_panel.ax.patches) == 1, 'the displayed exposure should box one star'
+
+
+def test_a_adds_a_star_and_refits(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+
+    window.image_panel.starAdded.emit(70., 40.)
+
+    assert len(_curve_points(window)) == 10, 'the added star should add a point per exposure'
+    assert len(window.image_panel.ax.patches) == 2, 'both selected stars should be boxed'
+    text = _log_text(window)
+    assert 'Added the star at' in text and 'matched in 5 of 5 exposures' in text, \
+        'the added star should be logged'
+    assert 'Refit 10 points from 2 star(s): best focus' in text, 'the refit should be logged'
+    assert window.control_panel.single_focus_spin.value() == pytest.approx(350, abs=2), \
+        "the refit's best focus should become the Single tab's default"
+
+
+def test_a_on_a_selected_star_matches_it_again(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+
+    window.image_panel.starAdded.emit(30., 30.)
+
+    assert len(_curve_points(window)) == 5, 'the star should be re-matched, not duplicated'
+    assert 'Re-matched the star at' in _log_text(window), 'the re-match should be logged'
+
+
+def test_d_can_remove_every_star_then_a_adds_one_back(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+
+    window.image_panel.starRemoved.emit(30., 30.)
+    assert _curve_points(window) == [], 'removing the only star should empty the curve'
+    assert len(window.image_panel.ax.patches) == 0, 'no star should be boxed'
+    assert "No data to fit; press 'a' on a star to add one." in _log_text(window), \
+        'an empty curve should be warned about'
+
+    window.image_panel.starAdded.emit(70., 40.)
+    assert len(_curve_points(window)) == 5, 'adding a star should give the curve data again'
+    assert 'Refit 5 points from 1 star(s)' in _log_text(window), 'and it should be refit'
+
+
+def test_d_on_a_star_not_plotted_warns(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+
+    window.image_panel.starRemoved.emit(70., 40.)
+
+    assert len(_curve_points(window)) == 5, 'the plotted data should be unchanged'
+    assert 'is not in the plotted data' in _log_text(window), 'the observer should be told why'
+
+
+def test_a_away_from_any_star_warns(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+
+    window.image_panel.starAdded.emit(5., 95.)
+
+    assert len(_curve_points(window)) == 5, 'the plotted data should be unchanged'
+    assert 'No star found within' in _log_text(window), 'the observer should be told why'
+
+
+def test_m_resets_the_selection_to_the_marked_star(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+    window.image_panel.starAdded.emit(70., 40.)
+
+    window.image_panel.sourceSelected.emit(50., 75.)
+    _wait_for_focus_worker(controller)
+
+    points = _curve_points(window)
+    assert len(points) == 5, "'m' should go back to one star per exposure"
+    # The third star is missing from the last exposure, where the nearest
+    # source to the mark is another star; the other four are the marked one.
+    assert sum(abs(p.centroid[1] - 75.) < 2. for p in points) == 4, \
+        "'m' should measure the marked star in every exposure that has it"
+
+
+def test_a_new_sequence_starts_from_the_marked_star(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+    window.image_panel.sourceSelected.emit(70., 40.)
+    _wait_for_focus_worker(controller)
+    window.image_panel.starRemoved.emit(70., 40.)
+    assert _curve_points(window) == [], 'setup: the marked star should have been removed'
+
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+
+    points = _curve_points(window)
+    assert len(points) == 5, 'a new sequence should start again from one star'
+    assert all(abs(p.centroid[0] - 70.) < 2. for p in points), \
+        'removing the marked star should not stop it seeding the next sequence'
+
+
+def test_a_and_d_are_ignored_while_something_runs(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+    controller.slew_worker = types.SimpleNamespace()  # pretend a slew is running
+
+    window.image_panel.starAdded.emit(70., 40.)
+    window.image_panel.starRemoved.emit(30., 30.)
+
+    assert len(_curve_points(window)) == 5, "'a' and 'd' should do nothing while busy"
+    controller.slew_worker = None
+
+
+def test_a_and_d_on_a_single_exposure_update_its_mean_fwhm(qapp, fake_hardware):
+    from nickel_focus.tests.conftest import three_star_frame
+    fake_hardware['sim'].make_frame = three_star_frame
+    window = MainWindow()
+    controller = Controller(window)
+    controller.take_single_exposure(355.)
+    _wait_for_focus_worker(controller)
+    label = window.control_panel.single_fwhm_label
+    one_star = label.text()
+
+    window.image_panel.starAdded.emit(70., 40.)
+    sel = controller._single_selection
+    mean = sel.mean_fwhm(0)
+    arcsec = focus.fwhm_arcsec(mean, sel.results[0].binning)
+    assert len(sel.stars_in(0)) == 2, 'setup: the second star should have been added'
+    assert label.text() == f'FWHM: {mean:.2f} (pix); {arcsec:.2f} (arcsec)', \
+        'the Single tab should show the mean FWHM of the selected stars'
+    assert _curve_points(window) == [], 'a Single exposure should never appear on the curve'
+    assert 'Refit' not in _log_text(window), 'a Single exposure should not be refit'
+
+    window.image_panel.starRemoved.emit(70., 40.)
+    assert label.text() == one_star, 'removing the star should restore the one-star FWHM'
+
+    window.image_panel.starRemoved.emit(30., 30.)  # the brightest, the first star
+    assert label.text() == 'FWHM: — (pix); — (arcsec)', \
+        'with no star selected the Single tab should show placeholders'
+
+
+def _flat(limits):
+    """``((a, b), (c, d))`` as ``[a, b, c, d]``, for pytest.approx."""
+    return [value for pair in limits for value in pair]
+
+
+def test_curve_limits_are_fixed_when_the_sequence_finishes(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+    ax = window.curve_panel.ax
+    expected = controller._selection.plot_limits()
+    assert _flat((ax.get_xlim(), ax.get_ylim())) == pytest.approx(_flat(expected)), \
+        'the limits should be fixed once the sequence finishes'
+
+    window.image_panel.starAdded.emit(70., 40.)
+    window.image_panel.starRemoved.emit(30., 30.)
+    window.image_panel.starRemoved.emit(70., 40.)
+    assert _flat((ax.get_xlim(), ax.get_ylim())) == pytest.approx(_flat(expected)), \
+        'adding and removing stars should not move the limits'
+
+
+def test_curve_limits_are_recalculated_when_remeasured(qapp, three_star_sweep):
+    window, controller = _three_star_replay(three_star_sweep)
+    window.curve_panel.fix_limits((0., 1.), (0., 1.))  # stand-in for stale limits
+
+    window.image_panel.sourceSelected.emit(70., 40.)
+    _wait_for_focus_worker(controller)
+    assert _flat(window.curve_panel._fixed_limits) \
+        == pytest.approx(_flat(controller._selection.plot_limits())), \
+        "'m' should recalculate the limits"
+
+    window.curve_panel.fix_limits((0., 1.), (0., 1.))
+    controller.start_focus_sequence()
+    _wait_for_focus_worker(controller)
+    assert _flat(window.curve_panel._fixed_limits) \
+        == pytest.approx(_flat(controller._selection.plot_limits())), \
+        'a new sequence should recalculate the limits'

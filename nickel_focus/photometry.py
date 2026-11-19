@@ -143,9 +143,18 @@ def evaluate_shape(data, source_mask):
     return shape
 
 
+SIGMA_TO_FWHM = 2 * np.sqrt(2 * np.log(2))
+"""
+The FWHM of a Gaussian per unit standard deviation (about 2.355), used to
+turn the moment widths (:func:`moment2d`) into an FWHM.
+"""
+
+
 def moment2d(x, y, z):
     """
-    Calculate moments of a 2D dataset.
+    Calculate moments of a 2D dataset: the ``z``-weighted mean and standard
+    deviation of each coordinate, ``cx = sum(x*z)/sum(z)`` and
+    ``sx**2 = sum(x**2*z)/sum(z) - cx**2`` (likewise for ``y``).
 
     Parameters
     ----------
@@ -250,7 +259,7 @@ def evaluate_sources(data, sources):
     axis_ratio = src_data['SIGX'] / src_data['SIGY']
     ellip_sources = (axis_ratio < 0.5) | (axis_ratio > 2)
     if np.any(ellip_sources):
-        log.warning(f'Removing {np.sum(small_sources)} sources with large ellipticity.')
+        log.warning(f'Removing {np.sum(ellip_sources)} sources with large ellipticity.')
         src_data = src_data[np.logical_not(ellip_sources)]
 
     if len(src_data) == 0:
@@ -259,9 +268,132 @@ def evaluate_sources(data, sources):
     return src_data
 
 
+def measure_sources(fits_file):
+    """
+    Detect and measure every source in an exposure.
+
+    Parameters
+    ----------
+    fits_file : :obj:`str`, :class:`pathlib.Path`
+        File with raw image data.
+
+    Returns
+    -------
+    raw : :class:`numpy.ndarray`
+        Raw image data, in the file's own type (e.g. 16-bit unsigned integers
+        for the Nickel camera); the measurements use a floating-point copy.
+    bkg : :obj:`float`
+        Estimated background.
+    src_data : :class:`astropy.table.Table`
+        The measurements of every source; see :func:`evaluate_sources`.
+
+    Raises
+    ------
+    ValueError
+        Raised if no (good) sources are found.
+    """
+    with fits.open(fits_file) as hdu:
+        # A copy, so it doesn't depend on the (closed) file.
+        raw = np.array(hdu[0].data)
+    data = raw.astype(float)
+    bkg, sources = find_sources(data)
+    src_data = evaluate_sources(data-bkg, sources)
+    return raw, bkg, src_data
+
+
+def source_quality(src_data, row):
+    """
+    The image-quality measurement of one source in a :func:`measure_sources`
+    table: its FWHM, as :data:`SIGMA_TO_FWHM` times the mean of its x and y
+    moment widths (``SIGX``, ``SIGY``).
+
+    The widths come from a moment analysis (:func:`moment2d`), not a fit, so
+    the FWHM is the one a Gaussian with the same second moments would have.
+    A real star's profile has stronger wings than a Gaussian, so this may
+    overestimate its FWHM; since that applies at every focus, it doesn't
+    shift the best focus.
+    """
+    return float(SIGMA_TO_FWHM * (src_data['SIGX'][row] + src_data['SIGY'][row]) / 2)
+
+
+def source_centroid(src_data, row):
+    """The ``(x, y)`` centroid of one source in a :func:`measure_sources` table."""
+    return float(src_data['CENX'][row]), float(src_data['CENY'][row])
+
+
+def select_source(src_data, method='brightest'):
+    """
+    Choose a source from a :func:`measure_sources` table.
+
+    Parameters
+    ----------
+    src_data : :class:`astropy.table.Table`
+        The source measurements.
+    method : :obj:`str`, :obj:`tuple`, optional
+        ``'brightest'`` for the source with the most counts, or an ``(x, y)``
+        tuple for the source nearest those coordinates.
+
+    Returns
+    -------
+    :obj:`int`
+        The chosen source's row.
+
+    Raises
+    ------
+    ValueError
+        Raised if ``method`` is neither, or the coordinates can't be used.
+    """
+    if method == 'brightest':
+        return int(np.argmax(src_data['CNTS']))
+    if not isinstance(method, tuple):
+        raise ValueError('The source must be selected as brightest or by a tuple of coordinates')
+    try:
+        dist = (src_data['CENX'] - method[0])**2 + (src_data['CENY'] - method[1])**2
+    except Exception as e:
+        raise ValueError(
+            'Could not use tuple provided to method keyword to find nearest source to use '
+            f'for image quality measurement.  Original exception message: {e}.'
+        )
+    return int(np.argmin(dist))
+
+
+def measure_quality(src_data, method='brightest'):
+    """
+    The image-quality measurement from a :func:`measure_sources` table, by
+    ``method`` (see :func:`image_quality`).
+
+    Returns
+    -------
+    img_quality : :obj:`float`
+        The measurement: an FWHM, in pixels (see :func:`source_quality`).
+    row : :obj:`int`
+        The source it's from: the selected source, or for ``weighted`` (the
+        flux-weighted mean over every source), the brightest.
+
+    Raises
+    ------
+    ValueError
+        Raised if ``method`` isn't one of those allowed.
+    """
+    if method == 'weighted':
+        img_quality = float(
+            SIGMA_TO_FWHM * np.sum(src_data['CNTS'] * (src_data['SIGX'] + src_data['SIGY'])/2)
+            / np.sum(src_data['CNTS'])
+        )
+        return img_quality, select_source(src_data)
+    if method != 'brightest' and not isinstance(method, tuple):
+        raise ValueError(
+            'image_quality method must be brightest, weighted, or a tuple of coordinates'
+        )
+    row = select_source(src_data, method)
+    return source_quality(src_data, row), row
+
+
 def image_quality(fits_file, method='brightest'):
     """
-    Evaluate the image quality of the provided data.
+    Evaluate the image quality of the provided data: measure every source
+    (:func:`measure_sources`), then choose one (:func:`select_source`) or,
+    for ``weighted``, combine them.
 
     Parameters
     ----------
@@ -274,7 +406,7 @@ def image_quality(fits_file, method='brightest'):
               source in the field
 
             - ``weighted``: Return the flux-weighted mean of the image-quality
-              measurements for all sources.
+              measurements (FWHMs) for all sources.
 
             - :obj:`tuple`: Provide a tuple with coordinates and use the source
               closest to the provides coordinates.
@@ -282,65 +414,34 @@ def image_quality(fits_file, method='brightest'):
     Returns
     -------
     data : :class:`numpy.ndarray`
-        Raw image data, in the file's own type (e.g. 16-bit unsigned integers
-        for the Nickel camera); the measurements use a floating-point copy.
+        Raw image data, in the file's own type (see :func:`measure_sources`).
     bkg : :obj:`float`
         Estimated background.
     src_data : :class:`astropy.table.Table`
         Table with the source measurements; see
         :func:`~nickel_focus.photometry.evaluate_sources`.
     img_quality : :obj:`float`
-        The image-quality measurement (mean of the source's x and y sigma).
-    stamp : :class:`numpy.ndarray`
-        Cutout of the background-subtracted data around the selected source.
+        The image-quality measurement: the source's FWHM, in pixels (see
+        :func:`source_quality`).
     coords : :obj:`tuple`
-        The (x,y) centroid of the selected source.
+        The (x,y) centroid of the selected source (for ``weighted``, the
+        brightest).
     """
-    with fits.open(fits_file) as hdu:
-        # A copy, so it doesn't depend on the (closed) file.
-        raw = np.array(hdu[0].data)
-    data = raw.astype(float)
-    bkg, sources = find_sources(data)
-    src_data = evaluate_sources(data-bkg, sources)
-
-    if method == 'brightest':
-        target_source = np.argmax(src_data['CNTS'])
-        img_quality = (src_data['SIGX'][target_source] + src_data['SIGY'][target_source])/2
-        coords = (src_data['CENX'][target_source], src_data['CENY'][target_source])
-        stamp = extract_stamp(data-bkg, coords, int(img_quality*10))
-    elif method == 'weighted':
-        img_quality = (
-            np.sum(src_data['CNTS'] * (src_data['SIGX'] + src_data['SIGY'])/2)
-            / np.sum(src_data['CNTS'])
-        )
-        target_source = np.argmax(src_data['CNTS'])
-        coords = (src_data['CENX'][target_source], src_data['CENY'][target_source])
-        stamp = extract_stamp(data-bkg, coords, int(img_quality*10))
-    elif not isinstance(method, tuple):
-        raise ValueError(
-            'image_quality method must be brightest, weighted, or a tuple of coordinates'
-        )
-    else:
-        try:
-            dist = (src_data['CENX'] - method[0])**2 + (src_data['CENY'] - method[1])**2
-        except Exception as e:
-            raise ValueError(
-                'Could not use tuple provided to method keyword to find nearest source to use '
-                f'for image quality measurement.  Original excception message: {e}.'
-            )
-        target_source = np.argmin(dist)
-        img_quality = (src_data['SIGX'][target_source] + src_data['SIGY'][target_source])/2
-        coords = (src_data['CENX'][target_source], src_data['CENY'][target_source])
-        stamp = extract_stamp(data-bkg, coords, int(img_quality*10))
-
-    return raw, bkg, src_data, img_quality, stamp, coords
+    raw, bkg, src_data = measure_sources(fits_file)
+    img_quality, row = measure_quality(src_data, method)
+    return raw, bkg, src_data, img_quality, source_centroid(src_data, row)
 
 
 def extract_stamp(data, coords, size):
-    sx = int(np.floor(coords[0] - size / 2))
+    """
+    A square cutout of ``data``, about ``size`` pixels across, around
+    ``coords`` (``(x, y)``), clipped at the image edges.
+    """
+    # Clipped at 0: a negative start would instead count from the far edge.
+    sx = max(0, int(np.floor(coords[0] - size / 2)))
     ex = int(np.ceil(coords[0] + size / 2)) + 1
-    sy = int(np.floor(coords[1] - size / 2))
+    sy = max(0, int(np.floor(coords[1] - size / 2)))
     ey = int(np.ceil(coords[1] + size / 2)) + 1
-    return data[sy:ey,sx:ex]
+    return data[sy:ey, sx:ex]
 
 

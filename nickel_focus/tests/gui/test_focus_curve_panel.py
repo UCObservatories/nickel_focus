@@ -193,6 +193,52 @@ def test_unmeasured_results_are_not_plotted(qapp, focus_sweep):
     result = _step_results(focus_sweep)[0]
     panel = FocusCurvePanel()
 
-    panel.add_result(dataclasses.replace(result, fwhm=None, centroid=None, stamp=None))
+    panel.add_result(dataclasses.replace(result, fwhm=None, centroid=None, source_index=None))
 
     assert panel._results == [], 'a result with no FWHM should not be added to the curve'
+
+
+def test_set_points_plots_and_fits_the_pooled_points(qapp):
+    import types
+    panel = FocusCurvePanel()
+    focus_values = [340., 345., 350., 355., 360.]
+    points = [
+        types.SimpleNamespace(focus_value=f, fwhm=3. + 0.01 * (f - 350.)**2 + offset,
+                              is_outlier=False)
+        for offset in (0., 0.1) for f in focus_values
+    ]
+
+    panel.set_points(points, [2] * len(points))
+
+    assert len(panel._results) == 10, 'every pooled point should be plotted'
+    offsets = panel.ax.collections[0].get_offsets()
+    assert len(offsets) == 10, 'all points should be drawn alike, in one series'
+    best = [t for t in panel.ax.get_legend().get_texts() if 'Best focus' in t.get_text()]
+    assert best and '350.0' in best[0].get_text(), 'the pooled fit should find the best focus'
+    assert panel.ax_arcsec.get_ylabel() == 'FWHM (arcsec)', \
+        'a common known binning should give the right axis in arcsec'
+
+    panel.set_points([], [])
+    assert len(panel._results) == 0 and len(panel.ax.collections) == 0, \
+        'with no points the plot should be empty'
+
+
+def test_fixed_limits_hold_until_reset(qapp, focus_sweep):
+    results = _step_results(focus_sweep)
+    panel = FocusCurvePanel()
+    for r in results:
+        panel.add_result(r)
+
+    panel.fix_limits((330., 370.), (0., 20.))
+    assert panel.ax.get_xlim() == (330., 370.) and panel.ax.get_ylim() == (0., 20.), \
+        'fixed limits should be applied'
+
+    panel.set_points(results[:2], [r.binning for r in results[:2]])
+    assert panel.ax.get_ylim() == (0., 20.), 'changing the points should not move fixed limits'
+    panel.set_points([], [])
+    assert panel.ax.get_xlim() == (330., 370.) and panel.ax.get_ylim() == (0., 20.), \
+        'with no points the axes should still show the fixed limits'
+
+    panel.reset()
+    panel.set_points(results[:2], [r.binning for r in results[:2]])
+    assert panel.ax.get_ylim() != (0., 20.), 'after a reset the limits should follow the points'

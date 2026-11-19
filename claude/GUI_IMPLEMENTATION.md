@@ -3442,3 +3442,125 @@ no star detected, `photutils.detect_sources` returns None, and
   Help tab.
 
 Full suite: `488 passed, 8 skipped`.
+
+## Several stars on the focus curve (2026-11-18)
+
+Plan: `claude/multi_star_plan.md` (its §11 records the as-built details).
+
+- **Photometry split from cutouts** (`photometry.py`): `measure_sources`
+  (read, background, detect and measure every source), `select_source`
+  (brightest, or nearest a position), `source_quality`/`source_centroid`,
+  and `measure_quality` (the measurement by method, including `weighted`).
+  `image_quality` is built from these and no longer returns a stamp.
+  `extract_stamp` now clips at the image's low edges (a negative start used
+  to wrap, giving an empty cutout).
+- **No stored cutouts** (`focus.py`): `StepResult.stamp` is now a method that
+  cuts on demand, and `FocusSequence.source_stamps` is gone. Only the CLI's
+  `execute` calls it, when plotting. `StepResult.sources` is the full source
+  table (`source_positions` gives the `(N, 2)` centroids for 'p'), with
+  `source_index` the selected row. `centroid_outliers` (the existing
+  position statistic, for every point at once) backs
+  `FocusPlot.is_outlier`.
+- **`selection.py`** (new, no GUI): `StarSelection` over a set of
+  `StepResult`s. It starts from the first star (each exposure's own
+  selected source and outlier flag). `add` snaps to the source nearest the
+  cursor (within `SNAP_RADIUS`) and matches it in the other exposures within
+  `MATCH_RADIUS` (10 binned pixels); a star already using that source is
+  replaced (re-matched), not duplicated. `remove` takes any star, including
+  the first. `points()` pools every star's measurements; `fit()` fits one
+  quadratic ("No data to fit", "Too few points to fit"). `stars_in` and
+  `mean_fwhm` give one exposure's stars. `append`/`replace` handle results
+  as they arrive.
+- **GUI:**
+  - `ImagePanel`: 'a'/'d' (`starAdded`/`starRemoved`, gated like 'm'), and
+    `set_star_boxes` (every selected star boxed, red or yellow as before).
+    An exposure it doesn't cover boxes its own measured source, e.g. an
+    earlier Single exposure.
+  - `FocusCurvePanel.set_points(points, binnings)`.
+  - `Controller`: `_selection` (the loaded sequence: curve and refit) and
+    `_single_selection` (the latest Single exposure: the Single tab's mean
+    FWHM). Kept separate, so that a Single exposure taken with a sequence
+    loaded (e.g. to confirm the best focus) doesn't replace the sequence's
+    curve; this was caught by the live-workflow test.
+    `_on_star_added`/`_on_star_removed` update a selection, redraw, log, and
+    for a sequence `_refit()`: log the best focus and set the Single tab's
+    default, or warn. 'm' and a new sequence start the selection again from
+    the first star; the 'm' mark (`Controller.method`) is untouched by
+    'a'/'d', so it still seeds the next sequence.
+- **Tests:** `tests/test_selection.py` (16) and the photometry split, on a
+  new `three_star_sweep` fixture (`conftest.py`); image panel, curve panel,
+  and Controller tests for 'a'/'d' (Replay and Single).
+- **Docs:** `GUI_REFERENCE.md`, the user manual, the Help tab.
+- **Noticed:** the "FWHM" everywhere was `(SIGX + SIGY)/2`, a moment
+  width (sigma), about FWHM / 2.355; fixed in the next entry.
+
+Full suite: `522 passed, 8 skipped`.
+
+## Image quality reported as FWHM (2026-11-18)
+
+`photometry.moment2d`'s equations were confirmed: the centroid is the
+intensity-weighted mean, `cx = sum(x*z)/sum(z)`, and the width the
+intensity-weighted (population) standard deviation,
+`sx**2 = sum(x**2*z)/sum(z) - cx**2`. The image quality was the mean of
+those widths, a sigma, but was labeled and used as an FWHM everywhere (log,
+curve, Single tab, arcsec).
+
+- `photometry.SIGMA_TO_FWHM` (`2*sqrt(2*ln 2)`, about 2.355);
+  `source_quality` and `weighted` now return FWHM = 2.355 × the mean moment
+  width. Everything downstream (`StepResult.fwhm`, `img_quality`, the fits,
+  `fwhm_text`/`fwhm_arcsec`, the Single tab) is therefore an FWHM. The best
+  focus, the Auto search, and matching are unaffected by a constant scale.
+- The box and cutout sizes, which were `10 ×` the value (10σ), are now
+  `focus.STAMP_SIZE_FWHM` (4) FWHMs, about 9.4σ, so they look as before.
+- `evaluate_sources`' ellipticity warning reported the count of small
+  sources; it now reports the ellipticity count.
+- Tests: `moment2d` on a known distribution; a Gaussian star of known FWHM
+  measures as that FWHM. Measured on synthetic stars of FWHM 3, 4, and 6
+  pixels: 2.987, 3.982, 5.973.
+- Docs: the user manual and README say, briefly, that the FWHM comes from
+  the second moments converted as for a Gaussian (FWHM ≈ 2.35σ), may read
+  somewhat high for stars' stronger wings, and doesn't bias the best focus.
+
+Full suite: `524 passed, 8 skipped`.
+
+## Fixed focus-curve limits (2026-11-18)
+
+Pressing 'a'/'d' on a star in turn ("blinking" it) changed the plotted
+points, and with them the autoscaled limits. Now:
+
+- `StarSelection.plot_limits()`: the FWHM range holding `LIMIT_FRACTION`
+  (95%) of *every* detected source's FWHM in every measured exposure (the
+  2.5th to 97.5th percentiles), widened by `LIMIT_EXPANSION` (1.3) about its
+  midpoint; the focus range is the focus values with `FOCUS_MARGIN` (5%,
+  matplotlib's default) on each side. Every source, not just the selected
+  stars, so there's room for any star that might be added. A zero-width
+  range (one value) gets ±10% of it.
+- `FocusCurvePanel.fix_limits(focus_limits, fwhm_limits)` holds them through
+  any `set_points`, including none (the axes still show); `reset` releases
+  them. The right (arcsec) axis follows the left as before.
+- `Controller._on_focus_worker_finished` fixes them after a sequence's run
+  or remeasurement ('step' or 'reanalyze' mode on the loaded sequence),
+  however it ended. A new sequence and 'm' already reset the curve at their
+  start, releasing the old limits. While a sequence runs, the limits follow
+  the points as before.
+- Tests: the limits' calculation, independence from the selected stars, and
+  the edge cases; the panel holding and releasing them; and through the
+  Controller, fixed at the end of a Replay, unmoved by 'a'/'d', and
+  recalculated by 'm' and by a new sequence.
+- Docs: the user manual, `GUI_REFERENCE.md`.
+
+Full suite: `530 passed, 8 skipped`.
+
+Follow-up: limits from 95% of every source's FWHM needed tuning in practice
+(`LIMIT_FRACTION`/`LIMIT_EXPANSION` were tried at other values), so they now
+come from the fit when the sequence finishes (the first star's). The FWHM
+range is the fitted curve's full range over the plotted focus values (its
+minimum to its highest point), extended by `LIMIT_PADDING` (30%) of that
+range above and below, and the lower limit is never below 0. With too few
+points to fit, the points' range is used; a flat range gets ±10%. The focus
+range is unchanged. `LIMIT_FRACTION`/`LIMIT_EXPANSION` are gone. Tests: the
+limits from the fit, clipped at 0, from the points without a fit, and none
+without points.
+
+Full suite: `531 passed, 8 skipped`.
+

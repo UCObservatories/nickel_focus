@@ -93,7 +93,7 @@ def nearest_source(sources, x, y, radius=SNAP_RADIUS):
     ----------
     sources : :class:`numpy.ndarray` or None
         The ``(x, y)`` centroids of the detected sources, as an ``(N, 2)``
-        array (see :attr:`~nickel_focus.focus.StepResult.sources`).
+        array (see :attr:`~nickel_focus.focus.StepResult.source_positions`).
     x, y : :obj:`float`
         The position to search from, in pixels.
     radius : :obj:`float`, optional

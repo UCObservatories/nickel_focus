@@ -125,7 +125,10 @@ nickel_slew_to_nearest --starlist my_targets.txt
 The main focus-finding driver. Given a starting focus value and a step size, it
 either follows an automated curve-fitting search or steps through a fixed grid,
 taking an exposure and measuring its image quality at each step, then fits a
-quadratic to focus-vs-FWHM to find the optimum.
+quadratic to focus-vs-FWHM to find the optimum.  The FWHM comes from the second
+moments of each star's light, converted as for a Gaussian (FWHM ≈ 2.35σ), not
+from a profile fit; stars' stronger-than-Gaussian wings may make it read
+somewhat high, but that doesn't bias the best focus.
 
 Examples:
 

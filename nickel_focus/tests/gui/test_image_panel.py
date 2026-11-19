@@ -647,7 +647,7 @@ def test_current_result_is_the_displayed_exposure(qapp, focus_sweep):
 
 def test_unmeasured_exposure_is_shown_without_a_box(qapp, focus_sweep):
     result = dataclasses.replace(
-        _step_results(focus_sweep)[0], fwhm=None, centroid=None, stamp=None,
+        _step_results(focus_sweep)[0], fwhm=None, centroid=None, source_index=None,
         photometry_error='No sources were detected in the image.'
     )
     panel = ImagePanel()
@@ -655,3 +655,67 @@ def test_unmeasured_exposure_is_shown_without_a_box(qapp, focus_sweep):
 
     assert len(panel.ax.get_images()) == 1, 'an unmeasured exposure should still be shown'
     assert len(panel.ax.patches) == 0, 'an unmeasured exposure should have no measurement box'
+
+
+# -- Selected stars ('a' and 'd') ----------------------------------------------
+
+@pytest.mark.parametrize('key,signal', [('a', 'starAdded'), ('d', 'starRemoved')])
+def test_a_and_d_keys_emit_only_when_selection_enabled(qapp, focus_sweep, key, signal):
+    panel = ImagePanel()
+    panel.add_result(_step_results(focus_sweep)[0])
+    received = []
+    getattr(panel, signal).connect(lambda x, y: received.append((x, y)))
+
+    event = KeyEvent('key_press_event', panel.canvas, key)
+    event.inaxes = panel.ax
+    event.xdata, event.ydata = 42.0, 17.0
+
+    panel._on_key_press(event)
+    assert received == [], f"'{key}' should be ignored while selection is disabled"
+    panel.set_selection_enabled(True)
+    panel._on_key_press(event)
+    assert received == [(42.0, 17.0)], f"'{key}' should emit the coordinates under the cursor"
+
+
+def _box(centroid, fwhm=3., is_outlier=False):
+    import types
+    return types.SimpleNamespace(centroid=centroid, fwhm=fwhm, is_outlier=is_outlier)
+
+
+def test_every_selected_star_is_boxed(qapp, focus_sweep):
+    result = _step_results(focus_sweep)[0]
+    panel = ImagePanel()
+    panel.add_result(result)
+
+    panel.set_star_boxes({result.exposure: [_box((20., 20.)), _box((60., 70.), is_outlier=True)]})
+
+    colors = [to_rgba(p.get_edgecolor()) for p in panel.ax.patches]
+    assert colors == [to_rgba('red'), to_rgba('yellow')], \
+        'each selected star should be boxed, red or yellow (outlier)'
+    assert [t.get_text() for t in panel.ax.texts] == ['Outlier centroid'], \
+        'only the outlier should be labeled'
+
+
+def test_an_exposure_with_no_selected_stars_has_no_boxes(qapp, focus_sweep):
+    result = _step_results(focus_sweep)[0]
+    panel = ImagePanel()
+    panel.add_result(result)
+
+    panel.set_star_boxes({result.exposure: []})
+
+    assert len(panel.ax.patches) == 0, 'with every star removed there should be no boxes'
+
+
+def test_an_exposure_without_selected_stars_boxes_its_own_source(qapp, focus_sweep):
+    results = _step_results(focus_sweep)
+    panel = ImagePanel()
+    panel.add_result(results[0])
+
+    panel.set_star_boxes({results[1].exposure: [_box((20., 20.))]})
+
+    assert len(panel.ax.patches) == 1, \
+        'an exposure the selection does not cover should box its own measured source'
+    x, y = panel.ax.patches[0].get_xy()
+    width = panel.ax.patches[0].get_width()
+    assert (x + width / 2, y + width / 2) == pytest.approx(results[0].centroid), \
+        'the box should be on its own measured source'

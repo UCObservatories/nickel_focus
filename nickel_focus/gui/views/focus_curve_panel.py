@@ -12,15 +12,23 @@ from nickel_focus.gui.qt import QtWidgets
 
 class FocusCurvePanel(QtWidgets.QWidget):
     """
-    Scatter of FWHM versus focus value for a sequence's results so far, with the
-    best-fit quadratic and its vertex (an open black star) overlaid once there
-    are enough points to fit one (matching
-    :meth:`~nickel_focus.focus.FocusSequence.fit_best_focus`'s own 3-point
-    minimum). Outlier points (:attr:`~nickel_focus.focus.StepResult.is_outlier`)
-    are drawn as a distinct color/marker from normal ones.
+    Scatter of FWHM versus focus value, with the best-fit quadratic and its
+    vertex (an open black star) overlaid once there are enough points to fit
+    one (matching :meth:`~nickel_focus.focus.FocusSequence.fit_best_focus`'s
+    own 3-point minimum).  The points are the selected stars' pooled
+    measurements (see
+    :meth:`~nickel_focus.gui.views.focus_curve_panel.FocusCurvePanel.set_points`),
+    all drawn alike and fit together; outliers (position outliers, see
+    :func:`~nickel_focus.focus.centroid_outliers`) are drawn as a distinct
+    color/marker.
 
-    The plot limits are set by the measured points alone: the fitted curve and
-    best focus are drawn within them, and may fall outside.
+    The plot limits are set by the measured points alone while a sequence
+    runs, and the fitted curve and best focus are drawn within them, and may
+    fall outside.  Once the sequence (or a remeasurement) finishes, the
+    Controller fixes them (see
+    :meth:`~nickel_focus.gui.views.focus_curve_panel.FocusCurvePanel.fix_limits`),
+    so adding and removing stars doesn't move them; :meth:`reset` releases
+    them.
 
     The left axis is FWHM in pixels; the right axis (:attr:`ax_arcsec`, a
     ``twinx`` of :attr:`ax`) gives the same in arcseconds, at
@@ -32,7 +40,13 @@ class FocusCurvePanel(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # The plotted points (each with focus_value, fwhm, is_outlier), and
+        # each one's binning.
         self._results = []
+        self._binnings = []
+        # ((focus_low, focus_high), (fwhm_low, fwhm_high)), or None to follow
+        # the points (see fix_limits).
+        self._fixed_limits = None
 
         # 'constrained' layout recomputes margins on every draw so the
         # axis labels/title always have enough room, regardless of how
@@ -56,11 +70,44 @@ class FocusCurvePanel(QtWidgets.QWidget):
         if not result.measured:
             return
         self._results.append(result)
+        self._binnings.append(result.binning)
+        self._render()
+
+    def set_points(self, points, binnings):
+        """
+        Replace the plotted points and redraw.
+
+        Parameters
+        ----------
+        points : :obj:`list`
+            The points: objects with ``focus_value``, ``fwhm``, and
+            ``is_outlier`` (e.g. :class:`~nickel_focus.selection.StarPoint`).
+        binnings : :obj:`list`
+            Each point's exposure binning (an :obj:`int` or None), for the
+            right axis.
+        """
+        self._results = list(points)
+        self._binnings = list(binnings)
+        self._render()
+
+    def fix_limits(self, focus_limits, fwhm_limits):
+        """
+        Fix the plot limits (e.g. once a sequence has finished), so they no
+        longer follow the points; :meth:`reset` releases them.
+
+        Parameters
+        ----------
+        focus_limits, fwhm_limits : :obj:`tuple`
+            ``(low, high)`` for the focus (x) and FWHM in pixels (left y) axes.
+        """
+        self._fixed_limits = (tuple(focus_limits), tuple(fwhm_limits))
         self._render()
 
     def reset(self):
-        """Clear the plot: no points, no fitted curve."""
+        """Clear the plot -- no points, no fitted curve -- and release fixed limits."""
         self._results = []
+        self._binnings = []
+        self._fixed_limits = None
         self._reset_axis()
         self.canvas.draw_idle()
 
@@ -94,7 +141,7 @@ class FocusCurvePanel(QtWidgets.QWidget):
         points, plus the fitted curve/vertex if enough exist.
         """
         self._reset_axis()
-        if not self._results:
+        if not self._results and self._fixed_limits is None:
             self.canvas.draw_idle()
             return
 
@@ -112,9 +159,14 @@ class FocusCurvePanel(QtWidgets.QWidget):
                 marker='x', label='Outlier'
             )
 
-        # The limits come from the measured points alone: fix them now, so
-        # the fitted curve and best focus drawn below can't change them.
-        self.ax.autoscale_view()
+        # The fixed limits, or else those of the measured points alone; either
+        # way, set now, so the fitted curve and best focus drawn below can't
+        # change them.
+        if self._fixed_limits is not None:
+            self.ax.set_xlim(*self._fixed_limits[0])
+            self.ax.set_ylim(*self._fixed_limits[1])
+        else:
+            self.ax.autoscale_view()
         self.ax.set_autoscale_on(False)
         self._set_right_axis()
 
@@ -135,7 +187,8 @@ class FocusCurvePanel(QtWidgets.QWidget):
                     edgecolors='black', zorder=3, label=f'Best focus: {x_vertex:.1f}'
                 )
 
-        self.ax.legend(loc='best')
+        if self._results:
+            self.ax.legend(loc='best')
         self.canvas.draw_idle()
 
     def _set_right_axis(self):
@@ -144,7 +197,7 @@ class FocusCurvePanel(QtWidgets.QWidget):
         limits: in arcseconds if every result has the same known binning,
         otherwise in pixels, repeating the left axis.
         """
-        binning = common_binning(r.binning for r in self._results)
+        binning = common_binning(self._binnings)
         if binning is not None:
             scale = ARCSEC_PER_UNBINNED_PIXEL * binning
             self.ax_arcsec.set_ylabel('FWHM (arcsec)')

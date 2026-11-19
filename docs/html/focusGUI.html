@@ -168,10 +168,17 @@ red box around the star being measured, the measured FWHM is added to the focus
 curve, and the <b>Log</b> tab reports the step number, focus value, FWHM, and
 star position.  FWHMs are given in pixels and, when the exposures record their
 binning, in arcseconds too (e.g. <b>FWHM 3.21 pix (1.07 arcsec)</b>); so is
-the expected FWHM at the best focus.  Once there are three or more points, a quadratic fit and its
-minimum (an open black star) are drawn on the curve; the plot's limits always
-follow the measured points, so the best focus may lie off the plot until the
-sequence brackets it.  The right-hand axis gives the FWHM in arcseconds
+the expected FWHM at the best focus.  The FWHM comes from the second moments of
+the star's light, converted as for a Gaussian (FWHM ≈ 2.35 σ), not from a fit.
+Real stars have stronger wings than a Gaussian, so it may read somewhat high,
+but by the same amount at every focus, so the best focus is unaffected.  Once there are three or more points, a quadratic fit and its
+minimum (an open black star) are drawn on the curve.  While the sequence runs,
+the plot's limits follow the measured points, so the best focus may lie off the
+plot until the sequence brackets it.  When the sequence finishes, the limits are
+fixed to show the whole fitted curve, with 30% of its range added above and below
+(but never below zero), so they don't move as you add and remove stars (see
+below).  They are recalculated when the exposures are remeasured
+(<b>m</b>) or a new sequence starts.  The right-hand axis gives the FWHM in arcseconds
 (0.1665 arcsec per unbinned pixel, times the binning recorded in each
 exposure), or repeats the pixel axis if the binning can't be determined.  When the sequence finishes, the <b>Log</b> tab
 reports the best focus and the expected FWHM there (Figure 4).  If the star's
@@ -193,7 +200,25 @@ different star, hover the mouse over it in the image panel (left) and press the
 sequence; the FWHM values and best-fitting curve are updated based on the new
 measurements.  The marked star is used for every later sequence and
 <b>Single</b> exposure until you start a move from the <b>Slew</b> tab, which
-returns to measuring the brightest star (noted in the <b>Log</b> tab).  The image panel also has an <b>Exposure</b> drop-down menu (top
+returns to measuring the brightest star (noted in the <b>Log</b> tab).</p>
+
+<p> You can also fit more than one star.  Hover over another star and press
+<b>a</b> to add it: the same star is found in every exposure (by its position,
+within 10 pixels), its measurements are added to the focus curve, and one curve
+is fit to all the selected stars together.  Each selected star gets a box on the
+image.  Press <b>d</b> over a star to remove it from the fit; any star can be
+removed, even all of them (the <b>Log</b> tab then says there is nothing to fit
+until you add one).  Pressing <b>a</b> on a star that is already selected finds
+it again in every exposure, which is a quick way to make sure the same star is
+used throughout.  All the stars' points look alike on the curve; to see which
+points belong to a star, press <b>a</b> and <b>d</b> on it in turn.  Each refit
+reports the new best focus on the <b>Log</b> tab and sets it as the
+<b>Single</b> tab's focus value.  The added and removed stars apply only to the
+loaded sequence: a new sequence starts again from the brightest star (or the one
+marked with <b>m</b>).  On a <b>Single</b> exposure, <b>a</b> and <b>d</b> change
+which stars its FWHM is averaged over.</p>
+
+<p> The image panel also has an <b>Exposure</b> drop-down menu (top
 left) which can be used to step through every exposure in the sequence (listed
 in order of focus value, each by its file name and object name, e.g.
 <b>n3246.fits - Focusing03: focus=345.0</b>; a long entry is shortened in the

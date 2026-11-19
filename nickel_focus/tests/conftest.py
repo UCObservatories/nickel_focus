@@ -198,6 +198,65 @@ def focus_sweep(tmp_path):
     }
 
 
+# Three stars for the multi-star tests: ``(x, y, amplitude)``, the first the
+# brightest.  Each exposure of `three_star_sweep` is shifted slightly, as by
+# small pointing drifts.
+THREE_STARS = [(30., 30., 20000.), (70., 40., 8000.), (50., 75., 5000.)]
+THREE_STAR_SHIFTS = [(0., 0.), (1., -1.), (-1., 0.5), (0.5, 1.), (-0.5, -0.5)]
+
+
+def three_star_frame(focus_value, shift=(0., 0.), missing=()):
+    """
+    A 101x101 frame with the :data:`THREE_STARS`, shifted by ``shift``, all
+    with a FWHM of ``3 + 0.01*(focus_value - 350)**2`` pixels; stars whose
+    index is in ``missing`` are left out.
+    """
+    fwhm = 3. + 0.01 * (focus_value - 350.)**2
+    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+    y, x = np.mgrid[:101, :101]
+    data = np.full((101, 101), 200.)
+    for i, (cx, cy, amplitude) in enumerate(THREE_STARS):
+        if i in missing:
+            continue
+        cx, cy = cx + shift[0], cy + shift[1]
+        data += amplitude * np.exp(-((x - cx)**2 + (y - cy)**2) / (2 * sigma**2))
+    data += np.random.default_rng(round(focus_value)).normal(scale=5., size=data.shape)
+    return data.astype(np.float32)
+
+
+@pytest.fixture
+def three_star_sweep(tmp_path):
+    """
+    Like :func:`focus_sweep`, but each of the five exposures has the
+    :data:`THREE_STARS` (shifted by :data:`THREE_STAR_SHIFTS`), and the third
+    star is missing from the last exposure.  The best focus is 350.
+
+    Returns
+    -------
+    :obj:`dict`
+        Keys as for :func:`focus_sweep`, plus ``shifts``.
+    """
+    focus_values = [340., 345., 350., 355., 360.]
+    obsnum = 3000
+    prefix, suffix = 'n', '.fits'
+    files = []
+    for i, (focus_value, shift) in enumerate(zip(focus_values, THREE_STAR_SHIFTS)):
+        path = tmp_path / f'{prefix}{obsnum + i}{suffix}'
+        missing = (2,) if i == len(focus_values) - 1 else ()
+        fits.writeto(path, three_star_frame(focus_value, shift, missing), overwrite=True)
+        files.append(path)
+    return {
+        'focus_values': focus_values,
+        'files': files,
+        'best_focus': 350.,
+        'datadir': tmp_path,
+        'prefix': prefix,
+        'suffix': suffix,
+        'obsnum': obsnum,
+        'shifts': THREE_STAR_SHIFTS,
+    }
+
+
 @pytest.fixture
 def fake_hardware(tmp_path, monkeypatch):
     """

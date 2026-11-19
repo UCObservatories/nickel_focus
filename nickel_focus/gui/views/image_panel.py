@@ -13,6 +13,7 @@ from astropy.visualization import (
 )
 
 from nickel_focus import pointing
+from nickel_focus.focus import STAMP_SIZE_FWHM
 from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
 
 
@@ -64,9 +65,14 @@ class ImagePanel(QtWidgets.QWidget):
     Baseline interactions: pan via scroll bars, wheel zoom, the 'r' key
     (lowercase only) to return to a fit-to-view zoom, and a stretch selector
     (at the right of the top row, which the exposure drop-down otherwise
-    fills).  The measured source is boxed on every frame -- red normally,
-    yellow (with an "Outlier centroid" label) if
-    :attr:`~nickel_focus.focus.StepResult.is_outlier` is set.  An exposure
+    fills).  Each selected star is boxed (4 x its FWHM; see
+    :data:`~nickel_focus.focus.STAMP_SIZE_FWHM`) -- red normally,
+    yellow (with an "Outlier centroid" label) if its position is an outlier.
+    The stars come from
+    :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_star_boxes`;
+    an exposure it doesn't cover has its own measured source
+    (:attr:`~nickel_focus.focus.StepResult.centroid`, with
+    :attr:`~nickel_focus.focus.StepResult.is_outlier`) boxed.  An exposure
     that couldn't be measured is shown without a box.  A drop-down lists
     every exposure added so far, always kept sorted by focus value, and tracks
     the most recently *added* exposure until the user manually picks a different
@@ -86,6 +92,11 @@ class ImagePanel(QtWidgets.QWidget):
     window both refocuses it *and* is delivered to whatever's under the cursor,
     so a stray click meant only to bring the window forward was enough to kick
     off a reanalysis.
+
+    Pressing 'a' or 'd' the same way emits
+    :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starAdded` or
+    :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starRemoved`, to add
+    the star under the cursor to the focus curve or remove it.
 
     Pressing 'p' the same way (also only while selection is enabled) emits
     :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`,
@@ -122,6 +133,14 @@ class ImagePanel(QtWidgets.QWidget):
     #: pressed, only while selection is enabled (see
     #: :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`).
     pointingStarSelected = QtCore.Signal(float, float)
+
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'a' is
+    #: pressed, only while selection is enabled.
+    starAdded = QtCore.Signal(float, float)
+
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'd' is
+    #: pressed, only while selection is enabled.
+    starRemoved = QtCore.Signal(float, float)
 
     POINTING_COLOR = 'cyan'
     """The color of a pending pointing offset's line, markers, and label."""
@@ -178,6 +197,9 @@ class ImagePanel(QtWidgets.QWidget):
         self._stretch_name = next(iter(self.STRETCHES))
         self._selection_enabled = False
         self._pointing_offset = None  # the pending pointing.PointingOffset, or None
+        # The selected stars to box, by exposure path (see set_star_boxes);
+        # an exposure not in it has its own measured source boxed.
+        self._star_boxes = None
 
         self.figure = Figure(figsize=(5, 5))
         # No ticks/labels/title are ever drawn (the exposure/focus value
@@ -290,6 +312,23 @@ class ImagePanel(QtWidgets.QWidget):
         and center positions apply to it).
         """
         self._pointing_offset = offset
+        if self._current is not None:
+            self._render(reset_view=False)
+
+    def set_star_boxes(self, boxes):
+        """
+        Set the selected stars to box on each exposure, replacing any earlier
+        set, and redraw.
+
+        Parameters
+        ----------
+        boxes : :obj:`dict`
+            For each exposure's path, its selected stars: objects with
+            ``centroid``, ``fwhm``, and ``is_outlier`` (e.g.
+            :class:`~nickel_focus.selection.StarPoint`), possibly none.  An
+            exposure missing from it has its own measured source boxed.
+        """
+        self._star_boxes = boxes
         if self._current is not None:
             self._render(reset_view=False)
 
@@ -414,6 +453,7 @@ class ImagePanel(QtWidgets.QWidget):
         self._current = None
         self._data_shape = None
         self._pointing_offset = None
+        self._star_boxes = None
         self.exposure_combo.blockSignals(True)
         self.exposure_combo.clear()
         self.exposure_combo.blockSignals(False)
@@ -520,13 +560,19 @@ class ImagePanel(QtWidgets.QWidget):
           :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`
           with the data coordinates under the cursor (see the class docstring
           for why a key press rather than a click).
-        - 'p', likewise, emits
+        - 'a', 'd', and 'p', likewise, emit
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starAdded`,
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starRemoved`,
+          and
           :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`.
         """
         if event.key == 'r':
             self.recenter()
             return
-        signals = {'m': self.sourceSelected, 'p': self.pointingStarSelected}
+        signals = {
+            'm': self.sourceSelected, 'a': self.starAdded, 'd': self.starRemoved,
+            'p': self.pointingStarSelected,
+        }
         if event.key not in signals or not self._selection_enabled or event.inaxes != self.ax:
             return
         if event.xdata is None or event.ydata is None:
@@ -624,22 +670,13 @@ class ImagePanel(QtWidgets.QWidget):
         # which puts North up and East to the left on the sky.
         self.ax.imshow(data, cmap='gray', origin='upper', norm=normalize)
 
-        # An exposure that couldn't be measured has no source to box.
-        if result.measured:
-            stamp_size = int(result.fwhm * 10)
-            half = stamp_size / 2
-            color = 'yellow' if result.is_outlier else 'red'
-            rect = patches.Rectangle(
-                (result.centroid[0] - half, result.centroid[1] - half), stamp_size, stamp_size,
-                linewidth=2, edgecolor=color, facecolor='none'
-            )
-            self.ax.add_patch(rect)
-            if result.is_outlier:
-                # Above the box: y increases downward on screen.
-                self.ax.text(
-                    result.centroid[0], result.centroid[1] - half - 5, 'Outlier centroid',
-                    color='yellow', fontsize=10, ha='center', va='bottom'
-                )
+        stars = None if self._star_boxes is None else self._star_boxes.get(result.exposure)
+        if stars is None:
+            # Its own measured source; an exposure that couldn't be measured
+            # has none.
+            stars = [result] if result.measured else []
+        for star in stars:
+            self._draw_star_box(star.centroid, star.fwhm, star.is_outlier)
 
         offset = self._pointing_offset
         if offset is not None and pointing.image_center(data.shape) == offset.center:
@@ -650,6 +687,26 @@ class ImagePanel(QtWidgets.QWidget):
             self._update_scrollbar_ranges()
         self._apply_view_limits()
         self.canvas.draw_idle()
+
+    def _draw_star_box(self, centroid, fwhm, is_outlier):
+        """
+        Box a star, STAMP_SIZE_FWHM x its FWHM across: red, or yellow with an "Outlier
+        centroid" label above it if its position is an outlier.
+        """
+        stamp_size = int(fwhm * STAMP_SIZE_FWHM)
+        half = stamp_size / 2
+        color = 'yellow' if is_outlier else 'red'
+        rect = patches.Rectangle(
+            (centroid[0] - half, centroid[1] - half), stamp_size, stamp_size,
+            linewidth=2, edgecolor=color, facecolor='none'
+        )
+        self.ax.add_patch(rect)
+        if is_outlier:
+            # Above the box: y increases downward on screen.
+            self.ax.text(
+                centroid[0], centroid[1] - half - 5, 'Outlier centroid',
+                color='yellow', fontsize=10, ha='center', va='bottom'
+            )
 
     def _draw_pointing_offset(self, offset):
         """

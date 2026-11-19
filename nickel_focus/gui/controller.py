@@ -16,6 +16,7 @@ from astropy.coordinates import Angle, SkyCoord
 from nickel_focus import focus
 from nickel_focus import log
 from nickel_focus import pointing
+from nickel_focus.selection import StarSelection
 from nickel_focus import slew
 from nickel_focus.services import NickelPoco, NSciCam, ktl_available
 from nickel_focus.services.nscicam import ExposureConfig
@@ -159,6 +160,13 @@ class Controller(QtCore.QObject):
         # sequence is loaded.
         self._standalone_focus_sequence = None
 
+        # The selected stars (see _on_star_added/_on_star_removed): for the
+        # loaded sequence, plotted and fit on the focus curve; and for the
+        # latest Single exposure, whose mean FWHM the Single tab shows.  None
+        # when there's no such data.
+        self._selection = None
+        self._single_selection = None
+
         # The telescope and camera services, shared by the status
         # indicators, the Slew tab, and every sequence or single exposure.
         # Each is `None` if it can't be used (no ktl, or the service didn't
@@ -196,6 +204,8 @@ class Controller(QtCore.QObject):
         window.control_panel.findNearestPointingRequested.connect(self.find_nearest_pointing)
         window.control_panel.findNearestFocusRequested.connect(self.find_nearest_focus)
         window.image_panel.sourceSelected.connect(self._on_source_selected)
+        window.image_panel.starAdded.connect(self._on_star_added)
+        window.image_panel.starRemoved.connect(self._on_star_removed)
         window.image_panel.pointingStarSelected.connect(self._on_pointing_star_selected)
         window.control_panel.applyPointingOffsetRequested.connect(self.apply_pointing_offset)
         window.status_bar.quitRequested.connect(self.quit)
@@ -271,6 +281,8 @@ class Controller(QtCore.QObject):
         self._name_object(focus_sequence)
         self.focus_sequence = focus_sequence
         self._standalone_focus_sequence = None
+        self._selection = StarSelection()
+        self._single_selection = None
         self._clear_pointing_offset()
         self.window.image_panel.reset()
         self.window.curve_panel.reset()
@@ -319,12 +331,15 @@ class Controller(QtCore.QObject):
             self._busy() or target is None or not target.exposures
         ):
             return
+        # Start again from the first star (the marked one), rebuilt as each
+        # remeasured result arrives; any added or removed stars are dropped.
+        # The curve is cleared at once rather than showing a mix of old and
+        # new measurements while the reanalysis runs.
         if target is self.focus_sequence:
-            # Clear the curve immediately rather than letting old points
-            # be replaced one at a time as each re-measured result
-            # streams in -- otherwise the plot would show a confusing
-            # mix of old and new measurements while reanalysis runs.
+            self._selection = StarSelection()
             self.window.curve_panel.reset()
+        else:
+            self._single_selection = StarSelection()
         self._start_focus_worker(target, mode='reanalyze')
 
     def take_single_exposure(self, focus_value):
@@ -649,29 +664,26 @@ class Controller(QtCore.QObject):
         """
         Handle one :class:`~nickel_focus.focus.StepResult` from the worker's
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.stepComplete`
-        signal: update the image/curve panels and log the step.
+        signal: add it to the selection (as the first star), update the
+        image/curve panels, and log the step.
         """
         is_reanalyze = self.focus_worker is not None and self.focus_worker.mode == 'reanalyze'
         reanalyzing_standalone = (
             is_reanalyze and self._standalone_focus_sequence is not None
             and self.focus_worker.focus_sequence is self._standalone_focus_sequence
         )
+        if reanalyzing_standalone:
+            self._single_selection.append(result)
+        else:
+            if self._selection is None:
+                self._selection = StarSelection()
+            self._selection.append(result)
+        # The boxes first, so that showing the exposure draws them.
+        self._show_selection()
         if is_reanalyze:
             self.window.image_panel.update_result(result)
-            if reanalyzing_standalone:
-                self._show_single_fwhm(result)
-            else:
-                # The curve was already cleared in reanalyze(), so each
-                # re-measured result is simply added back in as it
-                # arrives, rather than replacing an old point in place --
-                # that would otherwise show a confusing mix of old and
-                # new measurements while reanalysis is still in progress.
-                # A standalone exposure never appears on the curve panel
-                # at all, so there's nothing to add for it.
-                self.window.curve_panel.add_result(result)
         else:
             self.window.image_panel.add_result(result)
-            self.window.curve_panel.add_result(result)
 
         total = self.focus_sequence.expected_steps if self.focus_sequence is not None else None
         step_text = f'Step {result.index + 1}'
@@ -713,16 +725,16 @@ class Controller(QtCore.QObject):
         exposure that couldn't be measured is still displayed (the reason has
         already been logged as a warning).
         """
+        self._single_selection = StarSelection([result])
+        self._show_selection()
         self.window.image_panel.add_result(result)
         seq = self._standalone_focus_sequence
         seq.observed_focus.append(result.focus_value)
         seq.exposures.append(result.exposure)
         seq.img_quality.append(result.fwhm)
         seq.binnings.append(result.binning)
-        seq.source_stamps.append(result.stamp)
         seq.centroids.append(result.centroid)
         seq.step_iter = 1
-        self._show_single_fwhm(result)
         if result.measured:
             text = (
                 f'Took exposure at focus {result.focus_value:.0f}: measured FWHM '
@@ -736,11 +748,113 @@ class Controller(QtCore.QObject):
             )
         log.info(text)
 
-    def _show_single_fwhm(self, result):
-        """Show a Single exposure's FWHM, in pixels and arcsec, on the Single tab."""
-        self.window.control_panel.set_single_fwhm(
-            result.fwhm, focus.fwhm_arcsec(result.fwhm, result.binning)
+    def _show_selection(self):
+        """
+        Show the selected stars: their boxes on the image panel, the loaded
+        sequence's pooled points on the focus curve, and the latest Single
+        exposure's mean FWHM on the Single tab (a Single exposure never
+        appears on the curve).
+        """
+        boxes = {}
+        for sel in (self._selection, self._single_selection):
+            if sel is not None:
+                boxes.update(
+                    {result.exposure: sel.stars_in(i) for i, result in enumerate(sel.results)}
+                )
+        self.window.image_panel.set_star_boxes(boxes)
+        if self._selection is not None:
+            points = self._selection.points()
+            self.window.curve_panel.set_points(
+                points, [self._selection.results[p.exposure].binning for p in points]
+            )
+        single = self._single_selection
+        if single is not None and single.results:
+            fwhm = single.mean_fwhm(0)
+            self.window.control_panel.set_single_fwhm(
+                fwhm, focus.fwhm_arcsec(fwhm, single.results[0].binning)
+            )
+
+    def _displayed_selection(self):
+        """
+        The selection covering the displayed exposure, and the exposure's
+        position in it, or ``(None, None)``.
+        """
+        current = self.window.image_panel.current_result
+        if current is None:
+            return None, None
+        for sel in (self._single_selection, self._selection):
+            if sel is None:
+                continue
+            for i, result in enumerate(sel.results):
+                if result.exposure == current.exposure:
+                    return sel, i
+        return None, None
+
+    def _on_star_added(self, x, y):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starAdded`: add
+        the star nearest ``(x, y)`` on the displayed exposure to the plotted
+        data (or match it again, if already there), then refit.
+        """
+        sel, index = self._displayed_selection()
+        if self._busy() or sel is None:
+            return
+        try:
+            action, (sx, sy), matched = sel.add(index, x, y)
+        except ValueError as e:
+            log.warning(f'{e}  The plotted data is unchanged.')
+            return
+        verb = 'Added' if action == 'added' else 'Re-matched'
+        log.info(
+            f'{verb} the star at ({sx:.1f}, {sy:.1f}): matched in {matched} of '
+            f'{len(sel.results)} exposures.'
         )
+        self._show_selection()
+        if sel is self._selection:
+            self._refit()
+
+    def _on_star_removed(self, x, y):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starRemoved`:
+        remove the selected star nearest ``(x, y)`` on the displayed exposure
+        from the plotted data, then refit.
+        """
+        sel, index = self._displayed_selection()
+        if self._busy() or sel is None:
+            return
+        try:
+            sx, sy = sel.remove(index, x, y)
+        except ValueError as e:
+            log.warning(f'{e}  The plotted data is unchanged.')
+            return
+        log.info(f'Removed the star at ({sx:.1f}, {sy:.1f}).')
+        self._show_selection()
+        if sel is self._selection:
+            self._refit()
+
+    def _refit(self):
+        """
+        Fit the loaded sequence's selected stars' pooled data, log the best
+        focus, and make it the Single tab's default; or warn if there's too
+        little to fit.
+        """
+        try:
+            *_, best_focus, best_fwhm = self._selection.fit()
+        except ValueError as e:
+            if not self._selection.points():
+                log.warning("No data to fit; press 'a' on a star to add one.")
+            else:
+                log.warning(f'{e}.')
+            return
+        points = self._selection.points()
+        binning = focus.common_binning(self._selection.results[p.exposure].binning for p in points)
+        log.info(
+            f'Refit {len(points)} points from {len(self._selection.stars)} star(s): best focus {best_focus:.1f}, '
+            f'expected FWHM {focus.fwhm_text(best_fwhm, binning)}'
+        )
+        self.window.control_panel.show_best_focus(best_focus)
 
     def _on_focus_worker_finished(self):
         """
@@ -748,8 +862,19 @@ class Controller(QtCore.QObject):
         (a signal every :class:`PySide6.QtCore.QThread` provides automatically,
         emitted once
         :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker.run` returns):
-        release the worker and restore hardware exclusivity.
+        release the worker and restore hardware exclusivity.  When a sequence
+        has been run or remeasured (however it ended), fix the focus curve's
+        limits (see :meth:`~nickel_focus.selection.StarSelection.plot_limits`),
+        so that adding and removing stars doesn't move them.
         """
+        worker = self.focus_worker
+        if (
+            worker is not None and worker.mode in ('step', 'reanalyze')
+            and worker.focus_sequence is self.focus_sequence and self._selection is not None
+        ):
+            limits = self._selection.plot_limits()
+            if limits is not None:
+                self.window.curve_panel.fix_limits(*limits)
         if self.focus_worker is not None:
             # QThread.wait() blocks (briefly) until the OS thread has
             # actually terminated. `finished` already means `run()` has
@@ -783,7 +908,7 @@ class Controller(QtCore.QObject):
         result = self.window.image_panel.current_result
         if result is None:
             return
-        star = pointing.nearest_source(result.sources, x, y)
+        star = pointing.nearest_source(result.source_positions, x, y)
         if star is None:
             log.warning(
                 f'No star found within {pointing.SNAP_RADIUS:.0f} pixels of ({x:.1f}, {y:.1f}); '
