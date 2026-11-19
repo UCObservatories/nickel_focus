@@ -493,4 +493,4 @@ tagging releases, it holds the short commit hash current as of each entry.
 | `8dfb0f9` | 2026-11-18 | Pointing offsets: 'p' marks the star that should be centered; the offset is drawn on the image and applied with the Slew tab's "Offset by ..." button (new `pointing.py`, `PointingOffsetWorker`). |
 | `8dfb0f9` | 2026-11-18 | An exposure whose photometry fails is still displayed (a sequence then stops); the Single tab shows the latest exposure's FWHM. |
 | `b276f8c` | 2026-11-18 | Several stars on the focus curve: 'a' adds (or re-matches) and 'd' removes a star, and the pooled data is refit (`selection.StarSelection`); photometry split from cutouts, which only the CLI makes; the image quality is now a true FWHM (2.355 × the moment width), where it was the width itself; the focus curve's limits are fixed when a sequence finishes. |
-| *pending* | 2026-11-18 | The GUI records every exposure it takes, restoring the camera's recording setting afterward. |
+| `dbbe41b` | 2026-11-18 | The GUI records every exposure it takes, restoring the camera's recording setting afterward. |

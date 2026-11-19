@@ -236,7 +236,7 @@ def evaluate_sources(data, sources):
     # For each source, get the total flux, and the 1st and 2nd moments along each axis.
     src_data = empty_source_table(sources.n_labels)
     for i, source in enumerate(sources.segments):
-        log.info(f"Evaluating source with label {source.label}")
+        log.debug(f"Evaluating source with label {source.label}")
         src_data['ID'][i] = source.label
         indx = sources.data == source.label
         if np.sum(indx) == 0:

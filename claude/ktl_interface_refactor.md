@@ -658,6 +658,9 @@ run there.
 
 ### 5.2 Settings and assumptions to confirm at the telescope
 
+Scripts for these checks (and §5.1 #1, #2, #4) are in `tools/telescope/`; its
+README maps each script to the items it covers.
+
 - **The 1 s default read timeout** (`DEFAULT_READ_TIMEOUT`, §3.1): that
   every service answers a normal read well within it, including while busy
   (e.g. during readout or a slew).

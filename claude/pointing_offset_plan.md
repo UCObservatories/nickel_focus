@@ -196,6 +196,9 @@ All on the fake `ktl`; every assert has a message.
 
 ## 10. At the telescope
 
+`tools/telescope/check_guider_offset.py` runs the offset sequence with these
+settings given on the command line, pausing for images before and after.
+
 1. Confirm the keywords and sequence with Will (in particular `POCGDOT`'s
    value, and whether X/Y must be done in series).
 2. Apply a small known offset (e.g. 10″ E, then 10″ N) and check, in the

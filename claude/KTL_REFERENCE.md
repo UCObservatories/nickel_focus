@@ -500,4 +500,4 @@ use it.
 | `8691767` | 2026-11-17 | §3.7: KTL's log routed into `nickel_focus.log`, its level following `--verbosity`. |
 | `79166ad` | 2026-11-17 | §4, §4.1: `OBJECT` written before each exposure (object name and focus). |
 | `8dfb0f9` | 2026-11-18 | §4, §4.1: pointing offsets through the guider keywords (`POCGDFIN`, `POCGDIX`/`POCGDIY`, `POCGDOT`). |
-| *pending* | 2026-11-18 | §4: the GUI records every exposure it takes (`RECORD = Yes` before each), restoring the original setting afterward. |
+| `dbbe41b` | 2026-11-18 | §4: the GUI records every exposure it takes (`RECORD = Yes` before each), restoring the original setting afterward. |
