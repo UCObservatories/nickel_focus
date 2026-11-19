@@ -3564,3 +3564,42 @@ without points.
 
 Full suite: `531 passed, 8 skipped`.
 
+## Always record (2026-11-18)
+
+With recording off (`RECORD = No`), exposures go to scratch files whose
+`OBSNUM` cycles back to 1 after `OBSNUMMAX`; if every exposure overwrites
+the same file:
+
+- `Exposure.expose` waits for `FITSFILE` to change, so each exposure would
+  time out (`FILE_TIMEOUT`);
+- 'm' re-reads the files, so it would remeasure the last frame for every
+  exposure;
+- the GUI keys exposures by path (image-panel updates, star boxes,
+  'a'/'d', the drop-down), so they'd collide.
+
+Supporting that is deferred (options discussed: 'm' choosing from the
+in-memory source tables, completion by the file's modification time or a
+repeated `FITSFILE` broadcast, and a per-exposure key independent of the
+path). Instead the GUI always records:
+
+- `ExposureConfig.recording()`/`set_recording(on)`; `configure(record=...)`
+  writes a bool as `Yes`/`No` (the CLI's `record=True` was written as the
+  text `True`).
+- `FocusSequence.record`: if set, `take_exposure` sets `RECORD` to it
+  before every exposure, so a change made elsewhere (e.g. the
+  data-acquisition GUI) during a run is overridden.
+- `FocusWorker.run` wraps a run that takes exposures (a live sequence, or a
+  single exposure) in `_recording`: read `RECORD` (a failure stops the run
+  before any exposure), set `record = True`, run, then write the original
+  value back in a `finally`, after success, failure, or Interrupt. When it
+  was off, the Log notes turning it on and back off. Reanalysis and Replay
+  never touch it. The CLI still records (`record=True`) without restoring.
+- Tests: `RECORD` is `Yes` at every exposure even when turned off in between,
+  and restored (from No and from Yes) after a sequence, a single exposure, a
+  failure, and an Interrupt; reanalysis and Replay never write it; an
+  unreadable `RECORD` stops the run; the Yes/No helpers.
+- Docs: the user manual, `GUI_REFERENCE.md`, `KTL_REFERENCE.md`,
+  `ktl_interface_refactor.md` §5.2.
+
+Full suite: `539 passed, 8 skipped`.
+

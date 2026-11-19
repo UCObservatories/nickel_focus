@@ -328,3 +328,19 @@ def test_ktl_log_level_follows_the_verbosity(fake_telescope):
 
     assert fake_telescope.ktl.log_levels[-1] == fake_telescope.ktl.LOG_DEBUG, \
         'the KTL level set from the verbosity should be applied'
+
+
+def test_recording_is_read_and_written_as_yes_and_no(fake_hardware):
+    cam = fake_hardware['cam']
+    record = fake_hardware['sim'].keyword('nscicam', 'RECORD')
+
+    cam.cfg.set_recording(False)
+    assert record.writes[-1] == 'No' and not cam.cfg.recording(), \
+        'turning recording off should write No'
+    cam.cfg.set_recording(True)
+    assert record.writes[-1] == 'Yes' and cam.cfg.recording(), \
+        'turning recording on should write Yes'
+    cam.cfg.configure(record=False)
+    assert record.writes[-1] == 'No', 'configure should write a bool as Yes/No'
+    record.value = 'yes'
+    assert cam.cfg.recording(), 'RECORD should be compared case-insensitively'

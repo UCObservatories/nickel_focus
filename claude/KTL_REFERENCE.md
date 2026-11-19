@@ -427,7 +427,7 @@ object (§2.1).
 | `nscicam.EXPOSE` | `exposure.Exposure` | Written `Go` to start an exposure; not monitored. |
 | `nickelpoco.POCHEART` | `NickelPoco` | Monitored; registered as the service's heartbeat (§3.6). |
 | `nscicam.DISP0CLK` | `NSciCam` | Monitored; registered as the service's heartbeat (§3.6). |
-| `nscicam.RECORD` | `ExposurePath`, `ExposureConfig` | Read to choose the record vs. scratch directory; written by `configure(record=...)`. |
+| `nscicam.RECORD` | `ExposurePath`, `ExposureConfig`, GUI `FocusWorker` | Read to choose the record vs. scratch directory; written by `configure(record=...)` (a bool as `Yes`/`No`). The GUI's exposure runs read it (`cfg.recording()`), write `Yes` before every exposure (`FocusSequence.record`), and write the original value back when the run ends. |
 | `nscicam.FITSFILE` | `ExposurePath`, `exposure.Exposure` | Monitored; read before an exposure starts, then `waitFor('!= "<that path>"')` (quoted, so the path is one string token) for the new file; read for the last exposure's path (`.previous`). |
 | `nscicam.EXPRESULT` | `exposure.Exposure` | Read only when an exposure ends in `Error`, for the camera's message. |
 | `nscicam.OBSNUM` | `ExposurePath` | Read for the next observation number (`.next`). |
@@ -500,3 +500,4 @@ use it.
 | `8691767` | 2026-11-17 | §3.7: KTL's log routed into `nickel_focus.log`, its level following `--verbosity`. |
 | `79166ad` | 2026-11-17 | §4, §4.1: `OBJECT` written before each exposure (object name and focus). |
 | `8dfb0f9` | 2026-11-18 | §4, §4.1: pointing offsets through the guider keywords (`POCGDFIN`, `POCGDIX`/`POCGDIY`, `POCGDOT`). |
+| *pending* | 2026-11-18 | §4: the GUI records every exposure it takes (`RECORD = Yes` before each), restoring the original setting afterward. |

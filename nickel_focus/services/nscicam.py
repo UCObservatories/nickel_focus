@@ -208,7 +208,8 @@ class ExposureConfig:
 
     def configure(self, record=None, speed=None, binning=None, exptime=None, object_name=None):
         """
-        Write each setting that isn't None: ``RECORD``, ``AMPCONF`` (``speed``,
+        Write each setting that isn't None: ``RECORD`` (``record``: True/False,
+        written as ``Yes``/``No``, or the keyword's own value), ``AMPCONF`` (``speed``,
         a :attr:`speed_aliases` name or an ``AMPCONFLIST`` value), ``BINNING``,
         ``EXPOSURE`` (``exptime``, seconds), and ``OBJECT`` (``object_name``,
         the name recorded with the exposure).
@@ -219,6 +220,8 @@ class ExposureConfig:
             Raised if ``speed`` or ``binning`` isn't a valid option.
         """
         if record is not None:
+            if isinstance(record, bool):
+                record = 'Yes' if record else 'No'
             self.cam.write('RECORD', record)
         if speed is not None:
             speed = self.speed_aliases.get(speed, speed)
@@ -237,6 +240,14 @@ class ExposureConfig:
             self.cam.write('EXPOSURE', exptime)
         if object_name is not None:
             self.cam.write('OBJECT', object_name)
+
+    def recording(self):
+        """Whether the camera records its exposures (``RECORD == Yes``)."""
+        return str(self.cam.read('RECORD')).strip().lower() == 'yes'
+
+    def set_recording(self, on):
+        """Turn recording on (``RECORD = Yes``) or off (``No``)."""
+        self.configure(record=bool(on))
 
     @property
     def exptime(self):

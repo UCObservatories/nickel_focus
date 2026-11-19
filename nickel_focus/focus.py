@@ -513,12 +513,17 @@ class FocusSequence:
         The name of the object being observed, recorded with each exposure
         (see :meth:`~nickel_focus.focus.FocusSequence.exposure_object`);
         ``'unknown'`` unless set.
+    record : :obj:`bool` or None
+        If set, the camera's ``RECORD`` is set to it before every exposure
+        (see :meth:`~nickel_focus.focus.FocusSequence.take_exposure`); None
+        (the default) leaves it as it is.
     """
     def __init__(self, poco=None, cam=None):
         connect = poco is not None and cam is not None
         self._focus = Focus(poco) if connect else None
         self._exposure = exposure.Exposure(cam) if connect else None
         self.object_name = 'unknown'
+        self.record = None
         self.method = None
         self.reset()
 
@@ -811,10 +816,10 @@ class FocusSequence:
     def take_exposure(self):
         """
         Take an exposure at the current focus, with ``OBJECT`` set by
-        :meth:`~nickel_focus.focus.FocusSequence.exposure_object`, and return
-        its file path.
+        :meth:`~nickel_focus.focus.FocusSequence.exposure_object` (and
+        ``RECORD`` by :attr:`record`, if set), and return its file path.
         """
-        self._exposure.expose(object_name=self.exposure_object())
+        self._exposure.expose(record=self.record, object_name=self.exposure_object())
         return self._exposure.path.previous
 
     @staticmethod

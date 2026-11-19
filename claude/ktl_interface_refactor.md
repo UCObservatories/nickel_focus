@@ -671,7 +671,9 @@ run there.
   relative to `EXPSTATE == Ready` (within `Exposure.FILE_TIMEOUT`, 30 s?);
   that it names a different file for every exposure, including with
   `RECORD = No` (if a scratch file name were reused, the wait for a new
-  `FITSFILE` would time out); that `EXPSTATE` passes through `Error` when an
+  `FITSFILE` would time out; the GUI therefore always records its exposures,
+  and running unrecorded is deferred -- see `GUI_IMPLEMENTATION.md`, "Always
+  record"; also check `OBSNUMMAX`, which sets how many scratch names cycle); that `EXPSTATE` passes through `Error` when an
   exposure fails, and what `EXPRESULT` holds then.
 - **`POCORAA`/`POCODECA` broadcast rate**, against the position display's
   200 ms redraw limit (`Controller.POSITION_REDRAW_MS`).

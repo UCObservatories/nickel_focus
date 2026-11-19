@@ -9,6 +9,7 @@ event-loop thread would freeze the whole interface.
 :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` runs it here instead
 and reports progress back via Qt signals.
 """
+from nickel_focus import log
 from nickel_focus.gui.qt import QtCore
 
 
@@ -22,6 +23,14 @@ class FocusWorker(QtCore.QThread):
     exposure) rather than reused, matching :class:`PySide6.QtCore.QThread`'s
     own expectation that :meth:`PySide6.QtCore.QThread.start` is called at most
     once per instance.
+
+    A run that takes exposures (a live sequence, or a single exposure) always
+    records them: the camera's ``RECORD`` setting is read first, set to
+    ``Yes`` before every exposure (in case it's changed elsewhere, e.g. from
+    the data-acquisition GUI, during the run), and written back to its
+    original value once the run ends, however it ends.  (Without recording,
+    every exposure may be written to the same scratch file, which the rest of
+    the code doesn't yet handle.)
 
     Parameters
     ----------
@@ -132,9 +141,55 @@ class FocusWorker(QtCore.QThread):
         connect to GUI-thread slots: Qt automatically queues the delivery back
         onto the GUI thread's event loop instead of calling the slot
         immediately, so widgets are never touched from the wrong thread.
+
+        A run that takes exposures is wrapped in
+        :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker._recording`'s
+        save, record, and restore (see the class docstring).
         """
         self.stop_requested = False
+        exposure = getattr(self.focus_sequence, '_exposure', None)
+        if self.mode == 'reanalyze' or exposure is None:
+            self._run()
+            return
+        self._recording(exposure.cfg)
 
+    def _recording(self, cfg):
+        """
+        Run with every exposure recorded: note the camera's ``RECORD``
+        setting, have the sequence set it to ``Yes`` before each exposure (see
+        :attr:`~nickel_focus.focus.FocusSequence.record`), run, then write the
+        original setting back, whatever happened.
+        """
+        try:
+            original = cfg.recording()
+        except Exception as e:
+            self.focusSequenceFailed.emit(
+                f'Could not read whether the camera is recording (RECORD): {e}', e
+            )
+            return
+        if not original:
+            log.info(
+                'Recording (RECORD) is off; turning it on for these exposures, and back off '
+                'afterward.'
+            )
+        self.focus_sequence.record = True
+        try:
+            self._run()
+        finally:
+            self.focus_sequence.record = None
+            try:
+                cfg.set_recording(original)
+            except Exception as e:
+                log.error(
+                    'Could not restore the camera\'s recording setting (RECORD = '
+                    f'{"Yes" if original else "No"}): {e}', exc_info=e
+                )
+            else:
+                if not original:
+                    log.info('Recording (RECORD) turned back off.')
+
+    def _run(self):
+        """Drive the run itself (see :meth:`run`)."""
         if self.mode == 'single':
             try:
                 result = self.focus_sequence.take_single_exposure(

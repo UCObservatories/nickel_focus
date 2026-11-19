@@ -190,3 +190,108 @@ def test_single_mode_reports_failure_without_hardware(focus_sweep, qapp):
         'failure message should name the action and focus value'
     assert 'No telescope focus/exposure control' in failed[0], \
         'failure message should include the underlying cause'
+
+
+# -- Recording ------------------------------------------------------------------
+
+def _record_at_each_exposure(sim):
+    """
+    Note RECORD's value as each exposure starts, and then (as the
+    data-acquisition GUI might) turn recording off again.
+    """
+    seen = []
+    expose = sim.keyword('nscicam', 'EXPOSE')
+    record = sim.keyword('nscicam', 'RECORD')
+    original = expose.on_write
+
+    def on_write(value):
+        seen.append(record.value)
+        original(value)
+        record.value = 'No'
+
+    expose.on_write = on_write
+    return seen
+
+
+def _grid(fake_hardware, nstep=5):
+    return focus.GridFocusSequence(340., 5., nstep=nstep, poco=fake_hardware['poco'],
+                                   cam=fake_hardware['cam'])
+
+
+@pytest.mark.parametrize('original', ['No', 'Yes'])
+def test_a_sequence_records_every_exposure_then_restores(fake_hardware, qapp, original):
+    sim = fake_hardware['sim']
+    sim.keyword('nscicam', 'RECORD').value = original
+    seen = _record_at_each_exposure(sim)
+
+    steps, finished, failed, single = _run_and_collect(FocusWorker(_grid(fake_hardware), mode='step'))
+
+    assert not failed, f'sequence should not fail: {failed}'
+    assert seen == ['Yes'] * 5, \
+        'every exposure should be recorded, even if recording is turned off in between'
+    assert sim.keyword('nscicam', 'RECORD').value == original, \
+        'the original recording setting should be restored afterward'
+
+
+def test_a_single_exposure_is_recorded_then_restored(fake_hardware, qapp):
+    sim = fake_hardware['sim']
+    sim.keyword('nscicam', 'RECORD').value = 'No'
+    seen = _record_at_each_exposure(sim)
+
+    worker = FocusWorker(_grid(fake_hardware), mode='single', focus_value=350.)
+    steps, finished, failed, single = _run_and_collect(worker)
+
+    assert not failed and len(single) == 1, f'the exposure should succeed: {failed}'
+    assert seen == ['Yes'], 'the exposure should be recorded'
+    assert sim.keyword('nscicam', 'RECORD').value == 'No', 'recording should be turned back off'
+
+
+def test_recording_is_restored_after_a_failure(fake_hardware, qapp):
+    sim = fake_hardware['sim']
+    sim.keyword('nscicam', 'RECORD').value = 'No'
+    sim.exposure_error = 'detector fault'
+
+    steps, finished, failed, single = _run_and_collect(FocusWorker(_grid(fake_hardware), mode='step'))
+
+    assert failed, 'setup: the sequence should fail'
+    assert sim.keyword('nscicam', 'RECORD').value == 'No', \
+        'the recording setting should be restored even when the sequence fails'
+
+
+def test_recording_is_restored_after_an_interrupt(fake_hardware, qapp):
+    sim = fake_hardware['sim']
+    sim.keyword('nscicam', 'RECORD').value = 'No'
+    worker = FocusWorker(_grid(fake_hardware), mode='step')
+    worker.stepComplete.connect(lambda result: worker.request_stop(),
+                                QtCore.Qt.ConnectionType.DirectConnection)
+
+    steps, finished, failed, single = _run_and_collect(worker)
+
+    assert len(steps) == 1, 'setup: the sequence should stop after one step'
+    assert sim.keyword('nscicam', 'RECORD').value == 'No', \
+        'the recording setting should be restored after an Interrupt'
+
+
+def test_reanalysis_and_replay_leave_recording_alone(fake_hardware, focus_sweep, qapp):
+    sim = fake_hardware['sim']
+    seq = _grid(fake_hardware)
+    seq.execute(goto=False, plot=False, method='brightest')
+    record = sim.keyword('nscicam', 'RECORD')
+    writes = len(record.writes)
+
+    _run_and_collect(FocusWorker(seq, mode='reanalyze'))
+    _run_and_collect(FocusWorker(_make_sequence(focus_sweep), mode='step'))
+
+    assert len(record.writes) == writes, 'reanalysis and Replay take no exposures, so never write RECORD'
+
+
+def test_an_unreadable_recording_setting_stops_before_exposing(fake_hardware, qapp):
+    sim = fake_hardware['sim']
+    sim.keyword('nscicam', 'RECORD').responsive = False
+
+    steps, finished, failed, single = _run_and_collect(FocusWorker(_grid(fake_hardware), mode='step'))
+
+    assert failed and 'Could not read whether the camera is recording' in failed[0], \
+        'an unreadable RECORD should fail the run'
+    assert steps == [] and sim.keyword('nscicam', 'EXPOSE').writes == [], \
+        'no exposure should be taken'
