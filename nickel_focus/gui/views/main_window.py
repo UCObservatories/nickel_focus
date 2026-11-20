@@ -1,49 +1,31 @@
 """
-Top-level window laying out the three panels.
-
-See GUI_DESIGN.md §5.1.
+Top-level window laying out the panels: the Quit button and status indicators
+above the exposure display on the left, and the focus curve above the control
+tabs on the right.
 """
 from nickel_focus.gui.qt import QtCore, QtWidgets
 from nickel_focus.gui.views.image_panel import ImagePanel
 from nickel_focus.gui.views.focus_curve_panel import FocusCurvePanel
 from nickel_focus.gui.views.focus_control_panel import FocusControlPanel
+from nickel_focus.gui.views.status_bar import StatusBar
 
 
 class MainWindow(QtWidgets.QMainWindow):
     """
-    Lays out :class:`~nickel_focus.gui.views.image_panel.ImagePanel` (left),
+    Lays out :class:`~nickel_focus.gui.views.status_bar.StatusBar` above
+    :class:`~nickel_focus.gui.views.image_panel.ImagePanel` (left),
     :class:`~nickel_focus.gui.views.focus_curve_panel.FocusCurvePanel` (top
     right), and
     :class:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel`
-    (bottom right) per §5.1's sketch.  Purely structural -- wiring the panels
-    together is :class:`~nickel_focus.gui.controller.Controller`'s job, not this
-    class's.
-
-    Also owns settings persistence (GUI_DESIGN.md §9 phase 5): each panel's
-    last-used configuration is restored on construction and saved on close, via
-    :class:`PySide6.QtCore.QSettings`. Deliberately not saved on every change --
-    these are convenience defaults for next time, not data that needs
-    crash-safety.
-
-    Persistence is opt-in, via the Options tab's "Remember settings between
-    sessions" checkbox
-    (:attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.remember_settings_checkbox`),
-    and that opt-in is never itself written to disk as a separate flag -- doing
-    so would mean *every* user silently gets a settings file written the moment
-    they close the window, whether they ever checked the box or not.  Instead,
-    whether anything was ever saved *is* the opt-in signal: on load, the
-    checkbox is checked if (and only if) a previous session actually saved
-    something; on close, nothing is written at all unless the checkbox is
-    checked, and any previously-saved configuration is actively erased the
-    moment it's unchecked (rather than merely left unsaved and lingering unused,
-    or the checkbox itself lingering on disk with nothing behind it).
+    (bottom right), with user-draggable splitters between the left and right
+    sides and between the two right-hand panels.  Purely structural --
+    wiring the panels together is :class:`~nickel_focus.gui.controller.Controller`'s
+    job, not this class's.
     """
 
-    #: Organization/application name identifying this app's `QSettings`
-    #: store (an macOS plist, a Windows registry key, or a Linux ini
-    #: file, depending on platform).
-    _SETTINGS_ORG = 'LickObservatory'
-    _SETTINGS_APP = 'NickelFocusGUI'
+    #: Layout spacing, in pixels, between the status bar and the image
+    #: panel's Exposure row below it.
+    _STATUS_BAR_SPACING = 2
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,6 +38,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # doesn't show anything on screen by itself; a widget only
         # becomes visible once it's placed into a visible parent's
         # layout (below) and that parent is eventually shown.
+        self.status_bar = StatusBar()
         self.image_panel = ImagePanel()
         self.curve_panel = FocusCurvePanel()
         self.control_panel = FocusControlPanel()
@@ -74,8 +57,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # (QVBoxLayout/QHBoxLayout elsewhere in this codebase), whose
         # relative sizes the user can't adjust interactively. Splitters
         # nest like any other widget: `right` (curve plot over the
-        # control panel) becomes one side of `central` (image panel
-        # beside that whole right-hand column).
+        # control panel) becomes one side of `central` (status bar and
+        # image panel beside that whole right-hand column).
         right = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         right.addWidget(self.curve_panel)
         right.addWidget(self.control_panel)
@@ -100,8 +83,28 @@ class MainWindow(QtWidgets.QMainWindow):
         # that the default instead.
         right.setSizes([1000000, self.control_panel.preferred_height_excluding_help()])
 
+        # The status bar is a fixed single row stacked directly above the
+        # image panel (an ordinary layout, not a splitter -- there's
+        # nothing to gain from letting the user resize a one-line bar).
+        # The column's margins come from the image panel's own layout:
+        # the status bar gets the same left/top/right margins, so the two
+        # rows' edges line up. The image panel's top margin is dropped and
+        # the gap between the two rows is a small fixed spacing instead
+        # (the widgets' own frames add a couple of pixels on top of it),
+        # so the status bar sits tight against the Exposure row.
+        image_layout = self.image_panel.layout()
+        margin_left, margin_top, margin_right, margin_bottom = image_layout.getContentsMargins()
+        self.status_bar.setContentsMargins(margin_left, margin_top, margin_right, 0)
+        image_layout.setContentsMargins(margin_left, 0, margin_right, margin_bottom)
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(self._STATUS_BAR_SPACING)
+        left_layout.addWidget(self.status_bar)
+        left_layout.addWidget(self.image_panel, 1)
+
         central = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        central.addWidget(self.image_panel)
+        central.addWidget(left)
         central.addWidget(right)
         # Give both sides of the horizontal splitter equal claim on any
         # extra space when the window is resized (an equal, nonzero
@@ -116,27 +119,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # nested inside it) appear when the window is shown.
         self.setCentralWidget(central)
         self._size_to_screen(1200, 600)
-        self._load_settings()
-
-    def closeEvent(self, event):
-        """
-        Save settings before the window actually closes.  This overrides a
-        :class:`PySide6.QtWidgets.QWidget` *event handler* rather than
-        connecting to a signal (contrast
-        :class:`~nickel_focus.gui.controller.Controller`, which is all
-        signal/slot connections) -- Qt calls this method itself whenever the
-        window is about to close, however that was triggered (the close button,
-        :meth:`PySide6.QtWidgets.QWidget.close`, or quitting the application),
-        so overriding it is the standard way to run code at that specific
-        moment.
-        """
-        self._save_settings()
-        super().closeEvent(event)
 
     def showEvent(self, event):
         """
-        The first time this window actually becomes visible, give the image
-        panel a square initial share of ``central``'s width.  ``central``'s
+        This overrides a :class:`PySide6.QtWidgets.QWidget` *event handler*
+        rather than connecting to a signal (contrast
+        :class:`~nickel_focus.gui.controller.Controller`, which is all
+        signal/slot connections): Qt calls this method itself whenever the
+        window is shown, so overriding it is the standard way to run code at
+        that moment.
+
+        The first time this window actually becomes visible, give the left
+        column a share of ``central``'s width that makes the image panel (the
+        column's height minus the status bar above it) start out square.
+        ``central``'s
         geometry doesn't reflect the
         :meth:`~nickel_focus.gui.views.main_window.MainWindow._size_to_screen`
         resize until the window is genuinely shown -- reading it any earlier in
@@ -151,65 +147,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._sized_image_panel:
             self._sized_image_panel = True
             central = self.centralWidget()
-            central.setSizes([central.height(), central.width() - central.height()])
-
-    def _settings(self):
-        """
-        The :class:`PySide6.QtCore.QSettings` store this window persists
-        to/restores from.
-        """
-        return QtCore.QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
-
-    def _save_settings(self):
-        """
-        If "Remember settings between sessions" is unchecked, touch nothing --
-        unless a previous session actually saved something (in which case it's
-        erased, honoring an opt-*out*). A fresh install/session that never opts
-        in must never cause a settings file to be written at all.
-        """
-        settings = self._settings()
-        if not self.control_panel.remember_settings_checkbox.isChecked():
-            if 'control_panel' in settings.childGroups():
-                settings.remove('control_panel')
-                settings.remove('image_panel')
-            return
-        for key, value in self.control_panel.get_settings_state().items():
-            settings.setValue(f'control_panel/{key}', value)
-        for key, value in self.image_panel.get_settings_state().items():
-            settings.setValue(f'image_panel/{key}', value)
-
-    def _load_settings(self):
-        """
-        Check the "Remember settings between sessions" box if (and only if) a
-        previous session actually saved something -- that presence *is* the
-        opt-in state, rather than a separately-persisted flag (see the class
-        docstring) -- and only then restore it, falling back to whatever the
-        widgets were already constructed with for any key never saved before (a
-        field added since the last save). Passing that current value as
-        :meth:`PySide6.QtCore.QSettings.value`'s ``defaultValue`` also tells it
-        what type to coerce the stored value to, so no separate type map is
-        needed here.  This is read-only: merely checking/reading must never
-        itself create a settings file.
-        """
-        settings = self._settings()
-        remember = 'control_panel' in settings.childGroups()
-        self.control_panel.remember_settings_checkbox.setChecked(remember)
-        if not remember:
-            return
-
-        control_defaults = self.control_panel.get_settings_state()
-        control_state = {
-            key: settings.value(f'control_panel/{key}', default)
-            for key, default in control_defaults.items()
-        }
-        self.control_panel.set_settings_state(control_state)
-
-        image_defaults = self.image_panel.get_settings_state()
-        image_state = {
-            key: settings.value(f'image_panel/{key}', default)
-            for key, default in image_defaults.items()
-        }
-        self.image_panel.set_settings_state(image_state)
+            left_width = central.height() - self.status_bar.height()
+            central.setSizes([left_width, central.width() - left_width])
 
     def _size_to_screen(self, preferred_width, preferred_height):
         """

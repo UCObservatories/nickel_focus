@@ -2,55 +2,47 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from astropy.io import fits
 from astropy.visualization import ImageNormalize, ZScaleInterval, LinearStretch
 from IPython import embed
 from matplotlib import pyplot, patches
 import numpy as np
 
-from nickel_focus import ktl
+from nickel_focus import exposure
 from nickel_focus import log
-from nickel_focus.photometry import image_quality
+from nickel_focus.photometry import (
+    extract_stamp, measure_quality, measure_sources, source_centroid
+)
 from nickel_focus import quadratic
+from nickel_focus.services.base import require
 
 
 class Focus:
     """
-    KTL object used to manipulate the telescope focus.
+    Read and set the telescope focus (the secondary-mirror position).
 
-    Attributes
+    Parameters
     ----------
-    pocstop : ktl.Keyword
-
+    poco : :class:`~nickel_focus.services.nickelpoco.NickelPoco`
+        The telescope service.
     """
-    def __init__(self):
-        if ktl is None:
-            raise RuntimeError(
-                'The ktl package is not available.  Controlling the telescope focus requires a '
-                'kpython environment with ktl installed.'
-            )
-        # Controls overall movement of mechanisms
-        self.pocstop = ktl.cache('nickelpoco', 'POCSTOP')
-        # Actual secondary position
-        self.secpa = ktl.cache('nickelpoco', 'POCSECPA')
-        # Desired secondary position
-        self.secpd = ktl.cache('nickelpoco', 'POCSECPD')
-        # Controls the secondary locking mechanism
-        self.seclk = ktl.cache('nickelpoco', 'POCSECLK')
-        # Provides the state of the exposures
-        self.expstate = ktl.cache('nscicam', 'EXPSTATE')
+    def __init__(self, poco):
+        self.poco = poco
 
     @property
     def current(self):
         """
         The current focus position (floating-point)
         """
-        return float(self.secpa.read())
+        return self.poco.secondary_position()
 
     def set_to(self, focus_value):
         """
         Set the focus to the provided value.
 
-        Movement must be enabled and there must not be an ongoing exposure.
+        Movement must be enabled.  This does not check the camera; see
+        :meth:`~nickel_focus.focus.FocusSequence.set_focus`, which also
+        requires that no exposure is in progress.
 
         Parameters
         ----------
@@ -63,8 +55,11 @@ class Focus:
         ------
         ValueError
             Raised if the focus value is outside the allowed range, if movement
-            is disabled, or if the exposure state is anything except that the
-            camera is ready for another exposure to begin.
+            is disabled, or if the secondary does not lock again within 30 s
+            of the move.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the telescope service doesn't reply to one of these
+            checks.
         """
 
         # Check that the requested focus value is valid
@@ -73,158 +68,34 @@ class Focus:
         
         # Make sure movement is enabled.  Do NOT enable movement via this
         # script!
-        if not self.pocstop.waitFor('== allowed', timeout=0.5):
-            raise ValueError('Telescope movement is disabled!')
-
-        # Check that an exposure isn't currently happening
-        if not self.expstate.waitFor('== Ready', timeout=0.5):
-            raise ValueError('Camera exposure state not ready. Cannot change focus.')
+        require(
+            self.poco.movement_allowed(timeout=0.5), 'Telescope movement is disabled!',
+            'No reply from nickelpoco.POCSTOP; cannot tell whether telescope movement is allowed.'
+        )
 
         # Check if the focus is already at the requested position.
-        if abs(float(self.secpd.read()) - focus_value) < .1:
+        if abs(self.poco.secondary_demand() - focus_value) < .1:
             log.info(f'POCSECPD already set to {focus_value}. No change needed.')
             return
 
         # Change the focus
         log.info('Unlocking secondary')
-        self.seclk.write('off')
-        self.seclk.read()
+        self.poco.set_secondary_lock(False)
+        self.poco.read('POCSECLK')
 
-        log.info(f'Actual position: {self.secpa.read()}')
-        self.secpd.write(focus_value)
-        log.info(f'Desired position: {self.secpd.read()}')
+        log.info(f'Actual position: {self.poco.secondary_position()}')
+        self.poco.set_secondary_demand(focus_value)
+        log.info(f'Desired position: {self.poco.secondary_demand()}')
 
-        if not self.seclk.waitFor('== on', timeout=30):
-            # TODO: Explicitly set the lock to on?
-#            self.seclk.write('on')
-#            self.seclk.read()
-            raise ValueError("POCSECLK did not turn on. Focus change failed.")
+        # TODO: If the lock doesn't come back on, explicitly set it to on?
+        require(
+            self.poco.secondary_locked(timeout=30),
+            'POCSECLK did not turn on. Focus change failed.',
+            'No reply from nickelpoco.POCSECLK; cannot tell whether the focus change finished.'
+        )
 
         log.info(f"Successfully changed focus to {focus_value}")
 
-
-class ExposurePath:
-    """
-    KTL object used to read and set the paths for the image exposures.
-    """
-    def __init__(self):
-        self.exprec = ktl.cache('nscicam', 'RECORD')
-        self.expresult = ktl.cache('nscicam', 'EXPRESULT')
-        self.scratchdir = ktl.cache('nscicam', 'SCRATCHDIR')
-        self.recorddir = ktl.cache('nscicam', 'RECORDDIR')
-        self.prefix = ktl.cache('nscicam', 'FITSPREFIX')
-        self.obsnum = ktl.cache('nscicam', 'OBSNUM')
-        self.suffix = ktl.cache('nscicam', 'FITSSUFFIX')
-
-    @property
-    def previous(self):
-        return Path(self.expresult.read())
-
-    @property
-    def next(self):
-        return self.for_obsnum(self.obsnum.read())
-
-    def for_obsnum(self, obsnum, assume_recorded=False):
-        # TODO: Is this the correct way to check the keyword has a given value?
-        record = self.exprec.read() == 'Yes'
-        if record or assume_recorded:
-            path = Path(self.recorddir.read()).absolute()
-        else:
-            path = Path(self.scratchdir.read()).absolute()
-        return path / f'{self.prefix.read()}{obsnum}{self.suffix.read()}'
-    
-
-class ExposureConfig:
-    # Map user-facing speed names (e.g., from the GUI or CLI) to the AMPCONF
-    # values accepted by the camera.  Names not in this map are passed through
-    # unchanged and validated against AMPCONFLIST.
-    speed_aliases = {
-        'Fast': '1.0MHz',
-        'Slow': '0.05MHz',
-        }
-
-    def __init__(self):
-        self.exprec = ktl.cache('nscicam', 'RECORD')
-        self._exptime = ktl.cache('nscicam', 'EXPOSURE')
-        # NOTE: AMPCONFLIST gives the options
-        self.expspeed  = ktl.cache('nscicam', 'AMPCONF')
-        self.expspeed_options = ktl.cache('nscicam', 'AMPCONFLIST').read().split(',')
-        # TODO: Is there a way to programmatically get the binning options
-        self.expbin  = ktl.cache('nscicam', 'BINNING')
-        self.expbin_options = ['1,1', '2,2', '4,4']
-
-    def configure(self, record=None, speed=None, binning=None, exptime=None):
-        if record is not None:
-            self.exprec.write(record)
-        if speed is not None:
-            speed = self.speed_aliases.get(speed, speed)
-            if speed not in self.expspeed_options:
-                raise ValueError(
-                    f'{speed} is not a valid read speed.  Must be one of {self.expspeed_options}.'
-                )
-            self.expspeed.write(speed)
-        if binning is not None:
-            if binning not in self.expbin_options:
-                raise ValueError(
-                    f'{binning} is not a valid binning.  Must be one of {self.expbin_options}.'
-                )
-            self.expbin.write(binning)
-        if exptime is not None:
-            self._exptime.write(exptime)
-
-    @property
-    def exptime(self):
-        return self._exptime.read()
-
-    def __repr__(self):
-        return (
-            'Exposure settings:\n'
-            f'    Record: {self.exprec.read()}\n'
-            f'    Time: {self.exptime}\n'
-            f'    Speed: {self.expspeed.read()}\n'
-            f'    Binning: {self.expbin.read()}\n'
-        )
-    
-class Exposure:
-
-    def __init__(self):
-        if ktl is None:
-            raise RuntimeError(
-                'The ktl package is not available.  Taking new exposures requires a kpython '
-                'environment with ktl installed.'
-            )
-        self.path = ExposurePath()
-        self.cfg = ExposureConfig()
-
-        # SCICAM exposure keywords
-        self.expstate = ktl.cache('nscicam', 'EXPSTATE')
-        self.expstate.monitor()
-
-        self.expstart = ktl.cache('nscicam', 'EXPOSE')
-        self.expstart.monitor()
-
-    def expose(self, record=None, speed=None, binning=None, exptime=None):
-
-        # Check that an exposure isn't currently happening
-        if not self.expstate.waitFor('== Ready', timeout=15):
-            raise ValueError('Camera exposure state not ready. Cannot take exposure.')
-
-        self.cfg.configure(record=record, speed=speed, binning=binning, exptime=exptime)
-
-        # Start the exposure
-        # TODO: This needs to be confirmed once Will settles on the naming
-        self.expstart.write('StartX')
-
-        # Wait for it to start
-        if not self.expstate.waitFor('== Start', timeout=30):
-            raise ValueError('Exposure start (EXPSTATE == Start) not detected within timeout')
-
-        # Then wait for it to be ready again
-        if self.expstate.waitFor('== Ready', timeout=round(float(self.cfg.exptime) + 90.)):
-            log.info('Exposure completed successfully')
-        else:
-            raise ValueError('Exposure EXPSTATE=Ready not detected within timeout')
-        
 
 class FocusPlot:
     """
@@ -341,16 +212,32 @@ class FocusPlot:
     def is_outlier(centroids, threshold=2.0):
         """
         Check whether the most recently added centroid in ``centroids`` is an
-        outlier relative to the full set collected so far, using the same
-        median-distance statistic as the original focus-finding code.
+        outlier relative to the full set collected so far (see
+        :func:`centroid_outliers`).
         """
-        _centroids = np.atleast_2d(centroids).astype(float)
-        if len(_centroids) < 3:
-            return False
-        median = np.median(_centroids, axis=0)
-        distances = np.sqrt(np.sum((_centroids - median)**2, axis=1))
-        outlier_threshold = np.mean(distances) + threshold * np.std(distances)
-        return distances[-1] > outlier_threshold
+        return bool(centroid_outliers(centroids, threshold=threshold)[-1])
+
+
+def centroid_outliers(centroids, threshold=2.0):
+    """
+    Which of a star's ``(x, y)`` centroids (one per exposure) are outliers,
+    using the median-distance statistic of the original focus-finding code:
+    a centroid is an outlier if its distance from the median position exceeds
+    the mean distance by more than ``threshold`` standard deviations.  With
+    fewer than three centroids, none is.
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        A boolean flag for each centroid.
+    """
+    _centroids = np.atleast_2d(centroids).astype(float)
+    if len(_centroids) < 3:
+        return np.zeros(len(_centroids), dtype=bool)
+    median = np.median(_centroids, axis=0)
+    distances = np.sqrt(np.sum((_centroids - median)**2, axis=1))
+    outlier_threshold = np.mean(distances) + threshold * np.std(distances)
+    return distances > outlier_threshold
 
 
 @dataclass
@@ -366,27 +253,239 @@ class StepResult:
         The focus value used for this exposure.
     exposure : :class:`pathlib.Path`
         Path to the exposure's FITS file.
-    fwhm : :obj:`float`
-        Measured image quality (FWHM) of the selected source.
+    fwhm : :obj:`float` or None
+        Measured image quality of the selected source: its FWHM, in pixels
+        (see :func:`~nickel_focus.photometry.source_quality`), or None if the
+        exposure couldn't be measured (see ``photometry_error``).
     frame : :class:`numpy.ndarray`
-        Background-subtracted image data for the full exposure.
-    stamp : :class:`numpy.ndarray`
-        Cutout of ``frame`` around the selected source.
-    centroid : :obj:`tuple`
-        The (x,y) centroid of the selected source.
+        Background-subtracted image data for the full exposure (if it couldn't
+        be measured, the image less its median).
+    centroid : :obj:`tuple` or None
+        The (x,y) centroid of the selected source, or None if not measured.
     is_outlier : :obj:`bool`
         Whether this step's centroid is an outlier relative to the rest of the
         sequence collected so far; see
         :meth:`~nickel_focus.focus.FocusPlot.is_outlier`.
+    object_name : :obj:`str` or None
+        The exposure's ``OBJECT`` header value (see
+        :func:`~nickel_focus.focus.exposure_object_name`), or None if it has
+        none.
+    binning : :obj:`int` or None
+        The exposure's binning (1, 2, or 4; see
+        :func:`~nickel_focus.focus.exposure_binning`), or None if unknown.
+    raw : :class:`numpy.ndarray` or None
+        The exposure's image data as read from the file (before background
+        subtraction), in the file's own type -- 16-bit unsigned integers for
+        the Nickel camera, a quarter of the size of ``frame`` -- or None if
+        not kept.
+    sources : :class:`astropy.table.Table` or None
+        The measurements of every source detected in the exposure (see
+        :func:`~nickel_focus.photometry.measure_sources`), or None if the
+        exposure couldn't be measured or they weren't kept.  See also
+        :attr:`source_positions`.
+    source_index : :obj:`int` or None
+        The row in ``sources`` of the selected source (whose ``fwhm`` and
+        ``centroid`` these are), or None if not measured.
+    photometry_error : :obj:`str` or None
+        Why the exposure couldn't be measured, or None if it was (see
+        :func:`measure_exposure`).
     """
     index: int
     focus_value: float
     exposure: Path
-    fwhm: float
+    fwhm: float | None
     frame: np.ndarray
-    stamp: np.ndarray
-    centroid: tuple
+    centroid: tuple | None
     is_outlier: bool
+    object_name: str | None = None
+    binning: int | None = None
+    raw: np.ndarray | None = None
+    sources: object = None
+    source_index: int | None = None
+    photometry_error: str | None = None
+
+    @property
+    def measured(self):
+        """Whether the exposure's image quality was measured."""
+        return self.fwhm is not None
+
+    @property
+    def source_positions(self):
+        """
+        The ``(x, y)`` centroids of every detected source, as an ``(N, 2)``
+        array (empty if there are none; see :func:`source_centroids`).
+        """
+        if self.sources is None:
+            return np.empty((0, 2))
+        return source_centroids(self.sources)
+
+    def stamp(self):
+        """
+        A cutout of ``frame`` around the selected source,
+        :data:`STAMP_SIZE_FWHM` FWHMs across (see
+        :func:`~nickel_focus.photometry.extract_stamp`), made when asked for;
+        None if not measured.
+        """
+        if not self.measured:
+            return None
+        return extract_stamp(self.frame, self.centroid, int(self.fwhm * STAMP_SIZE_FWHM))
+
+
+def source_centroids(src_data):
+    """
+    The ``(x, y)`` centroids of the sources in a
+    :func:`~nickel_focus.photometry.measure_sources` table, as an ``(N, 2)``
+    array.
+    """
+    return np.column_stack(
+        [np.asarray(src_data['CENX'], dtype=float), np.asarray(src_data['CENY'], dtype=float)]
+    )
+
+
+def measure_exposure(exposure_file, method='brightest'):
+    """
+    Measure an exposure for a :class:`StepResult`: every source (see
+    :func:`~nickel_focus.photometry.measure_sources`), then the image quality
+    by ``method`` (see :func:`~nickel_focus.photometry.measure_quality`),
+    without letting a failed measurement keep the image from being shown.
+
+    If the measurement fails (e.g. no source is detected), a warning is
+    logged and the image is still returned, less its median, with no
+    measurement.
+
+    Parameters
+    ----------
+    exposure_file : :obj:`str`, :class:`pathlib.Path`
+        The exposure's FITS file.
+    method : :obj:`str`, :obj:`tuple`, optional
+        The photometry method (see
+        :func:`~nickel_focus.photometry.image_quality`).
+
+    Returns
+    -------
+    :obj:`dict`
+        The :class:`StepResult` fields that come from the image: ``fwhm``,
+        ``frame``, ``raw``, ``sources``, ``source_index``, ``centroid``, and
+        ``photometry_error`` (None if the measurement succeeded).
+
+    Raises
+    ------
+    OSError
+        Raised (by :mod:`astropy.io.fits`) if the file itself can't be read.
+    """
+    try:
+        raw, bkg, src_data = measure_sources(exposure_file)
+        img_quality, row = measure_quality(src_data, method)
+    except Exception as e:
+        with fits.open(exposure_file) as hdu:
+            raw = np.array(hdu[0].data)
+        log.warning(
+            f'Could not measure the image quality of {Path(exposure_file).name}: {e}  '
+            'Showing it without a measurement.'
+        )
+        return dict(
+            fwhm=None, frame=raw.astype(float) - np.median(raw), raw=raw, sources=None,
+            source_index=None, centroid=None, photometry_error=str(e)
+        )
+    return dict(
+        fwhm=img_quality, frame=raw.astype(float) - bkg, raw=raw, sources=src_data,
+        source_index=row, centroid=source_centroid(src_data, row), photometry_error=None
+    )
+
+
+ARCSEC_PER_UNBINNED_PIXEL = 0.1665
+"""The Nickel science camera's expected plate scale, per unbinned pixel."""
+
+STAMP_SIZE_FWHM = 4.
+"""
+The size of a source's cutout, and of its box on a displayed image, in
+FWHMs (about 9.4 times the profile's moment width).
+"""
+
+
+def common_binning(binnings):
+    """
+    The binning shared by every exposure in ``binnings`` (an iterable of
+    :obj:`int` or None), or None if any is unknown or they differ (or there are
+    none).
+    """
+    unique = set(binnings)
+    if len(unique) != 1 or None in unique:
+        return None
+    return unique.pop()
+
+
+def fwhm_arcsec(fwhm, binning):
+    """
+    An FWHM in pixels converted to arcseconds (see
+    :data:`ARCSEC_PER_UNBINNED_PIXEL`), or None if either is unknown.
+    """
+    if fwhm is None or binning is None:
+        return None
+    return fwhm * ARCSEC_PER_UNBINNED_PIXEL * binning
+
+
+def fwhm_text(fwhm, binning):
+    """
+    An FWHM for display: in pixels, and also in arcseconds if ``binning`` is
+    known (see :data:`ARCSEC_PER_UNBINNED_PIXEL`), e.g. ``'3.21 pix (1.07
+    arcsec)'`` or ``'3.21 pix'``; ``'not measured'`` if ``fwhm`` is None.
+    """
+    if fwhm is None:
+        return 'not measured'
+    text = f'{fwhm:.2f} pix'
+    arcsec = fwhm_arcsec(fwhm, binning)
+    if arcsec is not None:
+        text += f' ({arcsec:.2f} arcsec)'
+    return text
+
+
+def exposure_object_name(path):
+    """
+    The ``OBJECT`` value in a FITS file's primary header (for a new exposure,
+    what the camera's ``OBJECT`` keyword held), or None if the header has none
+    or the file can't be read.
+    """
+    try:
+        value = fits.getheader(path).get('OBJECT')
+    except OSError:
+        return None
+    return None if value is None or str(value).strip() == '' else str(value).strip()
+
+
+def exposure_binning(path):
+    """
+    An exposure's binning, from the scale of its "CCD pixel" WCS in the FITS
+    primary header: ``CD1_1C`` and ``CD2_2C``, which should be equal and 1, 2,
+    or 4.
+
+    Returns
+    -------
+    :obj:`int` or None
+        The binning, or None if it can't be determined -- the file can't be
+        read, either keyword is missing, or the values differ or aren't 1, 2,
+        or 4 -- in which case a warning is logged.
+    """
+    name = Path(path).name
+    try:
+        header = fits.getheader(path)
+    except OSError as e:
+        log.warning(f'Could not read the binning of {name}: {e}; treating it as unknown.')
+        return None
+    x, y = header.get('CD1_1C'), header.get('CD2_2C')
+    if x is None or y is None:
+        log.warning(
+            f'Could not read the binning of {name}: its header has no CD1_1C/CD2_2C; treating '
+            'it as unknown.'
+        )
+        return None
+    if x != y or x not in (1, 2, 4):
+        log.warning(
+            f'Unexpected binning in {name}: CD1_1C={x}, CD2_2C={y} (expected equal values of 1, '
+            '2, or 4); treating it as unknown.'
+        )
+        return None
+    return int(x)
 
 
 class FocusSequence:
@@ -398,21 +497,33 @@ class FocusSequence:
 
     Parameters
     ----------
-    connect : :obj:`bool`, optional
-        Construct the telescope/camera hardware handles (``_focus`` and
-        ``_exposure``).  Even when True, they are only constructed if ``ktl``
-        is available; otherwise both are None.  Set to False for sequences
-        that never touch hardware (e.g., replaying exposures already on disk),
-        so that they don't connect to it even when ``ktl`` is available.
+    poco : :class:`~nickel_focus.services.nickelpoco.NickelPoco`, optional
+        The telescope service, used to move the focus.
+    cam : :class:`~nickel_focus.services.nscicam.NSciCam`, optional
+        The camera service, used to take exposures.
+
+    The hardware handles ``_focus`` (:class:`~nickel_focus.focus.Focus`) and
+    ``_exposure`` (:class:`~nickel_focus.exposure.Exposure`) are built only if
+    both services are given; otherwise both are None, as for sequences that
+    never touch hardware (e.g., replaying exposures already on disk).
+
+    Attributes
+    ----------
+    object_name : :obj:`str`
+        The name of the object being observed, recorded with each exposure
+        (see :meth:`~nickel_focus.focus.FocusSequence.exposure_object`);
+        ``'unknown'`` unless set.
+    record : :obj:`bool` or None
+        If set, the camera's ``RECORD`` is set to it before every exposure
+        (see :meth:`~nickel_focus.focus.FocusSequence.take_exposure`); None
+        (the default) leaves it as it is.
     """
-    def __init__(self, connect=True):
-        # `_focus` and `_exposure` control the telescope and camera hardware.
-        # They require a live ktl connection, which is not needed by
-        # sequences (e.g., ArchiveFocusSequence) that only reprocess
-        # exposures that already exist on disk.
-        connect = connect and ktl is not None
-        self._focus = Focus() if connect else None
-        self._exposure = Exposure() if connect else None
+    def __init__(self, poco=None, cam=None):
+        connect = poco is not None and cam is not None
+        self._focus = Focus(poco) if connect else None
+        self._exposure = exposure.Exposure(cam) if connect else None
+        self.object_name = 'unknown'
+        self.record = None
         self.method = None
         self.reset()
 
@@ -420,9 +531,40 @@ class FocusSequence:
         self.observed_focus = []
         self.exposures = []
         self.img_quality = []
+        self.binnings = []
         self.step_iter = 0
-        self.source_stamps = []
         self.centroids = []
+
+    @property
+    def binning(self):
+        """
+        The binning shared by every exposure collected so far, or None if any
+        is unknown or they differ (see :func:`~nickel_focus.focus.common_binning`).
+        """
+        return common_binning(self.binnings)
+
+    def set_focus(self, focus_value):
+        """
+        Move the focus to ``focus_value``, once the camera is idle.
+
+        Every focus move a sequence makes goes through here, so the focus never
+        moves during an exposure.
+
+        Raises
+        ------
+        ValueError
+            Raised if the camera's exposure state isn't ``Ready`` within 0.5 s,
+            or if :meth:`~nickel_focus.focus.Focus.set_to` fails.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the camera or telescope service doesn't reply to a check.
+        """
+        require(
+            self._exposure.cam.exposure_state_is('Ready', timeout=0.5),
+            'Camera exposure state not ready. Cannot change focus.',
+            'No reply from nscicam.EXPSTATE; cannot tell whether the camera is idle, so the '
+            'focus was not changed.'
+        )
+        self._focus.set_to(focus_value)
 
     @property
     def expected_steps(self):
@@ -457,38 +599,48 @@ class FocusSequence:
         ------
         StepResult
             The result of the most recently completed step.
+
+        Raises
+        ------
+        ValueError
+            Raised after yielding an exposure that couldn't be measured (see
+            :func:`measure_exposure`), which is still yielded so it can be
+            shown: the sequence can't go on without its measurement.
         """
         self.method = method
         while self.continue_sequence():
             self.observed_focus += [self.step_focus()]
             self.exposures += [self.take_exposure()]
-            data, bkg, src_data, img_quality, source_stamp, coords = image_quality(
-                self.exposures[-1], method=method
-            )
-            self.source_stamps += [source_stamp]
-            self.img_quality += [img_quality]
-            self.centroids += [coords]
+            measurement = measure_exposure(self.exposures[-1], method=method)
+            self.img_quality += [measurement['fwhm']]
+            self.binnings += [exposure_binning(self.exposures[-1])]
+            self.centroids += [measurement['centroid']]
 
             result = StepResult(
                 index=self.step_iter,
                 focus_value=self.observed_focus[-1],
                 exposure=self.exposures[-1],
-                fwhm=img_quality,
-                frame=data - bkg,
-                stamp=source_stamp,
-                centroid=coords,
-                is_outlier=FocusPlot.is_outlier(self.centroids),
+                is_outlier=(
+                    measurement['fwhm'] is not None and FocusPlot.is_outlier(self.centroids)
+                ),
+                object_name=exposure_object_name(self.exposures[-1]),
+                binning=self.binnings[-1],
+                **measurement,
             )
             self.step_iter += 1
             yield result
+            if not result.measured:
+                raise ValueError(
+                    f'Could not measure {result.exposure.name} ({result.photometry_error}); '
+                    'stopping the sequence.'
+                )
 
     def reanalyze(self, method='brightest'):
         """
         Re-run photometry on every exposure this sequence has already collected,
         using a new ``method``, without taking any new exposures.
 
-        This replaces the stored ``img_quality``/``source_stamps``/
-        ``centroids`` in place; ``observed_focus`` and ``exposures`` (and thus
+        This replaces the stored ``img_quality``/``centroids`` in place; ``observed_focus`` and ``exposures`` (and thus
         which exposures exist and what focus values they were taken at) are left
         untouched.  It's meant for interactively changing which source is used
         for the FWHM measurement (e.g., after a user clicks a different star in
@@ -507,33 +659,46 @@ class FocusSequence:
         StepResult
             The updated result for each already-collected exposure, in the order
             they were originally taken.
+
+        Raises
+        ------
+        ValueError
+            Raised after yielding an exposure that couldn't be measured, as
+            for :meth:`~nickel_focus.focus.FocusSequence.step`.
         """
         self.method = method
         focus_values = list(self.observed_focus)
         exposures = list(self.exposures)
 
         self.img_quality = []
-        self.source_stamps = []
         self.centroids = []
 
-        for i, (focus_value, exposure) in enumerate(zip(focus_values, exposures)):
-            data, bkg, src_data, img_quality, source_stamp, coords = image_quality(
-                exposure, method=method
-            )
-            self.source_stamps += [source_stamp]
-            self.img_quality += [img_quality]
-            self.centroids += [coords]
+        for i, (focus_value, exposure_file) in enumerate(zip(focus_values, exposures)):
+            measurement = measure_exposure(exposure_file, method=method)
+            self.img_quality += [measurement['fwhm']]
+            self.centroids += [measurement['centroid']]
 
-            yield StepResult(
+            result = StepResult(
                 index=i,
                 focus_value=focus_value,
-                exposure=exposure,
-                fwhm=img_quality,
-                frame=data - bkg,
-                stamp=source_stamp,
-                centroid=coords,
-                is_outlier=FocusPlot.is_outlier(self.centroids),
+                exposure=exposure_file,
+                is_outlier=(
+                    measurement['fwhm'] is not None and FocusPlot.is_outlier(self.centroids)
+                ),
+                object_name=exposure_object_name(exposure_file),
+                # Already known from when the exposure was collected.
+                binning=(
+                    self.binnings[i] if i < len(self.binnings)
+                    else exposure_binning(exposure_file)
+                ),
+                **measurement,
             )
+            yield result
+            if not result.measured:
+                raise ValueError(
+                    f'Could not measure {Path(exposure_file).name} ({result.photometry_error}); '
+                    'stopping the reanalysis.'
+                )
 
     def take_single_exposure(self, focus_value, method='brightest', **exp_kwargs):
         """
@@ -543,10 +708,9 @@ class FocusSequence:
         sequence bookkeeping (``step_iter``, ``observed_focus``,
         ``img_quality``, etc.  are left untouched).
 
-        This is the shared primitive behind both "move to best focus" (moving to
-        a fitted focus value and confirming it with one exposure *is* taking a
-        single exposure at that value) and the standalone single-exposure
-        workflow (GUI_DESIGN.md §5.5).
+        This backs the GUI's Single tab, which takes one exposure at any focus
+        value; moving to a fitted best focus (the tab's default value) is just
+        one use of it.
 
         Parameters
         ----------
@@ -556,34 +720,33 @@ class FocusSequence:
             The photometry method passed to
             :func:`~nickel_focus.photometry.image_quality`.
         **exp_kwargs
-            Passed to :meth:`~nickel_focus.focus.ExposureConfig.configure`
+            Passed to :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure`
             before exposing (``record``, ``speed``, ``binning``, ``exptime``).
 
         Returns
         -------
         StepResult
             The measurement from the single exposure.  Its ``index`` is always
-            0, since it's not part of any larger sequence.
+            0, since it's not part of any larger sequence.  If the exposure
+            couldn't be measured, it's still returned, with no measurement
+            (see :func:`measure_exposure`).
         """
         if self._focus is None or self._exposure is None:
             raise ValueError(
-                'No telescope focus/exposure control is available (ktl not connected); cannot '
-                'take a single exposure.'
+                'No telescope focus/exposure control is available (no telescope/camera '
+                'connection); cannot take a single exposure.'
             )
-        self._focus.set_to(focus_value)
+        self.set_focus(focus_value)
         self._exposure.cfg.configure(**exp_kwargs)
-        exposure = self.take_exposure()
-        data, bkg, src_data, img_quality, source_stamp, coords \
-            = image_quality(exposure, method=method)
+        exposure_file = self.take_exposure()
         return StepResult(
             index=0,
             focus_value=self._focus.current,
-            exposure=exposure,
-            fwhm=img_quality,
-            frame=data - bkg,
-            stamp=source_stamp,
-            centroid=coords,
+            exposure=exposure_file,
             is_outlier=False,
+            object_name=exposure_object_name(exposure_file),
+            binning=exposure_binning(exposure_file),
+            **measure_exposure(exposure_file, method=method),
         )
 
     def execute(self, goto=True, method='brightest', plot=True, **exp_kwargs):
@@ -595,13 +758,17 @@ class FocusSequence:
         self.plot = FocusPlot(self.expected_steps) if plot else None
 
         for result in self.step(method=method):
-            if self.plot is not None:
+            # An exposure that couldn't be measured ends the sequence (step
+            # raises next); there's nothing to plot for it.
+            if self.plot is not None and result.measured:
                 self.plot.update_frame(
-                    result.frame, result.centroid, int(result.fwhm*10), result.exposure.stem,
+                    result.frame, result.centroid, int(result.fwhm * STAMP_SIZE_FWHM),
+                    result.exposure.stem,
                     result.focus_value, result.is_outlier
                 )
+                # Cut only now, for the plot.
                 self.plot.add_stamp(
-                    result.index, result.stamp, result.focus_value, result.fwhm,
+                    result.index, result.stamp(), result.focus_value, result.fwhm,
                     is_outlier=result.is_outlier
                 )
                 self.plot.update_curve(self.observed_focus, self.img_quality)
@@ -624,12 +791,52 @@ class FocusSequence:
             'Method used to increment the focus setting is not implemented by the base class!'
         )
 
+    OBJECT_MAX_LENGTH = 68
+    """
+    The longest ``OBJECT`` written: the most a FITS header string value can
+    hold.
+    """
+
+    def exposure_object(self):
+        """
+        The camera's ``OBJECT`` for the next exposure: the object name and the
+        current focus position, ``'<object_name>: focus=<focus>'`` (focus to
+        one decimal place).
+
+        At most :attr:`OBJECT_MAX_LENGTH` characters: a longer object name is
+        shortened, ending in ``'...'``, so the focus is always kept.
+        """
+        suffix = f': focus={self._focus.current:.1f}'
+        name = self.object_name
+        room = self.OBJECT_MAX_LENGTH - len(suffix)
+        if len(name) > room:
+            name = name[:room - 3] + '...'
+        return name + suffix
+
     def take_exposure(self):
-        self._exposure.expose()
+        """
+        Take an exposure at the current focus, with ``OBJECT`` set by
+        :meth:`~nickel_focus.focus.FocusSequence.exposure_object` (and
+        ``RECORD`` by :attr:`record`, if set), and return its file path.
+        """
+        self._exposure.expose(record=self.record, object_name=self.exposure_object())
         return self._exposure.path.previous
 
     @staticmethod
     def fit_best_focus(focus, img_quality):
+        """
+        Fit a quadratic to image quality vs. focus and return its vertex,
+        ``(best_focus, best_img_quality)``.  Exposures that couldn't be
+        measured (image quality None) are left out.
+
+        Raises
+        ------
+        ValueError
+            Raised if fewer than three measured exposures remain.
+        """
+        pairs = [(f, q) for f, q in zip(focus, img_quality) if q is not None]
+        focus = [f for f, _ in pairs]
+        img_quality = [q for _, q in pairs]
         if len(focus) < 3:
             raise ValueError('Insufficient number of focus values observed.')
         a, b, c = quadratic.fit_quadratic(focus, img_quality)
@@ -637,9 +844,9 @@ class FocusSequence:
 
 
 class GridFocusSequence(FocusSequence):
-    def __init__(self, start, step, end=None, nstep=None, connect=True):
+    def __init__(self, start, step, end=None, nstep=None, poco=None, cam=None):
 
-        super().__init__(connect=connect)
+        super().__init__(poco=poco, cam=cam)
 
         if end is None and nstep is None:
             raise ValueError('Must provide either the ending value or the number of steps.')
@@ -655,17 +862,17 @@ class GridFocusSequence(FocusSequence):
         return self.step_iter < self.nstep
 
     def step_focus(self):
-        self._focus.set_to(self.target_focus[self.step_iter])
+        self.set_focus(self.target_focus[self.step_iter])
         return self._focus.current
 
 
 class AutomatedFocusSequence(FocusSequence):
-    def __init__(self, start, step, maxsteps=12):
+    def __init__(self, start, step, maxsteps=12, poco=None, cam=None):
 
         if maxsteps is None or maxsteps < 2:
             raise ValueError('maxsteps cannot be None and must be at least 2.')
 
-        super().__init__()
+        super().__init__(poco=poco, cam=cam)
 
         self.start = start
         # NOTE: Named `step_size`, not `step`, because `step` is the name
@@ -719,14 +926,14 @@ class AutomatedFocusSequence(FocusSequence):
             next_focus = self.observed_focus[-1] + self.direction * self.step_size
         else:
             next_focus = self.observed_focus[-1] + self.direction * self.step_size
-        self._focus.set_to(next_focus)
+        self.set_focus(next_focus)
         return self._focus.current
 
 
 class ArchiveFocusSequence(FocusSequence):
     def __init__(self, observed_focus, exposures):
         # Only replays exposures already on disk, so never needs hardware.
-        super().__init__(connect=False)
+        super().__init__()
 
         self._observed_focus = observed_focus
         self._exposures = exposures

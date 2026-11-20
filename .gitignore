@@ -196,3 +196,8 @@ cython_debug/
 
 # Other
 version.py
+
+ktl_python
+
+# Logs from the telescope check scripts
+tools/telescope/logs/

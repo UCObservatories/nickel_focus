@@ -1,10 +1,13 @@
 """Tests for :mod:`gui.views.focus_curve_panel`."""
 import dataclasses
 
+from matplotlib.colors import to_rgba
+from matplotlib.markers import MarkerStyle
+import numpy as np
 import pytest
 
 from nickel_focus import focus
-from nickel_focus.gui.views.focus_curve_panel import FocusCurvePanel
+from nickel_focus.gui.views.focus_curve_panel import ARCSEC_PER_UNBINNED_PIXEL, FocusCurvePanel
 
 
 def _step_results(focus_sweep):
@@ -97,3 +100,145 @@ def test_reset_clears_the_plot(qapp, focus_sweep):
     assert panel._results == [], 'reset should clear the stored results'
     assert not panel.ax.collections, 'reset should clear the scatter points'
     assert not panel.ax.lines, 'reset should clear the fitted curve'
+
+
+def _synthetic_results(focus_sweep, points, binning=None):
+    """Results at the given (focus, fwhm) points, built from a real one."""
+    template = _step_results(focus_sweep)[0]
+    return [
+        dataclasses.replace(template, focus_value=x, fwhm=y, binning=binning)
+        for x, y in points
+    ]
+
+
+# These three points lie on a parabola whose vertex, (355, 4.1), is beyond them.
+_ONE_SIDED = [(340., 5.0), (345., 4.5), (350., 4.2)]
+
+
+def test_limits_are_set_by_the_measured_points(qapp, focus_sweep):
+    panel = FocusCurvePanel()
+    for r in _synthetic_results(focus_sweep, _ONE_SIDED):
+        panel.add_result(r)
+
+    (x_low, x_high), (y_low, y_high) = panel.ax.get_xlim(), panel.ax.get_ylim()
+    assert x_low < 340. and x_high > 350., 'the limits should include every measured point'
+    assert y_low < 4.2 and y_high > 5.0, 'the limits should include every measured FWHM'
+    assert x_high < 355., 'the best focus (x=355) should not widen the focus limits'
+    assert y_low > 4.1, 'the best focus (FWHM 4.1) should not extend the FWHM limits'
+
+
+def test_best_focus_is_an_open_black_star(qapp, focus_sweep):
+    panel = FocusCurvePanel()
+    for r in _step_results(focus_sweep):
+        panel.add_result(r)
+
+    best = [c for c in panel.ax.collections if c.get_label().startswith('Best focus')]
+    assert len(best) == 1, 'there should be one best-focus marker'
+    marker = best[0]
+    star = MarkerStyle('*')
+    assert np.allclose(marker.get_paths()[0].vertices,
+                       star.get_path().transformed(star.get_transform()).vertices), \
+        'the marker should be a star'
+    assert len(marker.get_facecolors()) == 0, 'the star should be open (no fill)'
+    assert np.allclose(marker.get_edgecolors()[0], to_rgba('black')), \
+        'the star should be outlined in black'
+
+
+@pytest.mark.parametrize('binning', [1, 2, 4])
+def test_right_axis_gives_fwhm_in_arcsec(qapp, focus_sweep, binning):
+    panel = FocusCurvePanel()
+    for r in _synthetic_results(focus_sweep, _ONE_SIDED, binning=binning):
+        panel.add_result(r)
+
+    scale = ARCSEC_PER_UNBINNED_PIXEL * binning
+    assert panel.ax_arcsec.get_ylabel() == 'FWHM (arcsec)', \
+        'with a known binning, the right axis should be in arcsec'
+    assert np.allclose(panel.ax_arcsec.get_ylim(), np.array(panel.ax.get_ylim()) * scale), \
+        f'the right axis should be the left times {scale:.4f} arcsec per pixel'
+
+
+@pytest.mark.parametrize('binnings', [[None, None, None], [2, 2, 4], [2, None, 2]])
+def test_right_axis_repeats_pixels_without_one_known_binning(qapp, focus_sweep, binnings):
+    panel = FocusCurvePanel()
+    for r, binning in zip(_synthetic_results(focus_sweep, _ONE_SIDED), binnings):
+        panel.add_result(dataclasses.replace(r, binning=binning))
+
+    assert panel.ax_arcsec.get_visible(), 'the right axis should always be shown'
+    assert panel.ax_arcsec.get_ylabel() == 'FWHM (pixels)', \
+        'without one known binning, the right axis should be in pixels'
+    assert np.allclose(panel.ax_arcsec.get_ylim(), panel.ax.get_ylim()), \
+        'in pixels, the right axis should repeat the left'
+
+
+def test_right_axis_shows_before_any_points(qapp):
+    panel = FocusCurvePanel()
+
+    assert panel.ax_arcsec.get_visible(), 'the right axis should show even with no points'
+    assert panel.ax_arcsec.get_ylabel() == 'FWHM (pixels)', \
+        'with no points, the right axis should be in pixels'
+
+
+def test_right_axis_stays_on_the_right_after_redraws(qapp, focus_sweep):
+    panel = FocusCurvePanel()
+    for r in _synthetic_results(focus_sweep, _ONE_SIDED, binning=2):
+        panel.add_result(r)  # each one clears and redraws both axes
+
+    assert panel.ax_arcsec.yaxis.get_label_position() == 'right', \
+        "the right axis's label should stay on the right"
+    assert panel.ax_arcsec.yaxis.get_ticks_position() == 'right', \
+        "the right axis's ticks should stay on the right"
+
+
+def test_unmeasured_results_are_not_plotted(qapp, focus_sweep):
+    result = _step_results(focus_sweep)[0]
+    panel = FocusCurvePanel()
+
+    panel.add_result(dataclasses.replace(result, fwhm=None, centroid=None, source_index=None))
+
+    assert panel._results == [], 'a result with no FWHM should not be added to the curve'
+
+
+def test_set_points_plots_and_fits_the_pooled_points(qapp):
+    import types
+    panel = FocusCurvePanel()
+    focus_values = [340., 345., 350., 355., 360.]
+    points = [
+        types.SimpleNamespace(focus_value=f, fwhm=3. + 0.01 * (f - 350.)**2 + offset,
+                              is_outlier=False)
+        for offset in (0., 0.1) for f in focus_values
+    ]
+
+    panel.set_points(points, [2] * len(points))
+
+    assert len(panel._results) == 10, 'every pooled point should be plotted'
+    offsets = panel.ax.collections[0].get_offsets()
+    assert len(offsets) == 10, 'all points should be drawn alike, in one series'
+    best = [t for t in panel.ax.get_legend().get_texts() if 'Best focus' in t.get_text()]
+    assert best and '350.0' in best[0].get_text(), 'the pooled fit should find the best focus'
+    assert panel.ax_arcsec.get_ylabel() == 'FWHM (arcsec)', \
+        'a common known binning should give the right axis in arcsec'
+
+    panel.set_points([], [])
+    assert len(panel._results) == 0 and len(panel.ax.collections) == 0, \
+        'with no points the plot should be empty'
+
+
+def test_fixed_limits_hold_until_reset(qapp, focus_sweep):
+    results = _step_results(focus_sweep)
+    panel = FocusCurvePanel()
+    for r in results:
+        panel.add_result(r)
+
+    panel.fix_limits((330., 370.), (0., 20.))
+    assert panel.ax.get_xlim() == (330., 370.) and panel.ax.get_ylim() == (0., 20.), \
+        'fixed limits should be applied'
+
+    panel.set_points(results[:2], [r.binning for r in results[:2]])
+    assert panel.ax.get_ylim() == (0., 20.), 'changing the points should not move fixed limits'
+    panel.set_points([], [])
+    assert panel.ax.get_xlim() == (330., 370.) and panel.ax.get_ylim() == (0., 20.), \
+        'with no points the axes should still show the fixed limits'
+
+    panel.reset()
+    panel.set_points(results[:2], [r.binning for r in results[:2]])
+    assert panel.ax.get_ylim() != (0., 20.), 'after a reset the limits should follow the points'

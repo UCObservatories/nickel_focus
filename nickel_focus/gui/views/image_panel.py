@@ -1,7 +1,6 @@
 """
-Interactive display of the exposures in a focus sequence.
-
-See GUI_DESIGN.md §5.2 and §5.6.
+Interactive display of the exposures in a focus sequence, including selection
+of the source to measure.
 """
 import bisect
 
@@ -13,26 +12,77 @@ from astropy.visualization import (
     AsinhStretch,
 )
 
-from nickel_focus.gui.qt import QtCore, QtWidgets
+from nickel_focus import pointing
+from nickel_focus.focus import STAMP_SIZE_FWHM
+from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
+
+
+class ElidingComboBox(QtWidgets.QComboBox):
+    """
+    A combo box for entries that may be longer than it is wide.
+
+    - The closed box shows its current entry shortened in the *middle* (with
+      "…") to fit its width, so both ends -- e.g. a file name and a focus value
+      -- stay visible.
+    - The open list is widened to fit the longest entry, even past the box.
+    - Hovering over the box shows its full current entry as a tooltip.
+    """
+
+    def paintEvent(self, event):
+        painter = QtWidgets.QStylePainter(self)
+        option = QtWidgets.QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ComboBox, option)
+        field = self.style().subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_ComboBox, option,
+            QtWidgets.QStyle.SubControl.SC_ComboBoxEditField, self
+        )
+        option.currentText = self.fontMetrics().elidedText(
+            option.currentText, QtCore.Qt.TextElideMode.ElideMiddle, field.width()
+        )
+        painter.drawControl(QtWidgets.QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+    def showPopup(self):
+        view = self.view()
+        scroll_bar = view.verticalScrollBar().sizeHint().width()
+        view.setMinimumWidth(view.sizeHintForColumn(0) + 2 * view.frameWidth() + scroll_bar)
+        super().showPopup()
+
+    def event(self, event):
+        if event.type() == QtCore.QEvent.Type.ToolTip:
+            if self.currentText():
+                QtWidgets.QToolTip.showText(event.globalPos(), self.currentText(), self)
+            else:
+                QtWidgets.QToolTip.hideText()
+            return True
+        return super().event(event)
 
 
 class ImagePanel(QtWidgets.QWidget):
     """
     Shows the exposures collected by a focus sequence, one at a time.
 
-    Baseline interactions (GUI_DESIGN.md §5.2): pan via scroll bars, wheel zoom,
-    a "Recenter" button that returns to a fit-to-view zoom, and a stretch
-    selector.  The measured source is boxed on every frame -- red normally,
-    yellow (with an "Outlier centroid" label) if
-    :attr:`~nickel_focus.focus.StepResult.is_outlier` is set.  A drop-down lists
+    Baseline interactions: pan via scroll bars, wheel zoom, the 'r' key
+    (lowercase only) to return to a fit-to-view zoom, and a stretch selector
+    (at the right of the top row, which the exposure drop-down otherwise
+    fills).  Each selected star is boxed (4 x its FWHM; see
+    :data:`~nickel_focus.focus.STAMP_SIZE_FWHM`) -- red normally,
+    yellow (with an "Outlier centroid" label) if its position is an outlier.
+    The stars come from
+    :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_star_boxes`;
+    an exposure it doesn't cover has its own measured source
+    (:attr:`~nickel_focus.focus.StepResult.centroid`, with
+    :attr:`~nickel_focus.focus.StepResult.is_outlier`) boxed.  An exposure
+    that couldn't be measured is shown without a box.  A drop-down lists
     every exposure added so far, always kept sorted by focus value, and tracks
     the most recently *added* exposure until the user manually picks a different
-    one (§5.2's "auto-follow latest" decision) -- note that "most recently
+    one, so browsing older exposures isn't interrupted by new ones arriving --
+    note that "most recently
     added" is not the same as "highest focus value," since an adaptive
     (:class:`~nickel_focus.focus.AutomatedFocusSequence`) run doesn't acquire
     focus values in order.
 
-    Hovering over a displayed source and pressing 'm' (§5.6) emits
+    Hovering over a displayed source and pressing 'm' emits
     :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected` with
     the data coordinates under the cursor, but only while
     :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`
@@ -43,14 +93,57 @@ class ImagePanel(QtWidgets.QWidget):
     so a stray click meant only to bring the window forward was enough to kick
     off a reanalysis.
 
-    Does not implement the design doc's optional "center on measured source"
-    recenter variant; "Recenter" always fits the whole frame.
+    Pressing 'a' or 'd' the same way emits
+    :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starAdded` or
+    :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starRemoved`, to add
+    the star under the cursor to the focus curve or remove it.
+
+    Pressing 'p' the same way (also only while selection is enabled) emits
+    :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`,
+    marking the star that should be at the center of the image.  A pending
+    pointing offset (see
+    :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.show_pointing_offset`)
+    is drawn on every exposure the same size as the one it was measured on
+    (e.g. all of a sequence's, since they share the field): a cyan line from
+    the star (a circle) to the image center (a cross), labeled with the
+    offset -- above the star, or below it if the star is south of (below)
+    the center, so the label never crosses the line.
+
+    Recentering ('r') always fits the whole frame; it doesn't center on the
+    measured source.  Unlike 'm' and 'p', it works whether or not a sequence
+    is running.
+
+    While the mouse is over the image, a small readout just below and to the
+    right of the pointer shows the pixel under it and that pixel's *raw* value
+    (:attr:`~nickel_focus.focus.StepResult.raw`, before background
+    subtraction), as ``x, y: value``.  Pixel coordinates are 0-based, like
+    the measured centroids, 'm' selection, and Log messages (so one less
+    than FITS and DS9 give).  Near the canvas's right or bottom edge the
+    readout moves to the other side of the pointer so it stays fully visible.
+    It hides when the pointer leaves the image, and whenever the view or the
+    displayed exposure changes, until the mouse next moves.
     """
 
-    #: Emitted with the clicked ``(x, y)`` data coordinates, only while
-    #: selection is enabled (see
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'm' is
+    #: pressed, only while selection is enabled (see
     #: :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`).
     sourceSelected = QtCore.Signal(float, float)
+
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'p' is
+    #: pressed, only while selection is enabled (see
+    #: :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.set_selection_enabled`).
+    pointingStarSelected = QtCore.Signal(float, float)
+
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'a' is
+    #: pressed, only while selection is enabled.
+    starAdded = QtCore.Signal(float, float)
+
+    #: Emitted with the ``(x, y)`` data coordinates under the cursor when 'd' is
+    #: pressed, only while selection is enabled.
+    starRemoved = QtCore.Signal(float, float)
+
+    POINTING_COLOR = 'cyan'
+    """The color of a pending pointing offset's line, markers, and label."""
 
     #: Available stretch options, by name, as callables returning an
     #: `astropy.visualization.ImageNormalize` for a given data array.
@@ -58,10 +151,23 @@ class ImagePanel(QtWidgets.QWidget):
     #: already-good limits with a different stretch curve, to bring out
     #: faint structure (Sqrt/Asinh) or compress a large dynamic range
     #: (Log), without needing a separate interval choice for each. Kept
-    #: to short, single-word names -- a longer combo entry (e.g. the
-    #: originally-tried "ZScale + Sqrt") widens the whole combo box
-    #: enough to push the window past a smaller screen's available width
-    #: (see claude/GUI_IMPLEMENTATION.md's Phase 5 sub-phase 3 log).
+    #: to short, single-word names -- a longer combo entry (e.g.
+    #: "ZScale + Sqrt") widens the whole combo box, and with it the
+    #: window's minimum width, enough to overflow a smaller screen.
+    EXPOSURE_MIN_CHARACTERS = 3
+    """
+    The exposure drop-down's minimum width, in characters.  Its width doesn't
+    depend on its entries; beyond this minimum it takes whatever room the row
+    has.  Kept small so it never sets the window's minimum width.
+    """
+
+    READOUT_OFFSET = 14
+    """
+    Distance, in screen pixels, from the mouse pointer to the near corner of
+    the pixel-value readout, horizontally and vertically.  Large enough to
+    clear the arrow pointer.
+    """
+
     STRETCHES = {
         'ZScale': lambda data: ImageNormalize(
             data, interval=ZScaleInterval(), stretch=LinearStretch()
@@ -90,6 +196,10 @@ class ImagePanel(QtWidgets.QWidget):
         self._zoom = 1.0
         self._stretch_name = next(iter(self.STRETCHES))
         self._selection_enabled = False
+        self._pointing_offset = None  # the pending pointing.PointingOffset, or None
+        # The selected stars to box, by exposure path (see set_star_boxes);
+        # an exposure not in it has its own measured source boxed.
+        self._star_boxes = None
 
         self.figure = Figure(figsize=(5, 5))
         # No ticks/labels/title are ever drawn (the exposure/focus value
@@ -102,11 +212,42 @@ class ImagePanel(QtWidgets.QWidget):
         self.ax = self.figure.add_subplot(111)
         self.ax.set_xticks([])
         self.ax.set_yticks([])
+        # `imshow`'s equal aspect ratio shrinks the axes to fit the frame;
+        # anchoring them to the top ('N') keeps the image directly under
+        # the Exposure row above it, instead of centering it with a blank
+        # band above (and below) whenever the frame's shape doesn't match
+        # the canvas's. `ax.clear()` doesn't reset the anchor, so this only
+        # needs to be set once.
+        self.ax.set_anchor('N')
 
-        self.exposure_combo = QtWidgets.QComboBox()
+        self.exposure_combo = ElidingComboBox()
+        # The combo box's width must not follow its entries (whose object
+        # names can be long): size it from a fixed number of characters
+        # instead, and let the layout's stretch give it the rest of the row.
+        # A long entry is shortened in the middle (see ElidingComboBox).
+        self.exposure_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.exposure_combo.setMinimumContentsLength(self.EXPOSURE_MIN_CHARACTERS)
         self.stretch_combo = QtWidgets.QComboBox()
         self.stretch_combo.addItems(list(self.STRETCHES))
-        self.recenter_button = QtWidgets.QPushButton('Recenter')
+        self.stretch_combo.setToolTip('Image stretch')
+
+        # The pixel-value readout: a child of the canvas, so it floats over
+        # the image and moving it never redraws the figure.  It ignores the
+        # mouse, so it can't intercept the canvas's own mouse events.
+        self.readout = QtWidgets.QLabel(self.canvas)
+        self.readout.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # The same fixed-width font as the Log tab.
+        readout_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        readout_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+        readout_font.setFixedPitch(True)
+        self.readout.setFont(readout_font)
+        self.readout.setStyleSheet(
+            'QLabel { background-color: rgba(0, 0, 0, 180); color: white;'
+            ' border: 1px solid rgba(255, 255, 255, 120); padding: 1px 4px; }'
+        )
+        self.readout.hide()
 
         self.h_scroll = QtWidgets.QScrollBar(QtCore.Qt.Orientation.Horizontal)
         self.v_scroll = QtWidgets.QScrollBar(QtCore.Qt.Orientation.Vertical)
@@ -119,9 +260,7 @@ class ImagePanel(QtWidgets.QWidget):
         # proportion to it. Every other widget here defaults to 0 (no
         # extra space), so the combo box is the only one that grows.
         top.addWidget(self.exposure_combo, 1)
-        top.addWidget(QtWidgets.QLabel('Stretch:'))
         top.addWidget(self.stretch_combo)
-        top.addWidget(self.recenter_button)
 
         grid = QtWidgets.QGridLayout()
         grid.addWidget(self.canvas, 0, 0)
@@ -144,7 +283,6 @@ class ImagePanel(QtWidgets.QWidget):
         # more on what that means).
         self.exposure_combo.currentIndexChanged.connect(self._on_combo_changed)
         self.stretch_combo.currentTextChanged.connect(self._on_stretch_changed)
-        self.recenter_button.clicked.connect(self.recenter)
         self.h_scroll.valueChanged.connect(self._on_scroll)
         self.v_scroll.valueChanged.connect(self._on_scroll)
         # `mpl_connect` is matplotlib's *own* callback registry, not a
@@ -154,17 +292,73 @@ class ImagePanel(QtWidgets.QWidget):
         # matplotlib's own connection mechanism instead of `.connect()`.
         self.canvas.mpl_connect('scroll_event', self._on_wheel_zoom)
         self.canvas.mpl_connect('key_press_event', self._on_key_press)
+        self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
+        self.canvas.mpl_connect('axes_leave_event', self._hide_readout)
+        self.canvas.mpl_connect('figure_leave_event', self._hide_readout)
 
     # -- public API used by the Controller -------------------------------
 
+    @property
+    def current_result(self):
+        """The displayed :class:`~nickel_focus.focus.StepResult`, or None."""
+        return self._current
+
+    def show_pointing_offset(self, offset):
+        """
+        Draw a pending pointing offset (a
+        :class:`~nickel_focus.pointing.PointingOffset`), replacing any earlier
+        one.  It's drawn on whichever exposure is displayed, as long as that
+        exposure is the same size as the one it was measured on (so the star
+        and center positions apply to it).
+        """
+        self._pointing_offset = offset
+        if self._current is not None:
+            self._render(reset_view=False)
+
+    def set_star_boxes(self, boxes):
+        """
+        Set the selected stars to box on each exposure, replacing any earlier
+        set, and redraw.
+
+        Parameters
+        ----------
+        boxes : :obj:`dict`
+            For each exposure's path, its selected stars: objects with
+            ``centroid``, ``fwhm``, and ``is_outlier`` (e.g.
+            :class:`~nickel_focus.selection.StarPoint`), possibly none.  An
+            exposure missing from it has its own measured source boxed.
+        """
+        self._star_boxes = boxes
+        if self._current is not None:
+            self._render(reset_view=False)
+
+    def clear_pointing_offset(self):
+        """Remove the pending pointing offset, if any, from the display."""
+        if self._pointing_offset is None:
+            return
+        self._pointing_offset = None
+        if self._current is not None:
+            self._render(reset_view=False)
+
     def set_selection_enabled(self, enabled):
         """
-        Enable or disable click-to-select-source (§5.6). The Controller is
+        Enable or disable source selection with the 'm' key, and pointing-star
+        selection with the 'p' key. The Controller is
         responsible for calling this appropriately (enabled before a
         sequence/single exposure starts or after one finishes, disabled while
         one is running).
         """
         self._selection_enabled = bool(enabled)
+
+    @staticmethod
+    def exposure_label(result):
+        """
+        The exposure drop-down's entry for ``result``: the file name and the
+        exposure's object name (e.g. ``'n3246.fits - Pointing12: focus=345.0'``),
+        or, if the file records none, its focus value instead.
+        """
+        detail = result.object_name or f'focus={result.focus_value:.1f}'
+        return f'{result.exposure.name} - {detail}'
 
     def add_result(self, result):
         """
@@ -180,9 +374,8 @@ class ImagePanel(QtWidgets.QWidget):
         self._results.insert(insert_at, result)
         self._latest_result = result
 
-        label = f'{result.exposure.stem} — Focus {result.focus_value:.0f}'
         self.exposure_combo.blockSignals(True)
-        self.exposure_combo.insertItem(insert_at, label)
+        self.exposure_combo.insertItem(insert_at, self.exposure_label(result))
         if tracking_latest:
             self.exposure_combo.setCurrentIndex(insert_at)
         self.exposure_combo.blockSignals(False)
@@ -199,7 +392,7 @@ class ImagePanel(QtWidgets.QWidget):
         :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.add_result` if no
         entry for that exposure exists yet.  Used when
         :meth:`~nickel_focus.focus.FocusSequence.reanalyze` re-measures
-        exposures already on display (§5.6).
+        exposures already on display (e.g., after a new source is selected).
         """
         existing_index = next(
             (i for i, r in enumerate(self._results) if r.exposure == result.exposure), None
@@ -215,9 +408,8 @@ class ImagePanel(QtWidgets.QWidget):
         if was_latest:
             self._latest_result = result
 
-        label = f'{result.exposure.stem} — Focus {result.focus_value:.0f}'
         self.exposure_combo.blockSignals(True)
-        self.exposure_combo.setItemText(existing_index, label)
+        self.exposure_combo.setItemText(existing_index, self.exposure_label(result))
         self.exposure_combo.blockSignals(False)
 
         if was_current:
@@ -260,30 +452,18 @@ class ImagePanel(QtWidgets.QWidget):
         self._latest_result = None
         self._current = None
         self._data_shape = None
+        self._pointing_offset = None
+        self._star_boxes = None
         self.exposure_combo.blockSignals(True)
         self.exposure_combo.clear()
         self.exposure_combo.blockSignals(False)
+        self._hide_readout()
         self.ax.clear()
         self.canvas.draw_idle()
 
     def recenter(self):
-        """Reset to a fit-to-view zoom (GUI_DESIGN.md §5.2)."""
+        """Reset to a fit-to-view zoom (the 'r' key)."""
         self.set_zoom(1.0)
-
-    def get_settings_state(self):
-        """
-        Return the persistable display preference (currently just the stretch
-        choice) as a flat :obj:`dict`, suitable for a settings store like
-        :class:`PySide6.QtCore.QSettings`.
-        """
-        return {'stretch': self._stretch_name}
-
-    def set_settings_state(self, state):
-        """Apply a settings :obj:`dict` from
-        :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.get_settings_state`."""
-        name = state.get('stretch')
-        if name in self.STRETCHES:
-            self.stretch_combo.setCurrentText(name)
 
     def set_zoom(self, zoom):
         """Set the display magnification (``1.0`` fits the whole frame)."""
@@ -324,6 +504,7 @@ class ImagePanel(QtWidgets.QWidget):
         leading underscore is just this codebase's way of flagging
         "intentionally unused."
         """
+        self._hide_readout()
         if self._current is not None:
             self._apply_view_limits()
             self.canvas.draw_idle()
@@ -370,17 +551,99 @@ class ImagePanel(QtWidgets.QWidget):
 
     def _on_key_press(self, event):
         """
-        matplotlib ``key_press_event`` callback: pressing 'm' over the canvas,
-        while selection is enabled, emits
-        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`
-        with the data coordinates under the cursor (see the class docstring for
-        why a key press rather than a click).
+        matplotlib ``key_press_event`` callback.
+
+        - 'r' (lowercase only) recenters (see
+          :meth:`~nickel_focus.gui.views.image_panel.ImagePanel.recenter`),
+          at any time.
+        - 'm' over the image, while selection is enabled, emits
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`
+          with the data coordinates under the cursor (see the class docstring
+          for why a key press rather than a click).
+        - 'a', 'd', and 'p', likewise, emit
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starAdded`,
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starRemoved`,
+          and
+          :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`.
         """
-        if event.key != 'm' or not self._selection_enabled or event.inaxes != self.ax:
+        if event.key == 'r':
+            self.recenter()
+            return
+        signals = {
+            'm': self.sourceSelected, 'a': self.starAdded, 'd': self.starRemoved,
+            'p': self.pointingStarSelected,
+        }
+        if event.key not in signals or not self._selection_enabled or event.inaxes != self.ax:
             return
         if event.xdata is None or event.ydata is None:
             return
-        self.sourceSelected.emit(float(event.xdata), float(event.ydata))
+        signals[event.key].emit(float(event.xdata), float(event.ydata))
+
+    def readout_text(self, xdata, ydata):
+        """
+        The pixel-value readout's text for data coordinates ``(xdata,
+        ydata)``: ``'x, y: value'``, with the 0-based pixel containing that
+        point and its raw value, or just ``'x, y'`` if the displayed exposure
+        has no raw data.  None if nothing is displayed or the point is off the
+        image.
+        """
+        if self._current is None or xdata is None or ydata is None:
+            return None
+        # imshow centers pixel (i, j) on the integer coordinates (i, j).
+        col, row = round(xdata), round(ydata)
+        ny, nx = self._current.frame.shape
+        if not (0 <= col < nx and 0 <= row < ny):
+            return None
+        if self._current.raw is None:
+            return f'{col}, {row}'
+        return f'{col}, {row}: {self._current.raw[row, col]:.7g}'
+
+    def _on_mouse_move(self, event):
+        """
+        matplotlib ``motion_notify_event`` callback: show the pixel-value
+        readout next to the pointer, or hide it if the pointer isn't over the
+        image.
+        """
+        text = self.readout_text(event.xdata, event.ydata) \
+            if event.inaxes == self.ax else None
+        if text is None:
+            self._hide_readout()
+            return
+        self.readout.setText(text)
+        self.readout.adjustSize()
+        # matplotlib reports event.x/y in physical pixels from the canvas's
+        # bottom-left; Qt positions widgets in logical pixels from its top-left.
+        ratio = self.canvas.device_pixel_ratio
+        x = event.x / ratio
+        y = self.canvas.height() - event.y / ratio
+        self.readout.move(*self._readout_position(x, y))
+        self.readout.show()
+        self.readout.raise_()
+
+    def _readout_position(self, x, y):
+        """
+        Top-left corner, in canvas widget coordinates, for the readout given
+        the pointer at ``(x, y)``: below and to the right of the pointer,
+        flipped to the left and/or above it where it would otherwise extend
+        past the canvas's right or bottom edge.
+        """
+        offset = self.READOUT_OFFSET
+        width, height = self.readout.width(), self.readout.height()
+        left = x + offset
+        if left + width > self.canvas.width():
+            left = x - offset - width
+        top = y + offset
+        if top + height > self.canvas.height():
+            top = y - offset - height
+        return max(0, round(left)), max(0, round(top))
+
+    def _hide_readout(self, _event=None):
+        """
+        Hide the pixel-value readout.  Also the matplotlib
+        ``axes_leave_event``/``figure_leave_event`` callback, whose event isn't
+        needed.
+        """
+        self.readout.hide()
 
     def _render(self, reset_view):
         """
@@ -392,6 +655,7 @@ class ImagePanel(QtWidgets.QWidget):
         (e.g.  just changing the stretch on the same image).
         """
         result = self._current
+        self._hide_readout()
         self.ax.clear()
         self.ax.set_xticks([])
         self.ax.set_yticks([])
@@ -402,27 +666,75 @@ class ImagePanel(QtWidgets.QWidget):
 
         data = result.frame
         normalize = self.STRETCHES[self._stretch_name](data)
-        self.ax.imshow(data, cmap='gray', origin='lower', norm=normalize)
+        # Row 0 at the top (with the y-axis inverted in _apply_view_limits),
+        # which puts North up and East to the left on the sky.
+        self.ax.imshow(data, cmap='gray', origin='upper', norm=normalize)
 
-        stamp_size = int(result.fwhm * 10)
-        half = stamp_size / 2
-        color = 'yellow' if result.is_outlier else 'red'
-        rect = patches.Rectangle(
-            (result.centroid[0] - half, result.centroid[1] - half), stamp_size, stamp_size,
-            linewidth=2, edgecolor=color, facecolor='none'
-        )
-        self.ax.add_patch(rect)
-        if result.is_outlier:
-            self.ax.text(
-                result.centroid[0], result.centroid[1] + half + 5, 'Outlier centroid',
-                color='yellow', fontsize=10, ha='center'
-            )
+        stars = None if self._star_boxes is None else self._star_boxes.get(result.exposure)
+        if stars is None:
+            # Its own measured source; an exposure that couldn't be measured
+            # has none.
+            stars = [result] if result.measured else []
+        for star in stars:
+            self._draw_star_box(star.centroid, star.fwhm, star.is_outlier)
+
+        offset = self._pointing_offset
+        if offset is not None and pointing.image_center(data.shape) == offset.center:
+            self._draw_pointing_offset(offset)
 
         if reset_view:
             self._data_shape = data.shape
             self._update_scrollbar_ranges()
         self._apply_view_limits()
         self.canvas.draw_idle()
+
+    def _draw_star_box(self, centroid, fwhm, is_outlier):
+        """
+        Box a star, STAMP_SIZE_FWHM x its FWHM across: red, or yellow with an "Outlier
+        centroid" label above it if its position is an outlier.
+        """
+        stamp_size = int(fwhm * STAMP_SIZE_FWHM)
+        half = stamp_size / 2
+        color = 'yellow' if is_outlier else 'red'
+        rect = patches.Rectangle(
+            (centroid[0] - half, centroid[1] - half), stamp_size, stamp_size,
+            linewidth=2, edgecolor=color, facecolor='none'
+        )
+        self.ax.add_patch(rect)
+        if is_outlier:
+            # Above the box: y increases downward on screen.
+            self.ax.text(
+                centroid[0], centroid[1] - half - 5, 'Outlier centroid',
+                color='yellow', fontsize=10, ha='center', va='bottom'
+            )
+
+    def _draw_pointing_offset(self, offset):
+        """
+        Draw ``offset``: a line from the star (a circle) to the image center
+        (a cross), labeled with the offset beside the star, on the side away
+        from the line.
+        """
+        (x_star, y_star), (x0, y0) = offset.star, offset.center
+        color = self.POINTING_COLOR
+        self.ax.plot([x_star, x0], [y_star, y0], color=color, linewidth=1.5)
+        self.ax.plot(
+            [x_star], [y_star], marker='o', markersize=12, markerfacecolor='none',
+            markeredgecolor=color, markeredgewidth=1.5, linestyle='none'
+        )
+        self.ax.plot(
+            [x0], [y0], marker='+', markersize=14, markeredgecolor=color,
+            markeredgewidth=1.5, linestyle='none'
+        )
+        # y increases downward on screen, so a star south of the center
+        # (larger y) has the line running up from it: put the label below
+        # the star there, and above it otherwise.  Offset in points, so the
+        # label clears the circle whatever the zoom.
+        below = y_star > y0
+        self.ax.annotate(
+            offset.text(), (x_star, y_star), xytext=(0, -10 if below else 10),
+            textcoords='offset points', color=color, fontsize=10, ha='center',
+            va='top' if below else 'bottom'
+        )
 
     def _view_extent(self):
         """Return ``(view_w, view_h)`` in data pixels at the current zoom."""
@@ -434,9 +746,9 @@ class ImagePanel(QtWidgets.QWidget):
         Set both scrollbars' values at once, clamped to their valid range,
         without triggering
         :meth:`~nickel_focus.gui.views.image_panel.ImagePanel._on_scroll` for
-        either -- used whenever this panel repositions the view itself
-        (recentering on a data point, panning by right-clicking, etc.) rather
-        than in response to the user actually dragging a scrollbar.  Signals are
+        either -- used whenever this panel repositions the view itself (zooming
+        around the cursor, or keeping the view fixed while switching exposures)
+        rather than in response to the user actually dragging a scrollbar.  Signals are
         blocked because
         :meth:`~nickel_focus.gui.views.image_panel.ImagePanel._on_scroll` would
         otherwise fire once per bar and redraw twice for what's really one
@@ -467,7 +779,9 @@ class ImagePanel(QtWidgets.QWidget):
     def _apply_view_limits(self):
         """
         Set the matplotlib axes' visible data range from the current scrollbar
-        positions and zoom level.  Doesn't redraw the canvas itself -- callers
+        positions and zoom level.  The y-axis is inverted -- row 0 at the top
+        -- so the image shows North up (and the vertical scrollbar's top shows
+        the top of the image).  Doesn't redraw the canvas itself -- callers
         are responsible for that
         (:meth:`matplotlib.backend_bases.FigureCanvasBase.draw_idle`), since
         this is often one of several changes made before a single redraw.
@@ -476,4 +790,4 @@ class ImagePanel(QtWidgets.QWidget):
         x0 = self.h_scroll.value()
         y0 = self.v_scroll.value()
         self.ax.set_xlim(x0, x0 + view_w)
-        self.ax.set_ylim(y0, y0 + view_h)
+        self.ax.set_ylim(y0 + view_h, y0)

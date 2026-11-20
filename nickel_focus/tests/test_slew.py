@@ -1,18 +1,16 @@
 """
-Tests for the ktl-free part of :mod:`slew`: :func:`slew.find_nearest_target`.
-
-:class:`slew.NickelTelescopePointing` is not tested directly here, for
-the same reason :class:`focus.Focus`/:class:`focus.Exposure` aren't (see
-``fake_hardware.py``): it talks to real ``ktl`` keywords, which can only
-be validated at the telescope. It's replaced wholesale by
-``fake_hardware.FakeTelescopePointing`` wherever it's needed --
-see ``test_slew_to_nearest_cli.py``.
+Tests for :mod:`slew`: :class:`slew.NickelTelescopePointing`, run on the real
+service class over the fake ``ktl`` (see ``fake_ktl.py``), and
+:func:`slew.find_nearest_target`.
 """
+import logging
+
 from astropy.coordinates import Angle, SkyCoord
 import pytest
 
 from nickel_focus import slew
 from nickel_focus import starlist
+from nickel_focus.services import KTLTimeoutError, NickelPoco
 
 
 def _write_starlist(tmp_path, lines):
@@ -104,3 +102,65 @@ class TestFindNearestTarget:
             'with no file= given, the default packaged pointing/focus catalog should be searched'
         )
         assert isinstance(ra, Angle), 'ra should be an Angle for the default catalog too'
+
+
+class TestNickelTelescopePointing:
+    """`slew.NickelTelescopePointing`, over the simulated telescope."""
+
+    def test_current(self, fake_telescope):
+        fake_telescope.ra, fake_telescope.dec = 5.5, 30.25
+
+        current = slew.NickelTelescopePointing(NickelPoco()).current
+
+        assert current.ra.hour == pytest.approx(5.5), 'the current RA should be read in hours'
+        assert current.dec.deg == pytest.approx(30.25), 'the current Dec should be read in degrees'
+
+    def test_slew_writes_binary_radians(self, fake_telescope):
+        telescope = slew.NickelTelescopePointing(NickelPoco())
+
+        telescope.slew_to(Angle('05:30:00', unit='hourangle'), Angle('-20:15:00', unit='deg'))
+
+        rad = fake_telescope.keyword('nickelpoco', 'POCORAD')
+        decd = fake_telescope.keyword('nickelpoco', 'POCODECD')
+        assert rad.writes == [pytest.approx(Angle(5.5, unit='hourangle').radian)], \
+            'the target RA should be written in radians'
+        assert decd.writes == [pytest.approx(Angle(-20.25, unit='deg').radian)], \
+            'the target Dec should be written in radians, keeping its sign'
+        assert rad.binary_writes == [True] and decd.binary_writes == [True], \
+            'the target should be written as binary values, not ascii'
+        assert fake_telescope.slew_calls == [(pytest.approx(5.5), pytest.approx(-20.25))], \
+            'the simulated telescope should receive the requested target'
+
+    def test_slew_logs_the_target_in_sexagesimal(self, fake_telescope, caplog):
+        telescope = slew.NickelTelescopePointing(NickelPoco())
+
+        with caplog.at_level(logging.INFO, logger='nickel_focus'):
+            telescope.slew_to(5.5, -0.5)
+
+        assert any('Moving to RA=05:30:00.00, Dec=-00:30:00.00' in r.getMessage()
+                   for r in caplog.records), \
+            'the target should be logged in sexagesimal, with the sign of a small negative Dec'
+        assert fake_telescope.ra == pytest.approx(5.5), 'the simulated telescope should arrive'
+
+    @pytest.mark.parametrize('flag,message', [
+        ('movement_allowed', 'Telescope movement is disabled!'),
+        ('tracking_on', 'Tracking is disabled!'),
+        ('ready', 'Telescope is not ready to move to a new target!'),
+        ('reaches_target', 'Telescope failed to make it to target within 5 min.'),
+    ])
+    def test_slew_failures(self, fake_telescope, flag, message):
+        setattr(fake_telescope, flag, False)
+        telescope = slew.NickelTelescopePointing(NickelPoco())
+
+        with pytest.raises(ValueError, match=message):
+            telescope.slew_to(5.5, 20.25)
+        if flag != 'reaches_target':
+            assert fake_telescope.slew_calls == [], 'a failed check must not command a slew'
+
+    def test_slew_reports_a_service_that_does_not_reply(self, fake_telescope):
+        telescope = slew.NickelTelescopePointing(NickelPoco())
+        fake_telescope.keyword('nickelpoco', 'POCTRCK').responsive = False
+
+        with pytest.raises(KTLTimeoutError, match='No reply from nickelpoco.POCTRCK'):
+            telescope.slew_to(5.5, 20.25)
+        assert fake_telescope.slew_calls == [], 'no slew should be commanded without a reply'

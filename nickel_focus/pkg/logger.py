@@ -75,6 +75,16 @@ def clear_text_color(text:str) -> str:
     return re.compile(r'\x1b[^m]*m').sub("", text)
 
 
+LEVEL_COLORS = {
+    'debug': [116, 173, 209],
+    'info': [49, 54, 149],
+    'warning': [253, 174, 97],
+    'error': [215, 48, 39],
+    'critical': [165, 0, 38],
+}
+"""RGB color of each logging level's name in console output (and so in the GUI's Log tab)."""
+
+
 class StreamFormatter(logging.Formatter):
     """
     Custom :class:`logging.Formatter` for the stream handler.
@@ -87,14 +97,7 @@ class StreamFormatter(logging.Formatter):
 
     def format(self, record):
 
-        # RGB colors for the logging levels
-        level_colors = {
-            'debug': [116, 173, 209],
-            'info': [49, 54, 149],
-            'warning': [253, 174, 97],
-            'error': [215, 48, 39],
-            'critical': [165, 0, 38],
-        }
+        level_colors = LEVEL_COLORS
         frame_color = level_colors['debug']
 
         rec = copy.copy(record)
@@ -135,26 +138,20 @@ class FileFormatter(logging.Formatter):
         logging.Formatter.__init__(self, fmt, datefmt='%Y-%m-%d %H:%M:%S')
 
 
-class GuiFormatter(logging.Formatter):
-    """
-    Custom :class:`logging.Formatter` for handlers feeding a GUI widget: plain
-    (no ANSI color codes, which would render as literal escape junk in a text
-    widget) and terser than :class:`~nickel_focus.pkg.logger.FileFormatter` (no
-    timestamp or calling-frame location), since it's meant for a narrow panel
-    that scrolls live.
-    """
-
-    base_fmt = "%(levelname)8s | %(message)s"
-
-    def __init__(self, fmt=base_fmt):
-        logging.Formatter.__init__(self, fmt)
-
-
 class NickelFocusLogger(logging.Logger):
     """
     Custom logging system for the Nickel focus software.
     """
     _excepthook_orig = None
+
+    ktl_level = 'warn'
+    """
+    How much of the KTL package's own log to pass on to this log: ``'warn'``
+    (warnings and errors), ``'notice'`` (adds notices), or ``'debug'``
+    (everything).  Set from the verbosity by the command-line scripts (see
+    :meth:`convert_verbosity_to_ktl_level`), and applied when the first KTL
+    service object is constructed (see :mod:`nickel_focus.services.base`).
+    """
 
     def init(self,
         level: int = logging.INFO,
@@ -277,7 +274,7 @@ class NickelFocusLogger(logging.Logger):
         # Call the original exception hook
         self._excepthook_orig(etype, value, trace)
 
-    @staticmethod        
+    @staticmethod
     def convert_verbosity_to_logging_level(v):
         """
         Given a "verbosity level," return the logging level.
@@ -285,27 +282,60 @@ class NickelFocusLogger(logging.Logger):
         Parameters
         ----------
         v : int
-            Integer verbosity level (0, 1, or 2)
+            Integer verbosity level (0, 1, 2, or 3)
 
         Returns
         -------
         int
-            Corresponding logging level
+            Corresponding logging level: warnings (0), info (1), or debug (2
+            and 3; level 3 differs only in how much of the KTL package's own
+            log is included, see :meth:`convert_verbosity_to_ktl_level`).
 
         Raises
         ------
         ValueError
-            Raised if the input verbosity level is not 0, 1, or 2.
+            Raised if the input verbosity level is not 0, 1, 2, or 3.
         """
         match v:
             case 0:
                 return logging.WARNING
             case 1:
                 return logging.INFO
-            case 2:
+            case 2 | 3:
                 return logging.DEBUG
             case _:
-                raise ValueError(f'Verbosity level must be 0, 1, or 2, not {v}.')
+                raise ValueError(f'Verbosity level must be 0, 1, 2, or 3, not {v}.')
+
+    @staticmethod
+    def convert_verbosity_to_ktl_level(v):
+        """
+        Given a "verbosity level," return how much of the KTL package's own log
+        to include (see :attr:`ktl_level`).
+
+        Parameters
+        ----------
+        v : int
+            Integer verbosity level (0, 1, 2, or 3)
+
+        Returns
+        -------
+        str
+            ``'warn'`` (0 and 1), ``'notice'`` (2), or ``'debug'`` (3).
+
+        Raises
+        ------
+        ValueError
+            Raised if the input verbosity level is not 0, 1, 2, or 3.
+        """
+        match v:
+            case 0 | 1:
+                return 'warn'
+            case 2:
+                return 'notice'
+            case 3:
+                return 'debug'
+            case _:
+                raise ValueError(f'Verbosity level must be 0, 1, 2, or 3, not {v}.')
 
     def makeRecord(
             self, name, level, pathname, lineno, msg, args, exc_info, func=None, extra=None,

@@ -2,13 +2,14 @@
 The :class:`PySide6.QtCore.QThread` engine that drives a
 :class:`~nickel_focus.focus.FocusSequence` off the GUI thread.
 
-See GUI_DESIGN.md §4.3: every hardware call in
-:class:`~nickel_focus.scripts.focus.NickelFocus` is blocking, and a real
-exposure takes seconds to tens of seconds, so running a sequence directly on the
-GUI's event-loop thread would freeze the whole interface.
+Every hardware call made by :class:`~nickel_focus.focus.Focus` and
+:class:`~nickel_focus.exposure.Exposure` is blocking, and a real exposure takes
+seconds to tens of seconds, so running a sequence directly on the GUI's
+event-loop thread would freeze the whole interface.
 :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` runs it here instead
 and reports progress back via Qt signals.
 """
+from nickel_focus import log
 from nickel_focus.gui.qt import QtCore
 
 
@@ -18,19 +19,31 @@ class FocusWorker(QtCore.QThread):
     thread.
 
     A new :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` is expected
-    to be created for each run (start a sequence, reanalyze one) rather than
-    reused, matching :class:`PySide6.QtCore.QThread`'s own expectation that
-    :meth:`PySide6.QtCore.QThread.start` is called at most once per instance.
+    to be created for each run (run a sequence, reanalyze one, or take a single
+    exposure) rather than reused, matching :class:`PySide6.QtCore.QThread`'s
+    own expectation that :meth:`PySide6.QtCore.QThread.start` is called at most
+    once per instance.
+
+    A run that takes exposures (a live sequence, or a single exposure) always
+    records them: the camera's ``RECORD`` setting is read first, set to
+    ``Yes`` before every exposure (in case it's changed elsewhere, e.g. from
+    the data-acquisition GUI, during the run), and written back to its
+    original value once the run ends, however it ends.  (Without recording,
+    every exposure may be written to the same scratch file, which the rest of
+    the code doesn't yet handle.)
 
     Parameters
     ----------
     focus_sequence : :class:`~nickel_focus.focus.FocusSequence`
         The sequence to drive.  Must already be constructed (e.g., a
         :class:`~nickel_focus.focus.GridFocusSequence` or
-        :class:`~nickel_focus.focus.ArchiveFocusSequence`); this class only
-        calls :meth:`~nickel_focus.focus.FocusSequence.step`,
-        :meth:`~nickel_focus.focus.FocusSequence.reanalyze`, and
-        :meth:`~nickel_focus.focus.FocusSequence.fit_best_focus` on it.
+        :class:`~nickel_focus.focus.ArchiveFocusSequence`); depending on
+        ``mode``, this class calls its
+        :meth:`~nickel_focus.focus.FocusSequence.step`,
+        :meth:`~nickel_focus.focus.FocusSequence.reanalyze`, or
+        :meth:`~nickel_focus.focus.FocusSequence.take_single_exposure`, then
+        :meth:`~nickel_focus.focus.FocusSequence.fit_best_focus` for the first
+        two, and configures its exposure hardware (if any) before stepping.
     method : :obj:`str`, :obj:`tuple`, optional
         The photometry method to use; see
         :func:`~nickel_focus.photometry.image_quality`.
@@ -40,16 +53,15 @@ class FocusWorker(QtCore.QThread):
         replaying archived ones), ``'reanalyze'`` to re-run photometry on
         exposures already collected
         (:meth:`~nickel_focus.focus.FocusSequence.reanalyze`), without taking
-        any new ones, or ``'single'`` to take one confirmation exposure at
-        ``focus_value``
-        (:meth:`~nickel_focus.focus.FocusSequence.take_single_exposure`) -- used
-        for "Move to Best Focus" (GUI_DESIGN.md §5.4) and the standalone
-        single-exposure workflow (§5.5).
+        any new ones, or ``'single'`` to take one exposure at ``focus_value``
+        (:meth:`~nickel_focus.focus.FocusSequence.take_single_exposure`) -- the
+        Single tab's action, whether at the most recent fitted best focus (its
+        default) or any other focus value the user enters.
     exp_kwargs : :obj:`dict`, optional
         Exposure settings (``record``, ``speed``, ``binning``, ``exptime``)
-        applied via :meth:`~nickel_focus.focus.ExposureConfig.configure` before
-        stepping, matching what the old CLI-only
-        :meth:`~nickel_focus.focus.FocusSequence.execute` did.  Meaningful for
+        applied via :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure` before
+        stepping, matching
+        :meth:`~nickel_focus.focus.FocusSequence.execute`.  Meaningful for
         ``mode='step'``/``'single'`` against a sequence with real (or fake)
         exposure hardware; ignored for ``mode='reanalyze'`` (no new exposures
         are taken) and harmless for archive/replay sequences (which have no
@@ -111,7 +123,7 @@ class FocusWorker(QtCore.QThread):
     def request_stop(self):
         """
         Ask the sequence to stop after the exposure currently in progress
-        finishes -- never mid-exposure (GUI_DESIGN.md §4.3). Has no effect once
+        finishes -- never mid-exposure. Has no effect once
         the run has already finished.
         """
         self.stop_requested = True
@@ -129,16 +141,64 @@ class FocusWorker(QtCore.QThread):
         connect to GUI-thread slots: Qt automatically queues the delivery back
         onto the GUI thread's event loop instead of calling the slot
         immediately, so widgets are never touched from the wrong thread.
+
+        A run that takes exposures is wrapped in
+        :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker._recording`'s
+        save, record, and restore (see the class docstring).
         """
         self.stop_requested = False
+        exposure = getattr(self.focus_sequence, '_exposure', None)
+        if self.mode == 'reanalyze' or exposure is None:
+            self._run()
+            return
+        self._recording(exposure.cfg)
 
+    def _recording(self, cfg):
+        """
+        Run with every exposure recorded: note the camera's ``RECORD``
+        setting, have the sequence set it to ``Yes`` before each exposure (see
+        :attr:`~nickel_focus.focus.FocusSequence.record`), run, then write the
+        original setting back, whatever happened.
+        """
+        try:
+            original = cfg.recording()
+        except Exception as e:
+            self.focusSequenceFailed.emit(
+                f'Could not read whether the camera is recording (RECORD): {e}', e
+            )
+            return
+        if not original:
+            log.info(
+                'Recording (RECORD) is off; turning it on for these exposures, and back off '
+                'afterward.'
+            )
+        self.focus_sequence.record = True
+        try:
+            self._run()
+        finally:
+            self.focus_sequence.record = None
+            try:
+                cfg.set_recording(original)
+            except Exception as e:
+                log.error(
+                    'Could not restore the camera\'s recording setting (RECORD = '
+                    f'{"Yes" if original else "No"}): {e}', exc_info=e
+                )
+            else:
+                if not original:
+                    log.info('Recording (RECORD) turned back off.')
+
+    def _run(self):
+        """Drive the run itself (see :meth:`run`)."""
         if self.mode == 'single':
             try:
                 result = self.focus_sequence.take_single_exposure(
                     self.focus_value, method=self.method, **self.exp_kwargs
                 )
             except Exception as e:
-                self.focusSequenceFailed.emit(f'Could not move to best focus: {e}', e)
+                self.focusSequenceFailed.emit(
+                    f'Single exposure at focus {self.focus_value:.0f} failed: {e}', e
+                )
                 return
             self.singleExposureFinished.emit(result)
             return

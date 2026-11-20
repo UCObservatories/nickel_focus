@@ -9,6 +9,24 @@ changed and why.
 
 Each phase gets its own section below, added as it's completed.
 
+**Reading note (added 2026-11-16).** Entries are a chronological record and
+use the names and paths current *when they were written*. Three later
+changes affect how earlier entries read:
+
+- **Package relocation (2026-08-24/25)** -- top-level `gui/`, `scripts/`,
+  and `tests/` moved into the `nickel_focus` package, the Model code split
+  out of `scripts/focus.py` into `nickel_focus/focus.py` (plus
+  `photometry.py`/`quadratic.py`), and `gui/main.py` was replaced by
+  `gui/launcher.py` and the `nickel_focus_gui` console script. See
+  "Package relocation" below.
+- **Worker/sequence naming disambiguation (2026-09-01)** -- `SequenceWorker`
+  became `FocusWorker`, `start_sequence` became `start_focus_sequence`,
+  and so on. See "Worker/sequence naming disambiguation" below for the
+  full mapping.
+- **`GUI_DESIGN.md` was not revised** as planned above. It was left as the
+  original design record, and `GUI_REFERENCE.md` (planned under the name
+  `GUI_SUMMARY.md`; see "Code-quality pass") documents the GUI as built.
+
 ## Phase 1: Model refactor
 
 **Design doc reference:** §9 Phased plan, item 1 ("Model refactor"); test
@@ -2111,6 +2129,8 @@ skipped) is complete.
 
 ## Code-quality pass (pre-GUI_SUMMARY.md)
 
+*(The planned `GUI_SUMMARY.md` was written as `claude/GUI_REFERENCE.md`.)*
+
 Per request, ahead of writing a `GUI_SUMMARY.md` (replacing the earlier
 plan to reconcile `GUI_DESIGN.md` itself, which is being left as-is): a
 pass over every file in `gui/` for conciseness/modularity, complete
@@ -2173,6 +2193,31 @@ turning on HTML interpretation.
 No behavior changes anywhere in this pass -- confirmed by running the
 full suite (unchanged at 120 tests) and the Qt-free boundary check
 (unchanged at 26 pass) after every file, not just once at the end.
+
+## Package relocation (2026-08-24/25)
+
+*(Entry added 2026-11-16, reconstructed from git history: `220fc1b`,
+`5b85e4a`, `09764c6`, `817a84e`.)*
+
+The flat repo layout assumed by every entry above (top-level `gui/`,
+`scripts/`, `tests/`) was restructured into an installable `nickel_focus`
+package -- the restructuring `GUI_DESIGN.md` §8 flagged as future,
+out-of-scope work:
+
+- `gui/` → `nickel_focus/gui/`, `scripts/` → `nickel_focus/scripts/`,
+  `tests/` → `nickel_focus/tests/` (`220fc1b`).
+- The Model code moved out of the CLI script: `scripts/focus.py`'s
+  `Focus`/`Exposure`/`FocusSequence` family became `nickel_focus/focus.py`,
+  and `photometry.py`/`quadratic.py` moved to `nickel_focus/` alongside it;
+  `nickel_focus/scripts/focus.py` kept only the CLI (`NickelFocus`)
+  (`5b85e4a`).
+- `gui/main.py` was replaced by `gui/launcher.py` (`build_app()`/
+  `build_window()`) plus `nickel_focus/scripts/focus_gui.py`, the
+  `nickel_focus_gui` console script that wires up the `Controller` and runs
+  the event loop (`09764c6`, `817a84e`).
+
+Paths in earlier entries (e.g. `scripts/focus.py` for the sequence classes,
+`gui/main.py`, `tests/gui/...`) refer to the pre-relocation layout.
 
 ## Phase 6: Slew tab (pointing workflow)
 
@@ -2270,3 +2315,1291 @@ relying on pytest's implicit rootdir-based `sys.path` insertion), so
 `from nickel_focus.tests.fake_hardware import ...` -- consistent with
 this codebase's no-bare-imports convention and needed for the new
 `test_slew_worker.py`'s equivalent import to resolve the same way.
+
+## Layout tightening (2026-08-27 to 2026-09-01)
+
+*(Entry added 2026-11-16, reconstructed from git history: `36e92c7`,
+`be39732`.)*
+
+Two rounds of layout work after Phase 6 that change several things
+described in earlier entries:
+
+- **Untitled group boxes on every action tab.** Single/Grid/Auto/Replay
+  now lay their fields out as two side-by-side, untitled `QGroupBox`
+  sub-panels (new `_group_box()` helper) instead of the bare two-column
+  `QFormLayout` row from "Two-column tab layout to compress height
+  further"; `_two_column_row()` survives only for the Slew tab's paired
+  RA/Dec rows. The Slew tab itself was regrouped into two untitled
+  panels (position/target plus "Move to Target" on the left; starlist,
+  search pattern, and a single row of "Find nearest" buttons labeled
+  "Object"/"Pointing *"/"Focusing *" on the right), with short centered
+  section labels (`_add_centered_label()`) instead of per-field
+  prefixes. A new `_tighten_margins()` shrinks the style's default
+  11px/6px margins/spacing to 6px/2px on every box and page.
+- **Per-tab scrolling replaces the whole-panel scroll area.** The
+  `QScrollArea` that `MainWindow` wrapped around the entire control
+  panel (with its explicit minimum width/height floor, from "Window
+  opens larger than the screen"/"Control panel width balloons") is gone.
+  Instead `_tab_widget()` makes each tab page its own frameless
+  `QScrollArea`, so the tab bar never scrolls out of view and the panel
+  needs no minimum-size floor of its own.
+- **Initial sizing.** `FocusControlPanel.minimum_height_excluding_help()`
+  (`36e92c7`) became `preferred_height_excluding_help()` (`be39732`), used
+  only for the vertical splitter's *initial* split -- the curve panel
+  gets everything else -- rather than as a hard minimum. `MainWindow`
+  gained a one-time `showEvent()` that gives the image panel a square
+  initial share of the window width (the geometry isn't valid any
+  earlier).
+
+## Worker/sequence naming disambiguation (2026-09-01)
+
+*(Entry added 2026-11-16, reconstructed from git history: `5339548`.)*
+
+Once Phase 6 added `SlewWorker`, the generic "worker"/"sequence" names
+became ambiguous, so the focus-sequence side was renamed throughout
+`gui/`, its tests, and `GUI_REFERENCE.md`. Earlier entries use the old
+names:
+
+| Old | New |
+| --- | --- |
+| `gui/model/sequence_worker.py`, `SequenceWorker` | `gui/model/focus_worker.py`, `FocusWorker` |
+| `tests/gui/test_sequence_worker.py` | `tests/gui/test_focus_worker.py` |
+| `sequenceFinished` / `sequenceFailed` signals | `focusSequenceFinished` / `focusSequenceFailed` |
+| `SequenceWorker.sequence` (constructor arg and attribute) | `FocusWorker.focus_sequence` |
+| `Controller.sequence` / `Controller.worker` | `Controller.focus_sequence` / `Controller.focus_worker` |
+| `Controller._standalone_sequence` | `Controller._standalone_focus_sequence` |
+| `Controller.start_sequence()` | `Controller.start_focus_sequence()` |
+| `Controller._build_archive_sequence()` | `Controller._build_archive_focus_sequence()` |
+| `Controller._start_worker()` | `Controller._start_focus_worker()` |
+| `Controller._on_sequence_finished()` / `_on_worker_finished()` | `_on_focus_sequence_finished()` / `_on_focus_worker_finished()` |
+| `FocusControlPanel.get_sequence_type()` / `get_sequence_config()` | `get_focus_sequence_type()` / `get_focus_sequence_config()` |
+
+`Controller._on_sequence_failed()` was renamed `_on_focus_sequence_failed()`
+here, then removed entirely during the logging work the same day (failure
+signals now connect straight to `Controller._fail()`; see
+`GUI_LOGGING_PLAN.md`'s post-Phase-4 cleanup).
+
+## ktl-free testing and hardware-tab graying (2026-09-01)
+
+*(Entry added 2026-11-16, reconstructed from git history: `c702eb1`,
+`1e47148`. Both are documented in `GUI_REFERENCE.md` §§1-2, 4-5.)*
+
+- `nickel_focus/pkg/ktl.py` became the single, soft-failing import point
+  for `ktl`, and `tests/conftest.py` gained an autouse `no_ktl` fixture
+  forcing `focus.ktl`/`slew.ktl` to `None`, so the suite passes -- and
+  never touches hardware -- whether or not `ktl` is installed.
+- With no live `ktl`, `Controller` (`ktl_available`) has
+  `FocusControlPanel.set_hardware_tabs_enabled(False)` gray out the
+  Slew/Single/Grid/Auto tabs and open on Replay. The suppressed
+  `nickel_focus_gui --test` flag (`force_enable_hardware_tabs`) skips only
+  the graying, for layout work without `ktl`.
+
+## Logging integration (2026-09-01)
+
+The Log tab was rewired to show real `nickel_focus.log` records via
+`gui/log_handler.py`'s `QtLogHandler`, and the `FocusControlPanel.show_*`
+methods stopped appending to the log themselves (the Controller logs
+instead, with failures going through `Controller._fail()`). The full
+plan and change log are in `GUI_LOGGING_PLAN.md`.
+
+## Replay disconnected from hardware; failure tracebacks (2026-10-31)
+
+*(Entry added 2026-11-16, reconstructed from git history: `79545f7`.)*
+
+- `Controller._build_archive_focus_sequence()` builds its helper
+  `GridFocusSequence` with `connect=False`, so loading a Replay never
+  touches hardware even when `ktl` *is* available.
+- `FocusWorker.focusSequenceFailed` and `SlewWorker.slewFailed` now carry
+  `(message, exc)`, and `Controller._fail(message, exc=None)` logs the
+  exception's traceback (`exc_info`) along with the message.
+- `find_nearest_object()` with no starlist file reports a failure via
+  `_fail()` instead of raising; `_find_nearest()` catches any exception
+  (reading the telescope position can fail too, not just bad starlists).
+- `_update_current_position()` survives a failed position read: it shows
+  "—" and logs a warning only on the first failure in a row, since it's
+  polled every second.
+
+## Status-text consolidation and docstring cleanup (2026-11-16)
+
+**Status/step text built once, in the Controller.** Each Log-tab message
+was being built twice: once for the Controller's `log.info(...)`/
+`log.error(...)` call and again inside the matching `FocusControlPanel`
+method (left over from the logging work, which added the log calls
+alongside the existing view formatting). Now the Controller builds the
+text once, logs it, and passes the same string to the view:
+
+- `update_step(result, total_expected=None)` → `update_step(text)`.
+- `show_failure(message)`, `show_slew_result(message)`, and
+  `show_single_exposure_result(result)` → one `show_status(text)`, since
+  all three just set `status_label`.
+- `show_best_focus(best_focus, best_fwhm)` → `show_best_focus(best_focus,
+  text)` (still needs the number, to set the Single tab's default).
+- `show_nearest_target(name, ra_text, dec_text)` →
+  `show_nearest_target(ra_text, dec_text, text)`.
+
+View tests now pass plain strings; the content checks moved to the
+Controller tests, which also assert the label shows exactly the logged
+text.
+
+**Single-exposure failure message.** `FocusWorker`'s `mode='single'`
+failure said "Could not move to best focus: ..." for *any* failure (move,
+exposure, or photometry) at *any* focus value -- a leftover from before
+Phase 4 folded "Move to Best Focus" into the Single tab. Now: "Single
+exposure at focus N failed: ...". The `FocusWorker`/
+`FocusSequence.take_single_exposure` docstrings were updated to match.
+
+**Docstrings made current and self-contained.** Per a standing
+preference, code docstrings/comments must describe the current code and
+must not reference the development docs in `claude/`. Removed every
+`GUI_DESIGN.md` §-reference and `GUI_IMPLEMENTATION.md` phase reference
+from `gui/` and the tests (inlining the rationale where one was needed),
+and fixed stale descriptions: click-based source selection (now the 'm'
+key), "right-click panning" (never existed), the Slew tab as the only
+grouped tab, the removed scroll-area floor, tab counts/lists that
+predated Slew/Options, and `FocusWorker`'s description of what it calls.
+`tests/gui/test_phase3_smoke.py` was renamed
+`tests/gui/test_live_workflow_smoke.py` (and its test
+`test_full_live_workflow`), since its name pointed at a development phase.
+
+Full suite: `224 passed` (two fewer than before, from merging the
+redundant `show_*` view tests).
+
+## Status bar and image placement (2026-11-16)
+
+Per request: a Quit button and five hardware status indicators on one row
+above the image panel's Exposure/Stretch/Recenter row, with that row moved
+closer to the displayed image.
+
+**Image placement.** The Exposure row was already directly above the
+canvas in the layout; the visible gap came from matplotlib centering the
+equal-aspect image vertically within a canvas of a different shape,
+leaving a blank band above it. Fixed with `ax.set_anchor('N')`, which
+pins the image to the top of the canvas (checked that `ax.clear()`, called
+on every redraw, preserves the anchor). Any leftover space now falls
+below the image instead.
+
+**`StatusBar`** (new `gui/views/status_bar.py`): a passive view with a
+`quit_button` (emits `quitRequested`) and five `QLabel` indicators --
+Movement, Track, Target, Focus, Exp -- each set via
+`set_indicator(key, state, text=None)` to `'ok'`/`'warn'`/`'error'`
+(green/yellow/red background via a style sheet; the state is also stored
+as a Qt dynamic property for tests). All start red. Equal stretch factors
+keep the indicators the same width. `MainWindow` stacks it above
+`ImagePanel` in a plain `QVBoxLayout` (not a splitter); the first-show
+"square image panel" sizing now subtracts the status bar's height. The
+bar keeps the style's default side margins so its edges line up with the
+image panel's rows.
+
+**Controller.** Keyword-to-state mappings are module-level pure functions
+(`_movement_state`, `_track_state`, `_target_state`, `_seclk_state`,
+`_expstate_state`; case-insensitive, whitespace-tolerant; `POCOT`
+anything other than 0/1 is red). The Controller constructs read-only
+`focus_hardware`/`exposure_hardware` handles (`focus.Focus()`/
+`focus.Exposure()`) alongside the existing `telescope`; they're `None`
+without `ktl`, and any other construction failure is logged as a warning
+rather than stopping the GUI from starting. The existing one-second
+position timer became `_poll_timer` → `_poll_hardware()`, which updates
+both the current position and the indicators
+(`_update_status_indicators()`). Each indicator is read independently:
+no handle, or a failed read, shows red; failures are logged once per
+streak, as for the position display. `quit()` just closes the window.
+
+**Not verifiable here (no `ktl` on the development machine):** the exact
+strings each keyword's `read()` returns (e.g. whether `POCOT` reads as
+`'0'`, or `POCSTOP` as `'allowed'`) -- the mappings assume the same
+values the Model's own `waitFor` expressions use. Also unverified: whether
+six synchronous keyword reads per second on the GUI thread are fast
+enough in practice.
+
+**Testing:** new `tests/gui/test_status_bar.py` (order, initial red,
+`set_indicator`, Quit signal); `test_controller.py` gained a
+parametrized test of every state mapping, indicator tests with stand-in
+keyword objects (values, failure logged once and recovery, all red
+without `ktl`), and a Quit test; plus a `MainWindow` placement test and
+an image-anchor test. Full suite: `249 passed`.
+
+**Follow-up: Quit disabled while running.** Quitting mid-operation would
+tear down a running `FocusWorker`/`SlewWorker` thread (likely crashing
+Python on exit) without stopping the exposure or slew itself. Added
+`StatusBar.set_running(running)`, called from `Controller._set_running`
+alongside `FocusControlPanel.set_running`, so Quit follows the same
+enable/disable cycle as the action buttons. The window's own close button
+is not covered. Tests: a `StatusBar` unit test and two Controller tests
+(during a Replay sequence and during a fake-telescope slew). Full suite:
+`252 passed`.
+
+**Follow-up: tighter gap above the Exposure row.** The gap between the
+status bar and the Exposure row was the left column's layout spacing
+*plus* the image panel's own top margin (~17px offscreen, more on macOS).
+Measuring also showed the "default margins line up" assumption above was
+wrong: a top-level widget's layout gets larger default margins (11px
+offscreen) than a nested one (9px), so the edges were off by 2px. Now
+`MainWindow` sets both explicitly from the image panel's layout: the
+status bar gets its left/top/right margins (the bar's own layout has
+none), the image panel's top margin is zeroed, and the column spacing is
+the image panel's own row spacing -- so the bar sits as close to the
+Exposure row as that row sits to the canvas, with edges aligned exactly.
+Test: `test_status_bar_lines_up_with_and_sits_close_to_the_image_panel_rows`.
+Full suite: `253 passed`.
+
+**Follow-up: gap reduced to 4px.** Per request, the column spacing is now
+a fixed `MainWindow._STATUS_BAR_SPACING = 2` instead of the image panel's
+row spacing (6px); the widgets' frames add 2px, for a 4px measured gap
+(offscreen). The test now asserts a gap of at most 4px. Full suite:
+`253 passed`.
+
+## Fusion style forced on all platforms (2026-11-16)
+
+The 4px gap above looked closer to 13px on the user's Mac. Rendering
+natively on macOS (cocoa platform, `WA_DontShowOnScreen`) showed why: the
+offscreen test platform always uses Qt's "Fusion" style, but macOS uses
+its native style, whose push buttons and combo boxes draw a ~22px bezel
+inside a 32px widget (transparent padding above and below). The layout
+gap was the same 4px on both; the padding made it look three times
+larger. macOS also uses 20px layout margins (Fusion: 9px) and a larger
+style-dependent row spacing, so other gaps grew too.
+
+The GUI is deployed on Ubuntu, where pip's PySide6 has no native style
+plugin and Fusion is already the default. So `launcher.build_app()` now
+calls `app.setStyle('Fusion')`, making a developer's Mac and the test
+suite match the deployment platform. The tests' `qapp` fixture now goes
+through `launcher.build_app()` too, so it always uses the same style. A
+native macOS render after the change matches the offscreen renders.
+Remaining expected Linux differences: font family/size, display scaling,
+and Qt following GNOME's light/dark color scheme. New test:
+`test_build_app_uses_the_fusion_style`. Full suite: `254 passed`.
+
+**Follow-up: circle indicators.** Per request, each indicator is now a
+colored circle next to left-aligned text instead of a colored rectangle.
+New `StatusIndicator` widget (`gui/views/status_bar.py`): a fixed-size
+`QLabel` drawn round by a style sheet (`border-radius` of half its width,
+diameter scaled to the font height, thin dark outline so yellow stays
+visible on the light background) beside a plain text `QLabel`, with a
+trailing stretch so any extra width falls to the right of the text.
+`StatusBar.set_indicator` is unchanged, so the Controller needed no
+changes. The colors were deepened slightly (green `#43a047`, yellow
+`#fbc02d`, red `#e53935`), since the old pastel shades read poorly as
+small circles. New test: the circle sits at the left edge, the text is
+right next to it, and extra width falls to the right. Full suite:
+`255 passed`.
+
+**Follow-up: indicator names and outline.** The user renamed two
+indicators in `StatusBar.INDICATORS`: Movement → "Slew" (still
+`POCSTOP`, key `'movement'`) and Target → "On Target" (still `POCOT`,
+key `'target'`); the keys, and so the Controller's mappings, are
+unchanged. Updated the Controller docstring, Help tab text, test, and
+`GUI_REFERENCE.md` to match. Also removed the circles' thin dark outline,
+per request.
+
+## Exposure control moved to `exposure.py` (2026-11-16)
+
+Per request, the camera/exposure KTL wrappers -- `ExposurePath`,
+`ExposureConfig`, `Exposure` -- moved unchanged from `focus.py` into a new
+`nickel_focus/exposure.py`; `focus.py` keeps `Focus` (which still reads
+`EXPSTATE` itself, to refuse a focus move mid-exposure), the sequences,
+`FocusPlot`, and `StepResult`.
+
+- `focus.py` imports the module (`from nickel_focus import exposure`) and
+  constructs `exposure.Exposure()` in `FocusSequence.__init__`, so the
+  class has exactly one patchable home. Two local variables in
+  `FocusSequence.reanalyze`/`take_single_exposure` that were named
+  `exposure` (a FITS path) became `exposure_file`, so they don't shadow
+  the module.
+- The Controller's status-indicator handle uses `exposure.Exposure`.
+- Tests: `no_ktl` now also sets `exposure.ktl` to `None` (`Exposure`
+  checks its own module's `ktl`; without this, a machine with real `ktl`
+  could construct a real camera handle in a test). `fake_hardware` and
+  `test_archive_sequence_never_constructs_hardware` patch
+  `exposure.Exposure` instead of `focus.Exposure`. New
+  `tests/test_exposure.py` checks `Exposure` refuses to construct without
+  `ktl`.
+- Cross-references in docstrings (`focus_worker.py`,
+  `focus_control_panel.py`, `controller.py`, `pkg/ktl.py`, test
+  docstrings) and `GUI_REFERENCE.md` updated. Lick's `Makefile`
+  (`$(wildcard *.py)`) and `pyproject.toml` (package discovery) pick up
+  the new module automatically.
+
+Full suite: `256 passed`.
+
+## Exposure fields initialized from the camera (2026-11-16)
+
+Per request, the Single/Grid/Auto tabs' exposure time, speed, and binning
+now start at the camera's current values instead of fixed defaults, which
+remain only when there's no `ktl` connection (i.e. only seen with
+`--test`). Not testable against real hardware here; covered with
+stand-in keyword objects.
+
+- **Model:** `ExposureConfig.current_settings()` reads `EXPOSURE`
+  (→ `float`), `AMPCONF`, and `BINNING`, translating the `AMPCONF` value
+  back through `speed_aliases` (e.g. `1.0MHz` → `Fast`) so the result uses
+  the same names `configure()` accepts; an unaliased value passes through
+  as-is. `FakeExposureConfig.current_settings()` returns only what's been
+  configured (nothing, initially), so the fake-hardware tests' fields are
+  untouched.
+- **View:** `FocusControlPanel.set_exposure_config(config)` applies any
+  subset of `exptime`/`speed`/`binning` to all three tabs and returns the
+  keys whose value isn't a drop-down option (those fields are left alone;
+  an out-of-range exposure time is clamped by the spin box).
+- **Controller:** `_initialize_exposure_config()`, called in `__init__`
+  right after the hardware handles are built -- after `MainWindow` has
+  restored saved settings, so the camera's values win. Logs the applied
+  settings at INFO; a failed read or unmatched value is a warning.
+- **To verify at the telescope:** the exact `AMPCONF`/`BINNING` strings
+  (the binning options assume `'1,1'`-style values, as
+  `ExposureConfig.expbin_options` already does).
+
+Full suite: `264 passed`.
+
+## KTL interface refactor, phase 0: Options tab and settings persistence removed (2026-11-17)
+
+First phase of `claude/ktl_interface_refactor.md` (§3.8). The Options tab's
+only control was "Remember settings between sessions", which saw little use
+in testing, and the refactor makes most of what it saved redundant (the
+exposure fields will follow the camera). Persistence was opt-in through
+that checkbox, so with the tab gone, all of it went:
+
+- `FocusControlPanel`: the Options tab (`options_tab`, `_build_options_tab`,
+  `remember_settings_checkbox`), `get_settings_state`/`set_settings_state`/
+  `_settings_fields`, and `options_tab` in
+  `preferred_height_excluding_help`. Docstrings that listed the tab were
+  updated. In the Help text, the Options entry was removed and its
+  paragraph break moved onto the Log entry; nothing else in the Help text
+  referred to remembered settings.
+- `ImagePanel`: `get_settings_state`/`set_settings_state` (stretch).
+- `MainWindow`: `_load_settings`, `_save_settings`, `_settings`,
+  `_SETTINGS_ORG`/`_SETTINGS_APP`, and the `closeEvent` override (it existed
+  only to save settings). Its docstring's explanation of overriding a Qt
+  event handler, as distinct from a signal connection, moved to
+  `showEvent`, the remaining event-handler override.
+- Controller: removed the note that the camera's exposure settings are
+  applied after saved settings are restored.
+- Tests: removed the `isolate_qsettings` autouse fixture and the nine
+  settings tests (`test_main.py` 4, `test_focus_control_panel.py` 3,
+  `test_image_panel.py` 2), and `options_tab` from the tab-order,
+  button-set, and tab-height tests.
+- Docs: `GUI_REFERENCE.md`; and the user manual, `docs/html/focusGUI.html`,
+  whose Options paragraph was removed (it wasn't listed in the plan). The
+  manual's screenshots (`docs/images/focusGUI_*.png`) still show the old
+  tab bar and need retaking.
+
+Observers' existing settings files (if they ever opted in) are left in
+place and are no longer read. Full suite: `255 passed` (264 minus the nine
+removed settings tests).
+
+## KTL interface refactor, phase 1: service classes (2026-11-17)
+
+Second phase of `claude/ktl_interface_refactor.md` (§4; details as built in
+its §4.1). Structural, and meant to change behavior only by adding read
+timeouts:
+
+- New package `nickel_focus/services/`: `base.py` (`KTLService`, the
+  exceptions `KTLError`/`KTLUnavailableError`/`KTLTimeoutError`/
+  `KTLReadOnlyError`, `ktl_available()`, and `DEFAULT_READ_TIMEOUT` = 1 s),
+  `nickelpoco.py` (`NickelPoco`), and `nscicam.py` (`NSciCam`, plus
+  `ExposurePath`/`ExposureConfig`, moved from `exposure.py`). `base.py` is
+  the only module that imports `ktl`; its guard now catches any
+  `ImportError`. `pkg/ktl.py` and the `nickel_focus.ktl` re-export were
+  removed. Added `services/Makefile` and `services` to the package
+  Makefile's `DIRS`.
+- `Focus(poco)`, `NickelTelescopePointing(poco)`, and `Exposure(cam)` take
+  service objects and use their named methods. The duplicated `POCSTOP`
+  check is `NickelPoco.movement_allowed`. `Focus` no longer reads
+  `EXPSTATE`: the camera-idle check is `FocusSequence.set_focus`.
+  `FocusSequence`/`GridFocusSequence`/`AutomatedFocusSequence` take
+  `poco=`/`cam=` instead of `connect=`.
+- Controller: one shared `poco`/`cam`, built by `_connect_service` (a
+  service that doesn't answer is logged and left `None`), passed to every
+  sequence and single exposure and used for the status indicators and
+  exposure-field initialization. `focus_hardware`/`exposure_hardware` and
+  `_connect_status_handle` are gone. Also fixed `quit()`'s docstring,
+  which still said settings are saved.
+- CLI: `focus.py` builds the services only for live runs (archive mode
+  never imports `services`, and so never `ktl`); `slew_to_nearest.py`
+  builds a read-only `NickelPoco` for `--dry_run`.
+- Tests: `tests/fake_hardware.py`'s whole-class fakes were replaced by a
+  keyword-level fake `ktl` (`tests/fake_ktl.py`, with a `Simulator` for
+  the telescope and camera), installed at `services.base.ktl`, so the real
+  `Focus.set_to`, `slew_to`, and `Exposure.expose` now run under test.
+  `no_ktl` patches only `services.base.ktl`. New: `test_services.py`
+  (timeouts, exception translation, monitoring, read-only guard, broken
+  `ktl` install), device tests in `test_focus.py`/`test_exposure.py`/
+  `test_slew.py`, CLI live-path tests, and Controller tests for the shared
+  services. Live tests: `--ktl-live`, the `ktl_live` marker, and
+  `tests/test_ktl_live.py`.
+- One fix needed along the way: a service holds on to the `ktl` module it
+  was constructed with. Without that, a Controller left over from an
+  earlier test (its 1 Hz poll timer still running) read through a
+  `services.base.ktl` that the next test had reset to `None`, and broke
+  later tests.
+- Docs: `GUI_REFERENCE.md` (§2, §3, §5 incl. live tests), `KTL_REFERENCE.md`
+  (§1, §3.1, §3.2, §4), README (testing), and the plan (status, §4.1, §5.1,
+  §6).
+
+The 1 s read timeout is untested at the telescope (plan §5.1). Until phase 3,
+the GUI's 1 Hz poll still reads on the GUI thread: an unresponsive service
+now stalls it for up to 1 s per read rather than indefinitely. Full suite:
+`290 passed, 5 skipped` (the live tests).
+
+## KTL interface refactor, phase 2: monitoring, checks, and heartbeats (2026-11-17)
+
+Third phase of `claude/ktl_interface_refactor.md` (details as built in its
+§4.2). Resolves Appendix A items 4 (first-use `waitFor` false negatives) and
+11 (stale data after a dispatcher restart).
+
+- `KTLService` (`services/base.py`): `heartbeat`/`heartbeat_period` class
+  attributes, registered at construction after a timed priming read;
+  `check()` (`True`/`False`/`None` for no reply); `heartbeat_alive()`; and
+  the module function `require()`, exported from `services`, which turns a
+  `check` result into `ValueError` or `KTLTimeoutError`.
+- `NickelPoco` monitors `POCSTOP`, `POCTRCK`, `POCOT`, `POCSECLK`,
+  `POCSECPA`, `POCORAA`, `POCODECA`, with heartbeat `POCHEART`; `NSciCam`
+  monitors `EXPSTATE`, `EXPOSURE`, `AMPCONF`, `BINNING` (no longer
+  `EXPOSE`), with heartbeat `DISP0CLK`. Both heartbeat periods are a
+  provisional 30 s.
+- `Focus.set_to`, `FocusSequence.set_focus`, `NickelTelescopePointing.slew_to`,
+  and `Exposure.expose` check through `require`: the "condition false"
+  messages are unchanged; a silent service now gives "No reply from
+  <service>.<keyword>; ...", as a `KTLTimeoutError`.
+- Tests: the fake `ktl` gained `cache(service)` (a `FakeService` recording
+  heartbeat registrations) and the two heartbeat keywords. New tests cover
+  what each service monitors, heartbeat registration and failure,
+  `heartbeat_alive`, `check`'s three outcomes, `require`, and a "no reply"
+  case for each device class; a live test checks each service's heartbeat
+  changes within two periods. Four existing tests now break the fake after
+  construction instead of before, since construction reads more keywords.
+- Docs: `GUI_REFERENCE.md` (§2, §5), `KTL_REFERENCE.md` (§3.4, §3.6, §4),
+  and the plan (status, §4.2, §5.1, §6, Appendix A).
+
+The heartbeat periods and live-test timeout remain provisional until the
+broadcast intervals are measured at the telescope (plan §5.1, §6). Full
+suite: `303 passed, 7 skipped` (the live tests).
+
+## KTL interface refactor, phase 3: callback-driven status bar and position (2026-11-17)
+
+Fourth phase of `claude/ktl_interface_refactor.md` (details as built in its
+§4.3). Resolves Appendix A item 6 (the 1 Hz poll reading on the GUI
+thread), and with it Goal 1 for the status bar and position display:
+changes made from other GUIs appear as soon as they're broadcast.
+
+- `KTLService.subscribe(names, function)` (`services/base.py`): registers a
+  callback per keyword, keeps strong references to them (`ktl` holds
+  callbacks weakly), and primes each keyword with a timed read, which
+  delivers its current value through the same callback.
+- New `gui/ktl_bridge.py` (`KTLBridge`): re-emits values from `ktl`'s
+  callback thread as a Qt signal; the Controller connects it with an
+  explicit queued connection.
+- Controller: subscriptions replace `_poll_timer`/`_poll_hardware`/
+  `_update_status_indicators`/`_update_current_position`. New
+  `_on_keyword_changed`, `_show_indicator`, `_show_current_position`,
+  `_subscribe`, and `POSITION_REDRAW_MS` (200 ms); module tables
+  `_INDICATORS`, `_INDICATOR_KEYWORDS`, `_POSITION_KEYWORDS`, and the
+  subscribed keyword lists. `StatusBar`'s docstring now points at
+  `_show_indicator`.
+- Tests: the fake keyword gained weakly held callbacks and broadcasts on
+  value changes. The poll-based Controller tests became broadcast-based
+  (`_deliver_broadcasts` runs the event loop past a position redraw): the
+  indicators and position start at the current values and follow
+  external changes, position redraws are rate-limited, a bad position is
+  logged once, and a failed subscription is logged and left red. New
+  `test_ktl_bridge.py` (a value relayed from another thread reaches the
+  GUI thread) and `subscribe` tests (initial value, broadcasts, surviving
+  garbage collection, read-only). One more live test: a subscription
+  delivers a real `POCSTOP` value.
+- Docs: `GUI_REFERENCE.md` (§2 directory tree and lines of communication),
+  `KTL_REFERENCE.md` (§3.1, §3.3, §4), and the plan (status, §4.3,
+  Appendix A).
+
+Known limitation (plan §4.3): if a service stops broadcasting entirely, the
+indicators keep their last values rather than turning red. Full suite:
+`310 passed, 8 skipped` (the live tests).
+
+## KTL interface refactor, phase 4: exposure fields follow the camera, both ways (2026-11-17)
+
+Final phase of `claude/ktl_interface_refactor.md` (design choices and details
+in its §4.4). Completes Goal 2: the Single/Grid/Auto exposure fields always
+show the camera's settings, and editing them changes the camera.
+
+- View (`focus_control_panel.py`): new `ExposureTimeSpinBox`, which commits
+  only on Enter and is light red while an edit is pending, as in the
+  data-acquisition GUI; new `exposureSettingEdited(key, value)` signal
+  (Enter on an exposure time, or a drop-down choice); `get_exposure_config`
+  reports the committed exposure time; `set_exposure_config` commits the
+  exposure time and adds unrecognized speed/binning values to the options
+  (returning the keys added, rather than skipping them). Help text updated.
+- `ExposureConfig.keywords`/`setting_value` (`services/nscicam.py`), shared
+  by `current_settings` and the Controller.
+- Controller: the camera subscription now includes `EXPOSURE`, `AMPCONF`,
+  `BINNING` (`_on_exposure_keyword` applies and logs values that differ from
+  what's shown); edits are synced across the three tabs and written at once
+  on the GUI thread (`_on_exposure_setting_edited`), with a rejected write
+  reported and reverted. `_initialize_exposure_config` was removed.
+- Tests: `tests/gui/keyboard.py` (real key events), and new panel and
+  Controller tests for the behavior above; the startup-read tests became
+  broadcast tests. An offscreen render confirmed the pending field is
+  drawn light red under Fusion.
+- Docs: `GUI_REFERENCE.md` (§2), `KTL_REFERENCE.md` (§4), the user manual
+  (`docs/html/focusGUI.html`, the Grid/Auto/Single section), and the plan
+  (status, §4.4).
+
+Full suite: `326 passed, 8 skipped` (the live tests). The screenshots in the
+user manual predate this and the Options-tab removal.
+
+## `KTL_SUGGESTIONS.md` reviewed against the refactored code (2026-11-17)
+
+The follow-up to phase 4 (plan §4, phase 4). Each proposal's interim
+approach now describes the code as it stands: §1, monitoring and priming
+at service construction; §2, which of our waits can overshoot; §3, the
+implemented `KTLService.check`/`services.require`; §4, restated now that
+the GUI's polling is gone (lower priority: the Controller's own `_latest`
+copy of subscribed values, on-demand round trips for monitored keywords,
+and stale-data detection); §5, noting that the heartbeats are registered.
+The proposals themselves are unchanged.
+
+## Refactor plan: decisions folded in, remaining issues consolidated (2026-11-17)
+
+`claude/ktl_interface_refactor.md` was tidied now that all phases are done.
+The decisions from its former §6 now appear only in the design sections
+they belong to (§3.1 timeouts, §3.2 import, §3.4 heartbeat periods, §3.6
+the exposure fields as built, §3.9 the heartbeat test), without the record
+of alternatives considered. The former §5 ("Not addressed by this plan"),
+§5.1 ("Facts to confirm at the telescope"), §6 ("Decisions"), and Appendix A
+(issues moved from `KTL_REFERENCE.md`) became a single §5, "Remaining
+issues": possible defects (§5.1), settings and assumptions to confirm at the
+telescope (§5.2), and possible later improvements (§5.3). Issues the
+refactor resolved were dropped: first-use `waitFor` false negatives, the
+GUI-thread poll, stale data after a dispatcher restart, and the `POCSTOP`
+comment (now in `NickelPoco`'s docstring).
+
+## Slew targets written as binary radians (2026-11-17)
+
+Resolves the first "possible defect" in the refactor plan's §5.1: slew
+targets were written to `POCORAD`/`POCODECD` as ascii decimal hours and
+degrees, although those keywords' ascii form is sexagesimal and how the
+service parses a decimal ascii value is unknown. Coordinates written to
+keywords are now always binary radians -- the keywords' native unit --
+while everything displayed or entered stays sexagesimal.
+
+- `NickelPoco.set_pointing_demand(ra, dec)` takes angles (e.g.
+  `SkyCoord.ra`/`.dec`) and writes `Angle(...).radian` with `binary=True`.
+- `NickelTelescopePointing.slew_to` passes the target's angles straight
+  through, and logs the target in sexagesimal (it used to log whatever it
+  was given, e.g. an `Angle`'s default text).
+- Fake `ktl`: keywords record whether each write was binary
+  (`binary_writes`); the simulated telescope rejects a slew target that
+  isn't binary, and reports `slew_calls` in hours and degrees, converted
+  from radians. New tests check the written radians (including a negative
+  Dec) and the sexagesimal log message.
+- Docs: `KTL_REFERENCE.md` (§3.2, §4) and the plan (§5.1, item removed).
+
+Reading positions (`POCORAA`/`POCODECA`) still uses their ascii form; that
+is §5.1's item on the Dec sign. Full suite: `327 passed, 8 skipped`.
+
+## Read-speed names confirmed (2026-11-17)
+
+`AMPCONFLIST` at the telescope is `5.0MHz,3.0MHz,1.0MHz,0.05MHz` (`gshow -s
+nscicam AMPCONFLIST`), so the `Fast`/`Slow` aliases (`1.0MHz`/`0.05MHz`) are
+valid; the data-acquisition GUI likewise limits observers to Fast or Slow,
+with the same mapping. Removed the "read-speed names are unconfirmed" item
+from the refactor plan's §5.1; recorded the values in `KTL_REFERENCE.md`
+§4.1 and in a comment on `ExposureConfig.speed_aliases`; the fake `ktl`'s
+`AMPCONFLIST` now matches. A camera set to `5.0MHz` or `3.0MHz` from
+elsewhere shows up in the GUI's Speed drop-down as that raw value (added to
+the options, with a warning), as for any value without an alias.
+
+Coordinates are still read in their ascii form, pending a check of the Dec
+sign at the telescope (plan §5.1).
+
+## `config/` removed (2026-11-17)
+
+The user deleted `nickel_focus/config/` (`nscicam.toml`, `nickucam.toml`,
+and its Makefile): it was meant to let the GUI work with cameras served by
+different KTL services, but the UCAM camera has been decommissioned, and
+nothing in the package read those files. Removed `config` from
+`nickel_focus/Makefile`'s `DIRS`, and from `claude/DEPLOYMENT.md`'s
+description of the Makefile tree -- which also gained the `services/`
+directory (added in refactor phase 1) and the `sin` entry missing from one
+of its `DIRS` lists. `DEPLOYMENT_PLAN.md` and `PROJECT.md` still mention the
+`.toml` files and `nickucam` as part of their historical record.
+
+## Exposures use `FITSFILE` (2026-11-17)
+
+Resolves the "`EXPRESULT` isn't a reliable file path" item of the refactor
+plan's §5.1. `EXPRESULT` holds the file name plus an error message when an
+exposure fails, may not be a full path, and can be read before the
+dispatcher has finished the FITS header. `FITSFILE` is the full path, set
+only once the file is complete, and is the keyword the camera's help says
+applications should track.
+
+- `NSciCam` (`services/nscicam.py`): monitors `FITSFILE`; new `fits_file()`,
+  `fits_file_changed(previous, timeout)`, `exposure_ended(timeout)`
+  (`EXPSTATE` is `Ready` or `Error`), and `exposure_result()` (`EXPRESULT`).
+  `ExposurePath.previous` reads `FITSFILE`.
+- `Exposure.expose`: notes `FITSFILE` before starting; after `Start`, waits
+  for the exposure to end (`Ready` or `Error`, one `waitFor` --
+  `'== Ready or $nscicam.EXPSTATE == Error'`); fails at once on `Error`,
+  quoting `EXPRESULT`; then waits up to `FILE_TIMEOUT` (30 s) for `FITSFILE`
+  to change. The `FITSFILE` comparison quotes the path (`!= "<path>"`): `ktl`
+  splits expressions with `shlex`, so a quoted path is one string token,
+  where an unquoted one would be read as arithmetic (checked in
+  `Expression.py`; recorded in `KTL_REFERENCE.md` §3.4).
+- Fake `ktl`: the evaluator handles quoted operands and `or` alternatives
+  the way `ktl`'s parser splits them; the simulated camera reports
+  `FITSFILE` only once waited for, and has `exposure_error` and
+  `reports_file` failure modes. New tests: the path comes from `FITSFILE`,
+  a camera error fails with its message, a missing file fails, and
+  successive exposures report successive files.
+- Docs: `KTL_REFERENCE.md` (§3.4, §4, §4.1) and the plan (§3.4; §5.1 item
+  removed; §5.2 gains what to confirm about exposure completion).
+
+Full suite: `331 passed, 8 skipped`.
+
+## KTL's log routed into the `nickel_focus` log; Log tab matches the console (2026-11-17)
+
+Resolves the refactor plan's §5.1 item on hidden KTL warnings (KTL logged
+only errors, to `stderr`), and makes the GUI's Log tab track the console.
+
+- **Verbosity 0-3** (`pkg/logger.py`, `scripts/scriptbase.py`): `-v 3` added
+  (`nickel_focus` level DEBUG, like 2). New
+  `NickelFocusLogger.convert_verbosity_to_ktl_level` and `ktl_level`
+  attribute: `'warn'` for 0/1, `'notice'` for 2, `'debug'` for 3.
+  `ScriptBase.init_log` sets it from the more verbose of `--verbosity` and
+  (if a log file is written) `--log_level`. `-v`/`--log_level` now take
+  `choices=[0, 1, 2, 3]`. The level colors moved to a shared
+  `LEVEL_COLORS` table.
+- **Routing** (`services/base.py`): `KTLLogWriter` (a `ktl.logger`
+  destination) parses KTL's `'<time> <flag>: <text>'` lines and logs
+  `ktl: <text>` -- `E` ERROR, `W` WARNING, `N` INFO, `I`/`D` DEBUG -- keeping
+  partial lines until complete and logging an unrecognized line as a
+  warning. `route_ktl_logging`, called from `KTLService.__init__`, routes
+  once per `ktl` module and (re)applies `ktl.loglevel` from
+  `log.ktl_level`. Recording the level in `init_log` and applying it at
+  service construction (rather than calling `ktl` from `init_log`) keeps
+  replay-only runs from importing `ktl`.
+- **GUI**: `nickel_focus_gui` now calls `init_log`, so its `-v`,
+  `--log_file`, and `--log_level` take effect (they were accepted but
+  ignored). The `QtLogHandler`'s level is the console handler's;
+  `record_logged` now carries `(text, level)`. The Log tab keeps the short
+  `GuiFormatter` format but shows the level name bold and in its color, uses
+  the system fixed-width font (with a monospace style hint, since the
+  offscreen platform names an unresolvable generic "monospace" family), keeps
+  5000 lines (was 500), and is no longer cleared by `reset()`.
+- **Tests**: an autouse `restore_log_levels` fixture puts the console and
+  KTL levels back after each test. New tests for the verbosity mappings,
+  `init_log`'s KTL level (including the log-file case), the writer's level
+  mapping, partial lines and unrecognized lines, routing once with the
+  default and verbosity-set levels, the Log tab following and hiding per
+  the console level, the colored level name, line order, font, and cap; the
+  fake `ktl` records `logger()`/`loglevel()` calls. An offscreen render
+  confirmed the colors and font.
+- Docs: README (verbosity), the user manual (Log tab), `GUI_REFERENCE.md`
+  (§2 logging), `KTL_REFERENCE.md` (§3.7), and the plan (§5.1 item removed).
+
+Full suite: `353 passed, 8 skipped`.
+
+## Log tab: the console's format, ~80 columns, no status/step lines (2026-11-17)
+
+Follow-up to the previous entry, at the user's request: the Log tab is now
+simply a repeated view of the terminal output.
+
+- **Format:** the `QtLogHandler` uses a new instance of the console's own
+  formatter (`type(log.sh.formatter)()`: `StreamFormatter`, or
+  `DebugStreamFormatter` at debug level), so the text matches the console
+  exactly, including `[LEVEL] - ` and, at debug level, the calling
+  file/function/line. New `focus_control_panel.LogView` (a
+  `QPlainTextEdit`) renders the formatter's ANSI codes (bold, 24-bit
+  color) as Qt text formats. `GuiFormatter` was removed (unused), and
+  `record_logged` is back to carrying just the text.
+- **Width:** at the default 1200x600 window the Log tab was about 98
+  columns wide on macOS (Menlo 10 pt). `LogView` now resizes its font
+  whenever it's resized, to the largest quarter-point size that fits 80
+  columns (6-18 pt); since glyph widths step, it lands at about 80-85
+  columns (84 at the default window size).
+- **No status/step lines:** removed `FocusControlPanel.status_label`,
+  `step_label`, `show_status`, `update_step`, and `reset`;
+  `show_best_focus`/`show_nearest_target` now only fill in their fields,
+  and `set_stopping` only disables the Interrupt buttons. Everything those
+  lines showed was already logged; the one exception, the "Stopping --
+  waiting for the current exposure to finish..." notice, is now logged by
+  `Controller.stop`.
+- Tests: Controller and smoke tests check the Log tab's text instead of
+  the status/step labels; new `LogView` tests (ANSI rendering, matching the
+  console formatter, line order, the 80-column fit at several widths, the
+  minimum font size, the line cap) and a check that the Log tab holds only
+  the log. The Help text and user manual no longer mention a status line.
+
+Full suite: `353 passed, 8 skipped`.
+
+## Speed and binning as radio buttons (2026-11-17)
+
+The Single/Grid/Auto tabs' Speed and Binning fields are now rows of
+mutually exclusive radio buttons, side by side, instead of drop-downs.
+
+- New `focus_control_panel.RadioChoice` (a `QWidget` with a `QButtonGroup`
+  of `QRadioButton`s in a horizontal layout): `options()`, `add_option()`,
+  `button(text)`, `current()`, `set_current()` (programmatic, emits
+  nothing), and `chosen(str)`, emitted only for user clicks (the role
+  `QComboBox.activated` played). The first option starts chosen, as the
+  combo boxes' first entries did (Slow, 1,1).
+- `FocusControlPanel`: `*_speed_combo`/`*_binning_combo` renamed to
+  `*_speed_choice`/`*_binning_choice`; `get_exposure_config`/
+  `set_exposure_config` use the new API. An unrecognized speed or binning
+  from the camera (e.g. `5.0MHz` set from another tool) is added as a new
+  button on all three tabs, with the Controller's warning reworded to
+  match. The panel's minimum width is unchanged (the tab pages scroll).
+- Tests: the combo-box tests now click the radio buttons; new tests for
+  the button rows (radio buttons, order, horizontal layout), exclusivity
+  and the initial choice, `set_current` emitting nothing, and the buttons
+  being disabled while running. Rendered at the default window size to
+  check the layout, including an added `5.0MHz` button.
+- Docs: `GUI_REFERENCE.md` (§2) and the plan's §3.6.
+
+Full suite: `357 passed, 8 skipped`.
+
+## Exposures record OBJECT (2026-11-17)
+
+Every exposure taken by a focus sequence or the Single tab now sets the
+camera's `OBJECT` keyword (not shown among the exposure fields) to
+`'<name>: focus=<focus>'`.
+
+- `ExposureConfig.configure(..., object_name=None)` writes `OBJECT`;
+  `Exposure.expose` passes it through.
+- `FocusSequence.object_name` (default `'unknown'`) and
+  `FocusSequence.exposure_object()`, which formats the name with the focus
+  read just before the exposure (`Focus.current`, to one decimal place).
+  `take_exposure` -- used by every live step and by `take_single_exposure`
+  -- passes it to `expose`. Replay never exposes, so never writes it; the
+  CLI's sequences use `'unknown'`.
+- The name comes from the Slew tab: `show_nearest_target` now takes the
+  found target's name and remembers it; typing in the target RA/Dec fields
+  (`textEdited`, user edits only) forgets it; `get_target_name()` returns
+  it or None. `Controller._name_object` sets each new sequence's (and
+  standalone exposure's) `object_name` from it.
+- Fake `ktl`: `OBJECT` keyword. New tests: `configure`/`expose` write it;
+  each step's `OBJECT` carries its focus; `'unknown'` by default; the Slew
+  tab keeps a found name, forgets it on typed coordinates, and restores it
+  on a new find; and, through the Controller, a sequence and a Single
+  exposure record the found target, typed coordinates give `'unknown'`.
+- Docs: `GUI_REFERENCE.md` (§2), `KTL_REFERENCE.md` (§4, §4.1), and the user
+  manual.
+
+Full suite: `365 passed, 8 skipped`.
+
+## Slew tab target Name, 2' check on OBJECT, exposure entries with object names (2026-11-17)
+
+Follow-up to the previous entry, at the user's request.
+
+- **Slew tab:** the "Target coordinates" heading is now "Target", with a new
+  **Name** field (`slew_target_name_edit`) above the target RA/Dec.
+  `show_nearest_target` fills it in; the user can edit it; typing in the
+  RA/Dec fields clears it (typed coordinates are no longer the named
+  target). `get_target_name()` returns its text, or None if empty, and
+  `get_target_coordinates()` the RA/Dec text. The old hidden
+  `_slew_target_name` is gone.
+- **2' check:** `Controller._name_object` uses the name only if the Slew
+  tab's target coordinates are within `MAX_TARGET_OFFSET_ARCMIN` (2') of the
+  telescope's current position, taken from the latest `POCORAA`/`POCODECA`
+  broadcasts (`_current_pointing`, `_target_offset`; no keyword read);
+  otherwise, or if they can't be compared, it logs a warning and leaves the
+  object `'unknown'`, without changing the Name field.
+- **Exposure drop-down:** entries are `'<file name> - <OBJECT>'`
+  (`ImagePanel.exposure_label`), or `'<file name> - focus=<focus>'` without
+  an object. The object comes from the file's FITS header
+  (`focus.exposure_object_name`, new `StepResult.object_name`), so replayed
+  exposures show theirs too; the simulated camera writes it into its
+  frames' headers. The drop-down's size no longer follows its entries
+  (`AdjustToMinimumContentsLengthWithIcon`, `EXPOSURE_MIN_CHARACTERS` = 3,
+  the largest that leaves the window's minimum width unchanged at 522 px on
+  macOS); it stretches to fill its row as before. A long entry is clipped
+  at the right edge (see the plan for how long names might be handled).
+- **Noted in the plan (§5.1):** slew targets are written as given (J2000
+  for catalog targets) to keywords the help describes as apparent; if so,
+  precession (~20') puts the telescope short of catalog targets, and the
+  2' check could fail when the telescope is pointed correctly by other
+  means.
+- Tests: Slew tab Name (filled, editable, cleared by typed coordinates,
+  heading); `_name_object` on target, within 1.5', off by 3' (warning, name
+  kept), with no position to compare, and with an edited name; the Single
+  tab's entry text; `exposure_object_name`; entry text with and without an
+  object; the drop-down's size unchanged by a long entry.
+- Docs: `GUI_REFERENCE.md` (§2), the user manual (Slew tab, object names,
+  Exposure drop-down), and the plan (§5.1).
+
+Full suite: `375 passed, 8 skipped`.
+
+## Image panel top row; long exposure entries; OBJECT cap (2026-11-17)
+
+- **Top row:** the Recenter button and the "Stretch:" label are gone; the
+  row is now "Exposure:", the exposure drop-down (stretching to fill the
+  row), and the stretch drop-down at the right (tooltip "Image stretch").
+  The 'r' key (either case) recenters, at any time, via `_on_key_press`;
+  'm' is unchanged. The Help text and user manual describe 'r'. The
+  status-bar alignment test now lines the Exp indicator up with the
+  stretch drop-down's right edge.
+- **Long exposure entries:** the exposure drop-down is a new
+  `image_panel.ElidingComboBox`, which draws its current entry shortened in
+  the middle (`QFontMetrics.elidedText`, `ElideMiddle`) to the edit field's
+  width, so the file name and the focus stay visible; widens its popup to
+  fit the longest entry (`showPopup`); and shows the full current entry as
+  a tooltip (handling `QEvent.ToolTip` itself, since entries are updated
+  with signals blocked). Rendered at the default size: `n3247.fits - 2MASS
+  J04361038…rus field star): focus=345.0`.
+- **OBJECT cap:** `FocusSequence.OBJECT_MAX_LENGTH` (68, the most a FITS
+  string value holds); `exposure_object` shortens only the name, ending in
+  `'...'` (ASCII, as FITS headers require), so the `: focus=...` part is
+  always kept.
+- Tests: top-row layout (no Recenter button, no label, stretch at the
+  right, exposure drop-down stretching), 'r'/'R' recentering while
+  selection is disabled, middle elision keeping both ends, popup width,
+  tooltip text, and the 68-character cap.
+- Docs: `GUI_REFERENCE.md` (§2, §3), the user manual.
+
+Full suite: `382 passed, 8 skipped`.
+
+## Recenter hotkey is case sensitive (2026-11-17)
+
+At the user's request, only lowercase 'r' recenters the image (it had
+accepted 'r' or 'R'). `ImagePanel._on_key_press` checks `event.key == 'r'`;
+the 'R' test now checks that it does nothing. The Help text, user manual,
+and `GUI_REFERENCE.md` already named 'r'.
+
+## Focus curve: arcsec axis, data-only limits, star marker (2026-11-18)
+
+- **Binning per exposure:** new `focus.exposure_binning(path)`, from the
+  "CCD pixel" WCS scale in the FITS header, `CD1_1C`/`CD2_2C` (the camera
+  writes no binning keyword; per the user, these are equal and 1, 2, or 4).
+  An unreadable file, missing keywords, unequal values, or a value other
+  than 1, 2, or 4 give None and a logged warning. Carried as the new
+  `StepResult.binning`; the simulated camera writes the keywords from its
+  `BINNING` setting.
+- **Right axis:** `FocusCurvePanel.ax_arcsec`, a `twinx` of `ax`, always
+  shown: FWHM in arcsec (`ARCSEC_PER_UNBINNED_PIXEL` = 0.1665 times the
+  binning) when every point shares one known binning, otherwise FWHM in
+  pixels, repeating the left axis (at the user's request, rather than
+  hiding it). Its limits are the left axis's scaled; clearing a twin axis
+  moves its ticks and label to the left, so they're put back on the right
+  after each clear.
+- **Limits:** after the measured points are drawn, `autoscale_view()` then
+  `set_autoscale_on(False)`, so the fitted curve and best focus never
+  change the limits.
+- **Best focus:** an open black star (`marker='*'`, `s=200`, no fill,
+  black edge).
+- Tests: `exposure_binning` (1/2/4, missing, unreadable, unequal or
+  unexpected values, each warned), results carrying the binning, data-only
+  limits (points whose vertex lies beyond them), the star marker, the
+  right axis in arcsec for each binning and in pixels when unknown or
+  mixed, shown with no points, and staying on the right across redraws.
+- Docs: `GUI_REFERENCE.md` (§3) and the user manual.
+
+Full suite: `399 passed, 8 skipped`.
+
+## FWHM reported in pixels and arcsec (2026-11-18)
+
+Every reported FWHM -- each step and single exposure, and the best fit --
+now gives arcseconds as well as pixels when the binning is known.
+
+- `focus.py`: `ARCSEC_PER_UNBINNED_PIXEL` moved here from the focus curve
+  panel (which now imports it); new `common_binning(binnings)` (the one
+  binning all share, else None) and `fwhm_text(fwhm, binning)`
+  (`'3.21 pix (1.07 arcsec)'`, or `'3.21 pix'`). `FocusSequence.binnings`
+  (per collected exposure, kept through reanalysis rather than re-reading
+  headers) and the `binning` property (their common binning).
+- Controller: step, single-exposure, and "Sequence finished" messages use
+  `fwhm_text` -- each result's own binning, and the sequence's common
+  binning for the best fit; the standalone sequence's bookkeeping records
+  the binning too. `FocusCurvePanel` uses `common_binning`.
+- CLI (`scripts/focus.py`): "Expected sigma: x pixels" became "Expected
+  FWHM: ..." (the value was always an FWHM), with arcsec when known.
+- Tests: `fwhm_text`, `common_binning`, binnings kept through reanalysis,
+  arcsec in each step and the best fit for a live sequence (binning known),
+  pixels only for a replay (no binning recorded), and the CLI's new
+  wording.
+- Docs: `GUI_REFERENCE.md` (§3) and the user manual.
+
+Full suite: `410 passed, 8 skipped`.
+
+## Single tab: "Use current focus" (2026-11-18)
+
+A "Use current focus" button below the Single tab's focus value fills it
+with the telescope's current focus. Acquire is unchanged: it still asks to
+move to the requested focus, and `Focus.set_to` skips the move when the
+commanded focus (`POCSECPD`) is already within 0.1 of it.
+
+- `FocusControlPanel`: `single_current_focus_button` (a row under "Focus
+  value:" in the focus group; disabled while running, with the other
+  configuration widgets), the `useCurrentFocusRequested` signal, and
+  `set_single_focus(value)` (rounds; the field holds whole units). Help text
+  updated.
+- `Controller.use_current_focus`: the latest `POCSECPA` broadcast (no
+  keyword read), rounded; without one (e.g. no telescope), a warning and no
+  change.
+- Tests: the button's place, signal, rounding, and disabling; through the
+  Controller, filling from the current focus, acquiring there without a
+  focus write ("No change needed") while still exposing, and the
+  no-value warning. The button-list test now expects it.
+- Docs: `GUI_REFERENCE.md` (§3) and the user manual.
+
+Full suite: `417 passed, 8 skipped`.
+
+## Image panel: North up (2026-11-18)
+
+The image panel drew frames with row 0 at the bottom (`origin='lower'`),
+which put North at the bottom and East to the left. It now draws row 0 at
+the top (`origin='upper'`, `set_ylim(y0 + view_h, y0)` in
+`_apply_view_limits`): North up, East still left. Only the display changes
+-- pixel coordinates, the measurement box, 'm' selection, and wheel zoom
+work in the same data coordinates as before -- and the vertical
+scrollbar's top now shows the top of the image. The "Outlier centroid"
+label is placed above its box in the new orientation. The CLI's live
+`FocusPlot` (matplotlib, `origin='lower'`) is unchanged. Tests: the image's
+origin and inverted y-axis; the wheel-zoom test now sorts the limits.
+
+## Image panel: pixel-value readout (2026-11-18)
+
+While the pointer is over the image, a small label just below and to the
+right of it shows `x, y: value`: the pixel under the pointer (`round` of
+the data coordinates, since `imshow` centres pixels on integers) and its
+*raw* value. The pixel is 0-based, matching the measured centroids, 'm'
+selection, and Log messages; 1-based (as in FITS and DS9) was tried and
+reverted, since the readout and the Log would then disagree by one for
+the same pixel.
+
+- `StepResult.raw`: the image data as read from the file (before background
+  subtraction), in the file's own type -- 16-bit unsigned for the camera,
+  so a quarter the size of the float64 `frame` -- set by all three
+  `StepResult` constructions in `focus.py` (`step`, `reanalyze`, `single`).
+  `photometry.image_quality` now returns a copy of the file's data in its
+  own type (measuring on a float copy), and `focus.py` builds `frame` as
+  `data.astype(float) - bkg`. Defaults to None; the displayed `frame` is
+  still background-subtracted. Without raw data the readout gives only
+  the pixel.
+- `ImagePanel.readout`: a `QLabel` child of the canvas (so moving it never
+  redraws the figure), transparent to the mouse, in the Log tab's
+  fixed-width system font, white on semi-opaque black. Driven by
+  matplotlib's `motion_notify_event` (`_on_mouse_move`), converting
+  matplotlib's physical, bottom-left event position to Qt's logical,
+  top-left one with `device_pixel_ratio`. `READOUT_OFFSET = 14` screen
+  pixels from the pointer; `_readout_position` flips it left/above near the
+  canvas's right/bottom edge.
+- Hidden when the pointer leaves the axes or the canvas
+  (`axes_leave_event`/`figure_leave_event`), is beyond the image, and on any
+  view or exposure change that would make it stale (`_render`, scrollbar
+  moves, `reset`) until the mouse next moves. Wheel zoom keeps the point
+  under the pointer fixed, so it leaves the readout as is.
+- `readout_text(xdata, ydata)` is public, for tests.
+- Tests: raw data kept and matching the file, including a 16-bit
+  (`BZERO`) file kept as `uint16`; 0-based text and value; position
+  below-right and flipped near the edges; hiding off the image, on leaving,
+  and on exposure/scroll/reset changes; the no-raw fallback.
+- Docs: `GUI_REFERENCE.md` (§3, history) and the user manual (also now
+  notes North up).
+
+Full suite: `426 passed, 8 skipped`.
+
+## Marked star cleared by a slew (2026-11-18)
+
+A star marked with 'm' set `Controller.method` to its `(x, y)` pixel
+position for the rest of the session: every later sequence, Single
+exposure, and reanalysis measured the source nearest that position, with no
+distance limit, so after moving to a new field it measured whichever star
+happened to be nearest the old spot. Now `move_to_target` calls
+`_clear_marked_source()` just before starting the `SlewWorker` (so only a
+slew that actually starts clears it, not a rejected or unparseable
+request), which sets the method back to `'brightest'` and logs "Cleared the
+marked star; measuring the brightest star." if a star had been marked. No
+distance check between the old and new pointing. Slews started outside
+this GUI aren't detected; that's listed as a known issue (GUI_REFERENCE §4,
+the user manual's Troubleshooting section) and isn't planned unless it
+proves troublesome. The in-app Help tab's "Source selection" text says
+when the mark is cleared.
+
+Tests: a started slew clears the mark and logs it; an unparseable target
+or an ignored request (something running) keeps it; with nothing marked,
+nothing is logged. Docs: `GUI_REFERENCE.md` (§3, history) and the user
+manual.
+
+Full suite: `429 passed, 8 skipped`.
+
+## GUI tests: settle Qt after each test (2026-11-18)
+
+About 1 in 4 runs of the GUI tests printed `RuntimeError: libshiboken:
+Internal C++ object (FigureCanvasQTAgg) already deleted.` from matplotlib's
+`_draw_idle` (also on the previous commit, so not caused by the readout
+or slew changes), and one full-suite run crashed outright. A test's windows
+sit in reference cycles (Controller, signal connections), so Python freed
+them at an unpredictable later point, often during a later test; a
+`draw_idle` they had scheduled (a zero-delay Qt timer) then fired on the
+deleted canvas. A new autouse fixture in `tests/gui/conftest.py`,
+`_settle_qt`, runs after every GUI test: process pending events while the
+widgets still exist, `gc.collect()`, deliver deferred deletes, and process
+events again. Qt modules are imported once at the top of the conftest,
+since `test_qt_shim.py` hides PySide6 from imports until its own teardown.
+15 repeated GUI-suite runs afterward: no errors. The GUI tests take about
+50% longer (≈65 s to ≈93 s) because of the per-test collection.
+
+Full suite: `429 passed, 8 skipped`.
+
+## Pointing offsets (2026-11-18)
+
+Plan: `claude/pointing_offset_plan.md` (its §11 records the as-built
+details). After a Single exposure, 'p' over the star that should be
+centered gives the offset that centers it; the Slew tab's "Offset by ..."
+button applies it through the guider offsets and marks the telescope on
+target.
+
+- `pointing.py` (new, no GUI or ktl): `PointingOffset` (star, center,
+  `east`/`north` in arcsec, exposure; `size`, `text()`), `offset_text`
+  (`'12.3″ E, 4.5″ N'`), `image_center` (`((nx-1)/2, (ny-1)/2)`),
+  `nearest_source` (within `SNAP_RADIUS`, 10 binned pixels), and
+  `pointing_offset` (RA and Dec increase toward decreasing pixel number, so
+  `east = -(x - x0)*scale`, `north = -(y - y0)*scale`; refuses an unknown
+  binning or more than `MAX_POINTING_OFFSET`, 300″).
+- `StepResult.sources`: every detected centroid (`focus.source_centroids`
+  of `image_quality`'s table), so 'p' needs no new detection.
+- `services/nickelpoco.py`: `apply_guider_offset` (arm `POCGDFIN`, write
+  `POCGDIX`/`POCGDIY` as binary radians, wait for `POCGDFIN != 1`, fail on
+  `-1`), `mark_guider_on_target` (`POCGDOT = 1`, then `POCOT == 0`),
+  `guider_offset_radians`; unverified module constants
+  `GUIDER_OFFSET_IN_SERIES`, `GUIDER_OFFSET_SIGN`, `GUIDER_OFFSET_COS_DEC`,
+  `GUIDER_MOVE_TIMEOUT`, `ON_TARGET_TIMEOUT`.
+- `slew.NickelTelescopePointing.apply_offset`: checks movement and
+  tracking, logs, offsets, marks on target (not reaching on target only
+  warns).
+- `gui/model/pointing_offset_worker.py`: `PointingOffsetWorker`, like
+  `SlewWorker`.
+- `ImagePanel`: 'p' (`pointingStarSelected`, gated like 'm'),
+  `show_pointing_offset`/`clear_pointing_offset` (cyan circle, line, center
+  cross, label; drawn only on its own exposure; `reset` discards it),
+  `current_result`.
+- `FocusControlPanel`: `slew_offset_button` below "Move to Target"
+  (`Offset by —`, disabled; `show_pointing_offset(text)` labels and
+  enables it while nothing runs), `applyPointingOffsetRequested`; Help-tab
+  text.
+- `Controller`: `pointing_offset`, `offset_worker`,
+  `_on_pointing_star_selected`, `apply_pointing_offset`,
+  `_clear_pointing_offset` (after the worker finishes, on a slew, and on a
+  new sequence), and `_busy()`, now used for every one-operation-at-a-time
+  check.
+- Fake `ktl`: `POCGDFIN`, `POCGDIX`/`POCGDIY`, `POCGDOT` behave as above,
+  with failure switches.
+- The longest label (`Offset by 300.0″ W, 300.0″ S`) was checked earlier:
+  it fits the button without widening the window.
+- Tests: `tests/test_pointing.py` (24) and GUI tests for the panel,
+  button, and Controller (17). Docs: `GUI_REFERENCE.md`,
+  `KTL_REFERENCE.md`, `ktl_interface_refactor.md` §5.2, the user manual,
+  README.
+
+Follow-up, after a first try with Replay: the offset is drawn on every
+displayed exposure the same size as its own (`pointing.image_center` of the
+frame equals `offset.center`), not only on the one it was measured on, so
+it stays visible while browsing a sequence; and its label goes below the
+star when the star is south of the center (larger row), where the line
+runs up from the star and would otherwise cross the label. Tests: drawn on
+the sequence's other exposures, not on a different-size one, and the
+label's side for a star north and south of the center.
+
+Full suite: `473 passed, 8 skipped`.
+
+## Unmeasurable exposures shown; Single-tab FWHM (2026-11-18)
+
+A photometry failure used to keep the exposure from being displayed: with
+no star detected, `photutils.detect_sources` returns None, and
+`find_sources` failed with an `AttributeError`, failing the whole step.
+
+- `photometry.find_sources` now raises `ValueError('No sources were
+  detected in the image.')` in that case.
+- `focus.measure_exposure(file, method)` wraps `image_quality`: on any
+  failure it logs a warning ("Could not measure the image quality of
+  <file>: <reason>  Showing it without a measurement.") and returns the
+  image less its median, with `fwhm`/`centroid`/`stamp` None, no `sources`,
+  and `photometry_error`. A file that can't be read still raises. All three
+  `StepResult` constructions use it.
+- `StepResult`: `fwhm`, `stamp`, `centroid` may be None;
+  `photometry_error`; `measured` property.
+- `step()`/`reanalyze()` yield an unmeasured exposure (so it's shown) and
+  then raise `ValueError` ("Could not measure <file> (<reason>); stopping the
+  sequence/reanalysis."), since a fit or the Auto search can't go on without
+  it. `take_single_exposure` simply returns it.
+- `fit_best_focus` leaves out exposures with no measurement (e.g. one just
+  before an Interrupt); `fwhm_text(None)` is `'not measured'`; new
+  `fwhm_arcsec(fwhm, binning)`. The CLI's live plot skips an unmeasured
+  exposure.
+- GUI: the image panel shows an unmeasured exposure without a box; the
+  curve panel ignores it; the Controller logs it ("its FWHM could not be
+  measured"); 'p' on it reports that no star was found.
+- Single tab: `single_fwhm_label` below "Use current focus", spanning the
+  row so it lines up with "Focus value:" (`_group_box` now takes a `None`
+  label for a spanning row). `set_single_fwhm(pixels, arcsec)` shows
+  `FWHM: 3.21 (pix); 1.07 (arcsec)`, with `—` for an unknown value; the
+  Controller sets it after each Single exposure and after reanalyzing one
+  (`_show_single_fwhm`). It doesn't change the tab's minimum width.
+- Tests: no-source detection; `measure_exposure` (failure kept, unreadable
+  file raises); `step`/`reanalyze` yield then stop; `fit_best_focus` and the
+  FWHM helpers with no measurement; image and curve panels; the label
+  (placement, alignment, formatting); and through the Controller, the
+  label after an exposure and a reanalysis, an unmeasurable Single exposure
+  (shown, logged, 'p' finds no star), and a Grid sequence that shows the
+  exposure and then stops. Docs: `GUI_REFERENCE.md`, the user manual, the
+  Help tab.
+
+Full suite: `488 passed, 8 skipped`.
+
+## Several stars on the focus curve (2026-11-18)
+
+Plan: `claude/multi_star_plan.md` (its §11 records the as-built details).
+
+- **Photometry split from cutouts** (`photometry.py`): `measure_sources`
+  (read, background, detect and measure every source), `select_source`
+  (brightest, or nearest a position), `source_quality`/`source_centroid`,
+  and `measure_quality` (the measurement by method, including `weighted`).
+  `image_quality` is built from these and no longer returns a stamp.
+  `extract_stamp` now clips at the image's low edges (a negative start used
+  to wrap, giving an empty cutout).
+- **No stored cutouts** (`focus.py`): `StepResult.stamp` is now a method that
+  cuts on demand, and `FocusSequence.source_stamps` is gone. Only the CLI's
+  `execute` calls it, when plotting. `StepResult.sources` is the full source
+  table (`source_positions` gives the `(N, 2)` centroids for 'p'), with
+  `source_index` the selected row. `centroid_outliers` (the existing
+  position statistic, for every point at once) backs
+  `FocusPlot.is_outlier`.
+- **`selection.py`** (new, no GUI): `StarSelection` over a set of
+  `StepResult`s. It starts from the first star (each exposure's own
+  selected source and outlier flag). `add` snaps to the source nearest the
+  cursor (within `SNAP_RADIUS`) and matches it in the other exposures within
+  `MATCH_RADIUS` (10 binned pixels); a star already using that source is
+  replaced (re-matched), not duplicated. `remove` takes any star, including
+  the first. `points()` pools every star's measurements; `fit()` fits one
+  quadratic ("No data to fit", "Too few points to fit"). `stars_in` and
+  `mean_fwhm` give one exposure's stars. `append`/`replace` handle results
+  as they arrive.
+- **GUI:**
+  - `ImagePanel`: 'a'/'d' (`starAdded`/`starRemoved`, gated like 'm'), and
+    `set_star_boxes` (every selected star boxed, red or yellow as before).
+    An exposure it doesn't cover boxes its own measured source, e.g. an
+    earlier Single exposure.
+  - `FocusCurvePanel.set_points(points, binnings)`.
+  - `Controller`: `_selection` (the loaded sequence: curve and refit) and
+    `_single_selection` (the latest Single exposure: the Single tab's mean
+    FWHM). Kept separate, so that a Single exposure taken with a sequence
+    loaded (e.g. to confirm the best focus) doesn't replace the sequence's
+    curve; this was caught by the live-workflow test.
+    `_on_star_added`/`_on_star_removed` update a selection, redraw, log, and
+    for a sequence `_refit()`: log the best focus and set the Single tab's
+    default, or warn. 'm' and a new sequence start the selection again from
+    the first star; the 'm' mark (`Controller.method`) is untouched by
+    'a'/'d', so it still seeds the next sequence.
+- **Tests:** `tests/test_selection.py` (16) and the photometry split, on a
+  new `three_star_sweep` fixture (`conftest.py`); image panel, curve panel,
+  and Controller tests for 'a'/'d' (Replay and Single).
+- **Docs:** `GUI_REFERENCE.md`, the user manual, the Help tab.
+- **Noticed:** the "FWHM" everywhere was `(SIGX + SIGY)/2`, a moment
+  width (sigma), about FWHM / 2.355; fixed in the next entry.
+
+Full suite: `522 passed, 8 skipped`.
+
+## Image quality reported as FWHM (2026-11-18)
+
+`photometry.moment2d`'s equations were confirmed: the centroid is the
+intensity-weighted mean, `cx = sum(x*z)/sum(z)`, and the width the
+intensity-weighted (population) standard deviation,
+`sx**2 = sum(x**2*z)/sum(z) - cx**2`. The image quality was the mean of
+those widths, a sigma, but was labeled and used as an FWHM everywhere (log,
+curve, Single tab, arcsec).
+
+- `photometry.SIGMA_TO_FWHM` (`2*sqrt(2*ln 2)`, about 2.355);
+  `source_quality` and `weighted` now return FWHM = 2.355 × the mean moment
+  width. Everything downstream (`StepResult.fwhm`, `img_quality`, the fits,
+  `fwhm_text`/`fwhm_arcsec`, the Single tab) is therefore an FWHM. The best
+  focus, the Auto search, and matching are unaffected by a constant scale.
+- The box and cutout sizes, which were `10 ×` the value (10σ), are now
+  `focus.STAMP_SIZE_FWHM` (4) FWHMs, about 9.4σ, so they look as before.
+- `evaluate_sources`' ellipticity warning reported the count of small
+  sources; it now reports the ellipticity count.
+- Tests: `moment2d` on a known distribution; a Gaussian star of known FWHM
+  measures as that FWHM. Measured on synthetic stars of FWHM 3, 4, and 6
+  pixels: 2.987, 3.982, 5.973.
+- Docs: the user manual and README say, briefly, that the FWHM comes from
+  the second moments converted as for a Gaussian (FWHM ≈ 2.35σ), may read
+  somewhat high for stars' stronger wings, and doesn't bias the best focus.
+
+Full suite: `524 passed, 8 skipped`.
+
+## Fixed focus-curve limits (2026-11-18)
+
+Pressing 'a'/'d' on a star in turn ("blinking" it) changed the plotted
+points, and with them the autoscaled limits. Now:
+
+- `StarSelection.plot_limits()`: the FWHM range holding `LIMIT_FRACTION`
+  (95%) of *every* detected source's FWHM in every measured exposure (the
+  2.5th to 97.5th percentiles), widened by `LIMIT_EXPANSION` (1.3) about its
+  midpoint; the focus range is the focus values with `FOCUS_MARGIN` (5%,
+  matplotlib's default) on each side. Every source, not just the selected
+  stars, so there's room for any star that might be added. A zero-width
+  range (one value) gets ±10% of it.
+- `FocusCurvePanel.fix_limits(focus_limits, fwhm_limits)` holds them through
+  any `set_points`, including none (the axes still show); `reset` releases
+  them. The right (arcsec) axis follows the left as before.
+- `Controller._on_focus_worker_finished` fixes them after a sequence's run
+  or remeasurement ('step' or 'reanalyze' mode on the loaded sequence),
+  however it ended. A new sequence and 'm' already reset the curve at their
+  start, releasing the old limits. While a sequence runs, the limits follow
+  the points as before.
+- Tests: the limits' calculation, independence from the selected stars, and
+  the edge cases; the panel holding and releasing them; and through the
+  Controller, fixed at the end of a Replay, unmoved by 'a'/'d', and
+  recalculated by 'm' and by a new sequence.
+- Docs: the user manual, `GUI_REFERENCE.md`.
+
+Full suite: `530 passed, 8 skipped`.
+
+Follow-up: limits from 95% of every source's FWHM needed tuning in practice
+(`LIMIT_FRACTION`/`LIMIT_EXPANSION` were tried at other values), so they now
+come from the fit when the sequence finishes (the first star's). The FWHM
+range is the fitted curve's full range over the plotted focus values (its
+minimum to its highest point), extended by `LIMIT_PADDING` (30%) of that
+range above and below, and the lower limit is never below 0. With too few
+points to fit, the points' range is used; a flat range gets ±10%. The focus
+range is unchanged. `LIMIT_FRACTION`/`LIMIT_EXPANSION` are gone. Tests: the
+limits from the fit, clipped at 0, from the points without a fit, and none
+without points.
+
+Full suite: `531 passed, 8 skipped`.
+
+## Always record (2026-11-18)
+
+With recording off (`RECORD = No`), exposures go to scratch files whose
+`OBSNUM` cycles back to 1 after `OBSNUMMAX`; if every exposure overwrites
+the same file:
+
+- `Exposure.expose` waits for `FITSFILE` to change, so each exposure would
+  time out (`FILE_TIMEOUT`);
+- 'm' re-reads the files, so it would remeasure the last frame for every
+  exposure;
+- the GUI keys exposures by path (image-panel updates, star boxes,
+  'a'/'d', the drop-down), so they'd collide.
+
+Supporting that is deferred (options discussed: 'm' choosing from the
+in-memory source tables, completion by the file's modification time or a
+repeated `FITSFILE` broadcast, and a per-exposure key independent of the
+path). Instead the GUI always records:
+
+- `ExposureConfig.recording()`/`set_recording(on)`; `configure(record=...)`
+  writes a bool as `Yes`/`No` (the CLI's `record=True` was written as the
+  text `True`).
+- `FocusSequence.record`: if set, `take_exposure` sets `RECORD` to it
+  before every exposure, so a change made elsewhere (e.g. the
+  data-acquisition GUI) during a run is overridden.
+- `FocusWorker.run` wraps a run that takes exposures (a live sequence, or a
+  single exposure) in `_recording`: read `RECORD` (a failure stops the run
+  before any exposure), set `record = True`, run, then write the original
+  value back in a `finally`, after success, failure, or Interrupt. When it
+  was off, the Log notes turning it on and back off. Reanalysis and Replay
+  never touch it. The CLI still records (`record=True`) without restoring.
+- Tests: `RECORD` is `Yes` at every exposure even when turned off in between,
+  and restored (from No and from Yes) after a sequence, a single exposure, a
+  failure, and an Interrupt; reanalysis and Replay never write it; an
+  unreadable `RECORD` stops the run; the Yes/No helpers.
+- Docs: the user manual, `GUI_REFERENCE.md`, `KTL_REFERENCE.md`,
+  `ktl_interface_refactor.md` §5.2.
+
+Full suite: `539 passed, 8 skipped`.
+

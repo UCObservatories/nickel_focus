@@ -1,15 +1,16 @@
 """
-Focus-sequence configuration and controls.
+Tabbed telescope/focus-sequence configuration and controls.
 
-See GUI_DESIGN.md §5.4 and claude/GUI_IMPLEMENTATION.md's Phase 4 for the tabbed
-redesign.  This view only exposes configuration and emits signals for requested
+One tab per action (Slew, Single, Grid, Auto, Replay), plus Log and Help.
+This view only exposes configuration and emits signals for requested
 actions; it never constructs a :class:`~nickel_focus.focus.FocusSequence` or
 talks to :class:`~nickel_focus.gui.model.focus_worker.FocusWorker` itself --
 that's the Controller's job.
 """
 from pathlib import Path
+import re
 
-from nickel_focus.gui.qt import QtCore, QtWidgets
+from nickel_focus.gui.qt import QtCore, QtGui, QtWidgets
 
 
 def _int_spin(minimum, maximum, value):
@@ -35,6 +36,260 @@ def _float_spin(minimum, maximum, value):
     return spin
 
 
+class ExposureTimeSpinBox(QtWidgets.QDoubleSpinBox):
+    """
+    An exposure-time field whose edits take effect only when Enter is pressed,
+    like the data-acquisition GUI's.
+
+    While the field holds an edit that hasn't been committed, its background is
+    light red.  Pressing Enter commits it: the background clears and
+    :attr:`valueCommitted` is emitted.  Values set by the program
+    (:meth:`set_committed_value`) are committed as they're set.  The committed
+    value -- not an uncommitted edit -- is what :meth:`committed_value`
+    returns.
+
+    Attributes
+    ----------
+    valueCommitted : :class:`PySide6.QtCore.Signal`
+        Emitted with the new value when the user presses Enter.
+    """
+    valueCommitted = QtCore.Signal(float)
+
+    PENDING_STYLE = 'QDoubleSpinBox { background-color: #ffcdd2; }'
+    """Style sheet for a field with an uncommitted edit (light red)."""
+
+    def __init__(self, minimum, maximum, value, parent=None):
+        super().__init__(parent)
+        self.setRange(minimum, maximum)
+        # The camera reports exposure times to the millisecond.
+        self.setDecimals(3)
+        self.setValue(value)
+        self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self._committed = self.value()
+        self._pending = False
+        self.lineEdit().textEdited.connect(lambda text: self._set_pending(True))
+
+    def committed_value(self):
+        """The last committed value (ignoring any uncommitted edit)."""
+        return self._committed
+
+    def is_pending(self):
+        """Whether the field holds an uncommitted edit."""
+        return self._pending
+
+    def set_committed_value(self, value):
+        """Show ``value`` as the committed value, discarding any uncommitted edit."""
+        self.setValue(value)
+        self._committed = self.value()
+        self._set_pending(False)
+
+    def stepBy(self, steps):
+        """Arrow-key/wheel steps are edits like any other: pending until Enter."""
+        super().stepBy(steps)
+        self._set_pending(True)
+
+    def keyPressEvent(self, event):
+        """Commit the edit on Enter/Return."""
+        if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+            self.interpretText()
+            self._committed = self.value()
+            self._set_pending(False)
+            self.valueCommitted.emit(self._committed)
+        super().keyPressEvent(event)
+
+    def _set_pending(self, pending):
+        self._pending = pending
+        self.setStyleSheet(self.PENDING_STYLE if pending else '')
+
+
+class LogView(QtWidgets.QPlainTextEdit):
+    """
+    A read-only, console-like view of log output.
+
+    - **Font:** the system's fixed-width font, sized to fit about
+      :attr:`TARGET_COLUMNS` characters across the view whenever it's resized
+      (within :attr:`MIN_POINT_SIZE` to :attr:`MAX_POINT_SIZE`).
+    - **Colors:** text is expected as the console's log formatter writes it,
+      with ANSI escape codes for color and bold (see
+      :func:`~nickel_focus.pkg.logger.color_text`); :meth:`append_text`
+      renders them rather than showing them.
+    - **History:** the most recent :attr:`MAX_LINES` lines are kept; the view
+      stays scrolled to the newest line unless the user has scrolled up.
+    """
+
+    TARGET_COLUMNS = 80
+    """The number of characters the font is sized to fit across the view."""
+
+    MIN_POINT_SIZE = 6.
+    """The smallest font size, in points, however narrow the view."""
+
+    MAX_POINT_SIZE = 18.
+    """The largest font size, in points, however wide the view."""
+
+    MAX_LINES = 5000
+    """The number of most recent lines kept."""
+
+    _ANSI = re.compile('\x1b\\[([0-9;]*)m')
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        # The style hint and fixed pitch make Qt pick a monospace face even
+        # where the system names only a generic family (e.g. "monospace")
+        # it can't resolve.
+        font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+        font.setFixedPitch(True)
+        self.setFont(font)
+        # A QPlainTextEdit grows without bound by default; only the oldest
+        # lines are dropped.
+        self.setMaximumBlockCount(self.MAX_LINES)
+
+    def columns(self):
+        """How many characters currently fit across the view."""
+        width = self.viewport().width() - 2 * self.document().documentMargin()
+        return int(width // QtGui.QFontMetricsF(self.font()).horizontalAdvance('M'))
+
+    def resizeEvent(self, event):
+        """Resize the font to fit :attr:`TARGET_COLUMNS` characters across."""
+        super().resizeEvent(event)
+        self._fit_font()
+
+    def _fit_font(self):
+        width = self.viewport().width() - 2 * self.document().documentMargin()
+        if width <= 0:
+            return
+        font = QtGui.QFont(self.font())
+
+        def fits(size):
+            font.setPointSizeF(size)
+            advance = QtGui.QFontMetricsF(font).horizontalAdvance('M')
+            return advance * self.TARGET_COLUMNS <= width
+
+        # Start from a proportional estimate, then step (in quarter points)
+        # to the largest size that still fits: glyph widths change in
+        # discrete steps, so the estimate alone can land either side.
+        advance = QtGui.QFontMetricsF(font).horizontalAdvance('M')
+        size = font.pointSizeF() * width / (self.TARGET_COLUMNS * advance)
+        size = round(min(max(size, self.MIN_POINT_SIZE), self.MAX_POINT_SIZE) * 4) / 4
+        while size < self.MAX_POINT_SIZE and fits(size + 0.25):
+            size += 0.25
+        while size > self.MIN_POINT_SIZE and not fits(size):
+            size -= 0.25
+        if size != self.font().pointSizeF():
+            font.setPointSizeF(size)
+            self.setFont(font)
+
+    def append_text(self, text):
+        """
+        Append ``text`` (one log record, possibly several lines) as a new line,
+        rendering its ANSI color and bold codes.
+        """
+        scrollbar = self.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum()
+
+        document = self.document()
+        cursor = QtGui.QTextCursor(document)
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        if not document.isEmpty():
+            cursor.insertBlock()
+        char_format = QtGui.QTextCharFormat()
+        position = 0
+        for match in self._ANSI.finditer(text):
+            if match.start() > position:
+                cursor.insertText(text[position:match.start()], char_format)
+            char_format = self._apply_codes(char_format, match.group(1))
+            position = match.end()
+        if position < len(text):
+            cursor.insertText(text[position:], char_format)
+
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
+    @staticmethod
+    def _apply_codes(char_format, codes):
+        """
+        The text format after the ANSI SGR ``codes`` (e.g. ``'1;38;2;253;174;97'``):
+        ``0`` (or none) resets, ``1`` is bold, ``38;2;r;g;b`` sets the color.
+        Other codes are ignored.
+        """
+        values = [int(v) for v in codes.split(';') if v != '']
+        new_format = QtGui.QTextCharFormat(char_format)
+        i = 0
+        if not values:
+            return QtGui.QTextCharFormat()
+        while i < len(values):
+            value = values[i]
+            if value == 0:
+                new_format = QtGui.QTextCharFormat()
+            elif value == 1:
+                new_format.setFontWeight(QtGui.QFont.Weight.Bold)
+            elif value == 38 and values[i + 1:i + 2] == [2] and len(values) >= i + 5:
+                new_format.setForeground(QtGui.QColor(*values[i + 2:i + 5]))
+                i += 4
+            i += 1
+        return new_format
+
+
+class RadioChoice(QtWidgets.QWidget):
+    """
+    A choice among a few options, shown as a row of mutually exclusive radio
+    buttons side by side.
+
+    Parameters
+    ----------
+    options : iterable of :obj:`str`
+        The options, in order.  The first is chosen initially.
+    parent : :class:`PySide6.QtWidgets.QWidget`, optional
+        Passed through to the base class.
+
+    Attributes
+    ----------
+    chosen : :class:`PySide6.QtCore.Signal`
+        Emitted with the option's text when the user clicks one of the
+        buttons -- never when the choice is set by the program
+        (:meth:`set_current`).
+    """
+    chosen = QtCore.Signal(str)
+
+    def __init__(self, options, parent=None):
+        super().__init__(parent)
+        self._layout = QtWidgets.QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.addStretch(1)
+        self._group = QtWidgets.QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._group.buttonClicked.connect(lambda button: self.chosen.emit(button.text()))
+        for option in options:
+            self.add_option(option)
+        self._group.buttons()[0].setChecked(True)
+
+    def options(self):
+        """The options, in order."""
+        return [button.text() for button in self._group.buttons()]
+
+    def add_option(self, text):
+        """Add an option (after the existing ones), not chosen."""
+        button = QtWidgets.QRadioButton(text)
+        self._group.addButton(button)
+        self._layout.insertWidget(self._layout.count() - 1, button)
+
+    def button(self, text):
+        """The radio button for option ``text``, or None if there isn't one."""
+        for button in self._group.buttons():
+            if button.text() == text:
+                return button
+        return None
+
+    def current(self):
+        """The chosen option's text."""
+        return self._group.checkedButton().text()
+
+    def set_current(self, text):
+        """Choose option ``text`` (which must exist), without emitting :attr:`chosen`."""
+        self.button(text).setChecked(True)
+
+
 def _exposure_field_rows():
     """
     Build exposure-time/speed/binning fields, used identically by the Single,
@@ -43,30 +298,29 @@ def _exposure_field_rows():
     Returns
     -------
     tuple
-        ``(rows, exptime_spin, speed_combo, binning_combo)``, where ``rows`` is
-        a list of ``(label, widget)`` pairs suitable for
-        :func:`~nickel_focus.gui.views.focus_control_panel._group_box`.
+        ``(rows, exptime_spin, speed_choice, binning_choice)``, where ``rows``
+        is a list of ``(label, widget)`` pairs suitable for
+        :func:`~nickel_focus.gui.views.focus_control_panel._group_box`,
+        ``exptime_spin`` is an :class:`ExposureTimeSpinBox`, and the choices
+        are :class:`RadioChoice` rows.
     """
-    exptime_spin = _float_spin(0.1, 600., 5.)
-    speed_combo = QtWidgets.QComboBox()
-    speed_combo.addItems(['Slow', 'Fast'])
-    binning_combo = QtWidgets.QComboBox()
-    binning_combo.addItems(['1,1', '2,2', '4,4'])
+    exptime_spin = ExposureTimeSpinBox(0.1, 600., 5.)
+    speed_choice = RadioChoice(['Slow', 'Fast'])
+    binning_choice = RadioChoice(['1,1', '2,2', '4,4'])
     rows = [
         ('Exposure time (s):', exptime_spin),
-        ('Speed:', speed_combo),
-        ('Binning:', binning_combo),
+        ('Speed:', speed_choice),
+        ('Binning:', binning_choice),
     ]
-    return rows, exptime_spin, speed_combo, binning_combo
+    return rows, exptime_spin, speed_choice, binning_choice
 
 
 def _two_column_row(left_rows, right_rows):
     r"""
     Lay ``left_rows``/``right_rows`` (each a list of ``(label, widget)`` pairs)
-    out as two side-by-side :class:`PySide6.QtWidgets.QFormLayout` objects, so a
-    tab's fields use horizontal space instead of stacking everything in one tall
-    column -- exposure parameters on the left, the focus value(s) that define
-    the sequence on the right.
+    out as two side-by-side :class:`PySide6.QtWidgets.QFormLayout` objects, so
+    related fields share one row instead of stacking -- e.g. the Slew tab's RA
+    and Dec fields.
 
     Returns
     -------
@@ -96,9 +350,9 @@ def _tighten_margins(widget):
     defaults (11px margins, 6px spacing -- sized to comfortably fit a titled
     group box's title, and to keep rows from ever looking crowded even when a
     form has just one or two of them) down to a tighter 6px/2px -- used
-    throughout this tab's group boxes and tab pages to cut down on unused white
-    space, most of which was that default padding repeated on every box and
-    between every row rather than anything the content itself needed.
+    throughout this panel's group boxes and tab pages to cut down on unused
+    white space, since otherwise that default padding is repeated on every box
+    and between every row.
 
     Parameters
     ----------
@@ -115,17 +369,18 @@ def _group_box(rows):
     """
     A titleless :class:`PySide6.QtWidgets.QGroupBox` containing ``rows`` laid
     out as a :class:`PySide6.QtWidgets.QFormLayout` -- the border alone groups
-    the fields, the same untitled convention used by the Slew tab's sub-panels
-    (see
-    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel._build_slew_tab`'s
-    docstring for why no title is needed there).
+    the fields.  Every action tab splits its fields into side-by-side, untitled
+    group boxes like this; no title is needed, since each box's own fields
+    already identify its purpose and the tab title says what the whole page is
+    for.
 
     Parameters
     ----------
     rows : list
         ``(label, field)`` pairs, in the order they should appear; ``field`` may
         be a widget or a layout (a :class:`PySide6.QtWidgets.QFormLayout` row
-        accepts either).
+        accepts either).  With ``label`` None, ``field`` spans the whole row,
+        starting under the labels rather than the fields.
 
     Returns
     -------
@@ -133,7 +388,10 @@ def _group_box(rows):
     """
     form = QtWidgets.QFormLayout()
     for label, field in rows:
-        form.addRow(label, field)
+        if label is None:
+            form.addRow(field)
+        else:
+            form.addRow(label, field)
     group = QtWidgets.QGroupBox()
     group.setLayout(form)
     _tighten_margins(group)
@@ -176,10 +434,9 @@ def _tab_widget(layout):
     Scrollable (rather than a bare :class:`PySide6.QtWidgets.QWidget`) so a tab
     whose content doesn't fit the available height scrolls internally, keeping
     the tab bar itself fixed in place instead of scrolling out of view along
-    with everything else --
-    :class:`~nickel_focus.gui.views.main_window.MainWindow` no longer needs to
-    size its own control-panel area around the tallest page (Help) for exactly
-    this reason.  The frame is turned off since the surrounding
+    with everything else; this is also why
+    :class:`~nickel_focus.gui.views.main_window.MainWindow` doesn't need to size
+    the control panel around its tallest page (Help).  The frame is turned off since the surrounding
     :class:`PySide6.QtWidgets.QTabWidget` already visually frames each page;
     without this, a page would show two nested borders.
     """
@@ -208,7 +465,7 @@ class FocusControlPanel(QtWidgets.QWidget):
     value(s) that define the sequence on the right -- with its own acquisition
     button(s) below both, spanning the full tab width rather than belonging to
     either sub-panel: Single has "Acquire"; Grid and Auto have "Acquire" and
-    "Interrupt"; Replay has "Load". Log and Help have no buttons at all.
+    "Interrupt"; Replay has "Load". Log and Help have no action buttons.
     Because a :class:`PySide6.QtWidgets.QTabWidget` only lets the user interact
     with the currently visible page, each button unambiguously means "do this
     tab's action" -- there's no need to track which tab is active to decide what
@@ -222,7 +479,10 @@ class FocusControlPanel(QtWidgets.QWidget):
     :func:`~nickel_focus.slew.find_nearest_target`, mirroring
     :class:`~nickel_focus.scripts.slew_to_nearest.NickelSlewToNearest`: a live
     "current position" display and a manually-editable RA/Dec target with its
-    own "Move to Target" button on the left; a starlist file/browse field, an
+    own "Move to Target" button on the left, with an "Offset by ..." button
+    below it that applies a pending pointing offset (see
+    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_pointing_offset`);
+    a starlist file/browse field, an
     object-name search string, and the three "Find nearest..." buttons (which
     populate the target fields rather than moving the telescope themselves) on
     the right.  Unlike the other tabs, it has no ``get_*_config`` counterpart --
@@ -232,6 +492,16 @@ class FocusControlPanel(QtWidgets.QWidget):
     :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.startRequested`
     means).
 
+    The Single, Grid, and Auto tabs each have the same exposure fields
+    (exposure time, speed, binning), which show -- and set -- the camera's
+    current settings.  Choosing a speed or binning, or entering an exposure
+    time and pressing Enter, emits
+    :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.exposureSettingEdited`;
+    an exposure time that's been edited but not entered is shown light red
+    (see :class:`ExposureTimeSpinBox`).  Keeping the three tabs in step, and
+    the camera in step with them, is the Controller's job (via
+    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.set_exposure_config`).
+
     The Single tab doubles as "move to best focus": its focus field defaults to
     the most recent fitted best focus (via
     :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_best_focus`),
@@ -240,21 +510,16 @@ class FocusControlPanel(QtWidgets.QWidget):
     is no separate confirmation step -- reviewing/editing the value before
     pressing Acquire is the confirmation.
 
-    There is no photometry-method selector: every measurement uses the brightest
-    detected source by default, and the coordinates actually used (whether the
-    automatic brightest source or one picked by clicking the image and pressing
-    'm' -- see :class:`~nickel_focus.gui.views.image_panel.ImagePanel`) are
-    reported on the Log tab via
-    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.update_step`/
-    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_single_exposure_result`
-    rather than shown as a persistent "current method" state.
+    Every measurement uses the brightest detected source by default; hovering
+    over a different source in the image and pressing 'm' measures that one
+    instead (see :class:`~nickel_focus.gui.views.image_panel.ImagePanel`),
+    until a move is started from the Slew tab (see
+    :meth:`~nickel_focus.gui.controller.Controller.move_to_target`).  Either way, the coordinates actually measured are logged, and so appear
+    on the Log tab.
 
-    The Options tab holds app-wide preferences -- currently just "Remember
-    settings between sessions," which opts into (and, when unchecked,
-    immediately erases) the settings persistence handled by
-    :class:`~nickel_focus.gui.views.main_window.MainWindow`. It's meant to grow
-    as more such preferences become useful, rather than being specific to any
-    one sequence action the way the other tabs are.
+    The Log tab is a :class:`LogView` repeating the console's log output
+    (see
+    :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.append_log_line`).
 
     Attributes
     ----------
@@ -288,6 +553,20 @@ class FocusControlPanel(QtWidgets.QWidget):
         Emitted when the Slew tab's "Find nearest focus star" is clicked; like
         ``findNearestPointingRequested``, but with
         ``obj_search_str='Focusing'``.
+    applyPointingOffsetRequested : :class:`PySide6.QtCore.Signal`
+        Emitted when the Slew tab's "Offset by ..." button is clicked; the
+        Controller should apply its pending pointing offset (see
+        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_pointing_offset`).
+    useCurrentFocusRequested : :class:`PySide6.QtCore.Signal`
+        Emitted when the Single tab's "Use current focus" is clicked; the
+        Controller should fill the focus value with the telescope's current
+        focus (see
+        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.set_single_focus`).
+    exposureSettingEdited : :class:`PySide6.QtCore.Signal`
+        Emitted with ``(key, value)`` when the user commits an exposure setting
+        on the Single, Grid, or Auto tab: ``('exptime', float)`` when an
+        exposure time is entered, or ``('speed', str)``/``('binning', str)``
+        when a speed or binning button is clicked.
     """
     startRequested = QtCore.Signal()
     stopRequested = QtCore.Signal()
@@ -296,9 +575,22 @@ class FocusControlPanel(QtWidgets.QWidget):
     findNearestObjectRequested = QtCore.Signal(str, str)
     findNearestPointingRequested = QtCore.Signal()
     findNearestFocusRequested = QtCore.Signal()
+    useCurrentFocusRequested = QtCore.Signal()
+    applyPointingOffsetRequested = QtCore.Signal()
+    exposureSettingEdited = QtCore.Signal(str, object)
+
+    NO_POINTING_OFFSET = 'Offset by —'
+    """The pointing-offset button's label while no offset is pending."""
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        # Whether something is running, and whether a pointing offset is
+        # pending: the pointing-offset button needs both (see
+        # _update_offset_button).
+        self._running = False
+        self._offset_pending = False
 
         self.slew_tab = self._build_slew_tab()
         self.single_tab = self._build_single_tab()
@@ -306,7 +598,6 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.auto_tab = self._build_auto_tab()
         self.replay_tab = self._build_replay_tab()
         self.log_tab = self._build_log_tab()
-        self.options_tab = self._build_options_tab()
         self.help_tab = self._build_help_tab()
 
         # QTabWidget shows exactly one of its pages (each an ordinary
@@ -323,23 +614,37 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.tabs.addTab(self.auto_tab, 'Auto')
         self.tabs.addTab(self.replay_tab, 'Replay')
         self.tabs.addTab(self.log_tab, 'Log')
-        self.tabs.addTab(self.options_tab, 'Options')
         self.tabs.addTab(self.help_tab, 'Help')
 
-        # Every input widget across the four actionable tabs, locked
+        # Report committed exposure-setting edits from any of the three
+        # tabs that take exposures. RadioChoice.chosen fires only for the
+        # user's own clicks, never for set_exposure_config.
+        for exptime_spin, speed_choice, binning_choice in self._exposure_widgets():
+            exptime_spin.valueCommitted.connect(
+                lambda value: self.exposureSettingEdited.emit('exptime', value)
+            )
+            speed_choice.chosen.connect(
+                lambda text: self.exposureSettingEdited.emit('speed', text)
+            )
+            binning_choice.chosen.connect(
+                lambda text: self.exposureSettingEdited.emit('binning', text)
+            )
+
+        # Every input widget across the five actionable tabs, locked
         # uniformly while anything is running (hardware exclusivity:
         # only one operation at a time, so there's no reason to allow
         # editing a different tab's configuration meanwhile). The tab
         # bar itself is deliberately never disabled, so the Log tab
         # stays reachable while a sequence runs.
         self._config_widgets = [
-            self.slew_target_ra_edit, self.slew_target_dec_edit, self.slew_file_edit,
+            self.slew_target_name_edit, self.slew_target_ra_edit, self.slew_target_dec_edit,
+            self.slew_file_edit, self.single_current_focus_button,
             self.slew_browse_button, self.slew_search_edit, self.single_focus_spin,
-            self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo,
+            self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice,
             self.grid_start_spin, self.grid_step_spin, self.grid_nstep_spin,
-            self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo,
+            self.grid_exptime_spin, self.grid_speed_choice, self.grid_binning_choice,
             self.auto_start_spin, self.auto_step_spin, self.auto_maxsteps_spin,
-            self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo,
+            self.auto_exptime_spin, self.auto_speed_choice, self.auto_binning_choice,
             self.replay_datadir_edit, self.replay_browse_button, self.replay_prefix_edit,
             self.replay_suffix_edit, self.replay_obsnum_spin, self.replay_start_spin,
             self.replay_step_spin, self.replay_nstep_spin,
@@ -396,28 +701,32 @@ class FocusControlPanel(QtWidgets.QWidget):
     def _build_slew_tab(self):
         """
         Build the Slew tab as two untitled :class:`PySide6.QtWidgets.QGroupBox`
-        sub-panels: current/target RA-Dec and "Move to Target" on the left,
-        starlist file/browse, a target-name search pattern, and a single row of
-        three "Find nearest ..." buttons ("Object", "Pointing *", "Focusing *"
-        -- ``*`` standing in for "star") on the right.  Unlike every other tab
-        here (deliberately flat since the tab title alone says what its fields
-        are for -- see claude/GUI_IMPLEMENTATION.md's Phase 4), Slew covers two
-        distinct sub-workflows that its one tab title can't itself disambiguate,
-        which is what makes the extra grouping worth its cost here specifically;
-        each panel's own content (a coordinate pair vs.  a search field and
-        buttons) already identifies its purpose, so neither needs its own title
-        on top of that border.
+        sub-panels: current RA-Dec, the target (name, RA-Dec), "Move to
+        Target", and "Offset by ..." on the left; starlist file/browse, a target-name search
+        pattern, and a single row of three "Find nearest ..." buttons
+        ("Object", "Pointing *", "Focusing *" -- ``*`` standing in for "star")
+        on the right.  Unlike the other action
+        tabs, the two panels here are separate sub-workflows (move to a known
+        position vs. find a target), and each ends in its own button(s) rather
+        than sharing one row below both.
         """
         # Short "RA:"/"Dec:" field labels, not "Current RA:"/"Target RA:"
         # etc. -- those are wide enough (with two side-by-side columns
-        # per row) to noticeably widen this tab beyond every other one;
-        # a short section header above each row disambiguates instead,
-        # at a fraction of the width cost (GUI_DESIGN.md's §9-phase-5
-        # scroll-area floor otherwise has to grow to match).
+        # per row) to noticeably widen this tab beyond every other one,
+        # and with it the whole window's minimum width; a short section
+        # header above each row disambiguates instead, at a fraction of
+        # the width cost.
         self.slew_current_ra_label = QtWidgets.QLabel('—')
         self.slew_current_dec_label = QtWidgets.QLabel('—')
+        self.slew_target_name_edit = QtWidgets.QLineEdit()
         self.slew_target_ra_edit = QtWidgets.QLineEdit()
         self.slew_target_dec_edit = QtWidgets.QLineEdit()
+        # The name is filled in by "Find nearest ..." and can be edited.
+        # Typing coordinates (textEdited fires only for the user's own
+        # edits) means the target is no longer the one named, so the name
+        # is cleared.
+        for edit in (self.slew_target_ra_edit, self.slew_target_dec_edit):
+            edit.textEdited.connect(self.slew_target_name_edit.clear)
         # Wide enough for a full sexagesimal value (e.g. '+00:00:00.0')
         # to show without scrolling -- a bare default QLineEdit is only
         # wide enough for a few characters. `sizeHint()` on a QLineEdit
@@ -436,6 +745,8 @@ class FocusControlPanel(QtWidgets.QWidget):
             [('RA:', self.slew_current_ra_label)],
             [('Dec:', self.slew_current_dec_label)],
         )
+        name_row = QtWidgets.QFormLayout()
+        name_row.addRow('Name:', self.slew_target_name_edit)
         target_row = _two_column_row(
             [('RA:', self.slew_target_ra_edit)],
             [('Dec:', self.slew_target_dec_edit)],
@@ -450,9 +761,17 @@ class FocusControlPanel(QtWidgets.QWidget):
         position_layout = QtWidgets.QVBoxLayout()
         _add_centered_label(position_layout, 'Current coordinates')
         position_layout.addLayout(current_row)
-        _add_centered_label(position_layout, 'Target coordinates')
+        _add_centered_label(position_layout, 'Target')
+        position_layout.addLayout(name_row)
         position_layout.addLayout(target_row)
+        # Applies a pending pointing offset; disabled until there is one
+        # (see show_pointing_offset), and labeled with it.
+        self.slew_offset_button = QtWidgets.QPushButton(self.NO_POINTING_OFFSET)
+        self.slew_offset_button.setEnabled(False)
+        self.slew_offset_button.clicked.connect(self.applyPointingOffsetRequested.emit)
+
         position_layout.addLayout(_button_row(self.slew_move_button))
+        position_layout.addLayout(_button_row(self.slew_offset_button))
         position_layout.addStretch(1)
         position_group = QtWidgets.QGroupBox()
         position_group.setLayout(position_layout)
@@ -519,15 +838,27 @@ class FocusControlPanel(QtWidgets.QWidget):
     def _build_single_tab(self):
         """
         Build the Single tab as two side-by-side sub-panels -- exposure
-        settings, focus value -- with "Acquire" below both, spanning the full
-        tab width rather than belonging to either one.
+        settings, focus value (with a "Use current focus" button below it, and
+        the latest exposure's FWHM below that) --
+        with "Acquire" below both, spanning the full tab width rather than
+        belonging to either one.
         """
         self.single_focus_spin = _int_spin(165, 500, 340)
         (
-            exposure_rows, self.single_exptime_spin, self.single_speed_combo,
-            self.single_binning_combo
+            exposure_rows, self.single_exptime_spin, self.single_speed_choice,
+            self.single_binning_choice
         ) = _exposure_field_rows()
-        focus_rows = [('Focus value:', self.single_focus_spin)]
+        self.single_current_focus_button = QtWidgets.QPushButton('Use current focus')
+        self.single_current_focus_button.clicked.connect(self.useCurrentFocusRequested.emit)
+        # The latest Single exposure's FWHM (see set_single_fwhm).
+        self.single_fwhm_label = QtWidgets.QLabel()
+        self.set_single_fwhm(None, None)
+        focus_rows = [
+            ('Focus value:', self.single_focus_spin),
+            ('', self.single_current_focus_button),
+            # The whole row, so it starts under "Focus value:".
+            (None, self.single_fwhm_label),
+        ]
 
         self.single_acquire_button = QtWidgets.QPushButton('Acquire')
         self.single_acquire_button.clicked.connect(
@@ -554,8 +885,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.grid_step_spin = _int_spin(1, 100, 5)
         self.grid_nstep_spin = _int_spin(3, 100, 5)
         (
-            exposure_rows, self.grid_exptime_spin, self.grid_speed_combo,
-            self.grid_binning_combo
+            exposure_rows, self.grid_exptime_spin, self.grid_speed_choice,
+            self.grid_binning_choice
         ) = _exposure_field_rows()
         focus_rows = [
             ('Start focus:', self.grid_start_spin),
@@ -586,8 +917,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.auto_step_spin = _int_spin(1, 100, 5)
         self.auto_maxsteps_spin = _int_spin(2, 100, 12)
         (
-            exposure_rows, self.auto_exptime_spin, self.auto_speed_combo,
-            self.auto_binning_combo
+            exposure_rows, self.auto_exptime_spin, self.auto_speed_choice,
+            self.auto_binning_choice
         ) = _exposure_field_rows()
         focus_rows = [
             ('Start focus:', self.auto_start_spin),
@@ -665,44 +996,13 @@ class FocusControlPanel(QtWidgets.QWidget):
 
     def _build_log_tab(self):
         """
-        Build the Log tab: the status line, step line, and scrolling history.
+        Build the Log tab: a :class:`LogView` repeating the console's log
+        output, and nothing else.
         """
-        # Word wrap is essential here, not cosmetic: a long message (e.g.
-        # a failure listing several missing file paths) in an unwrapped
-        # QLabel reports its *entire single-line* width as the label's
-        # minimum size, which balloons this whole panel's width to match.
-        # Wrapping lets it grow in height instead, which the surrounding
-        # QScrollArea (see MainWindow) handles gracefully.
-        self.status_label = QtWidgets.QLabel('')
-        self.status_label.setWordWrap(True)
-        self.step_label = QtWidgets.QLabel('Step: —')
-        self.step_label.setWordWrap(True)
-        self.log_widget = QtWidgets.QPlainTextEdit()
-        self.log_widget.setReadOnly(True)
-        # A QPlainTextEdit grows without bound by default, appending
-        # one line at a time all session -- capping it here is what
-        # keeps a very long run from slowly consuming ever more memory.
-        self.log_widget.setMaximumBlockCount(500)
+        self.log_widget = LogView()
 
         layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.step_label)
         layout.addWidget(self.log_widget)
-        return _tab_widget(layout)
-
-    def _build_options_tab(self):
-        """
-        Build the Options tab: currently just the "remember settings" checkbox.
-        """
-        # Meant to grow as more app-wide (as opposed to per-sequence)
-        # preferences become useful -- currently just the one checkbox.
-        self.remember_settings_checkbox = QtWidgets.QCheckBox(
-            'Remember settings between sessions'
-        )
-
-        layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(self.remember_settings_checkbox)
-        layout.addStretch(1)
         return _tab_widget(layout)
 
     def _build_help_tab(self):
@@ -714,23 +1014,50 @@ class FocusControlPanel(QtWidgets.QWidget):
             'directly, or use "Find nearest..." to search a starlist '
             '(the packaged pointing/focus catalog by default) and fill '
             'them in, then press "Move to Target."<br><br>'
+            '<b>Pointing offset</b> — after a Single exposure, hover over '
+            "the star that should be at the center of the image and press 'p'. "
+            'A line from the star to the image center shows the offset, which '
+            'the Slew tab\'s "Offset by ..." button then applies (and marks '
+            'the telescope on target). Take another Single exposure to '
+            'check, and repeat if needed.<br><br>'
             '<b>Single</b> — take one exposure at the given focus. '
             'Defaults to the most recent fitted best focus, so acquiring '
             'it as-is moves to best focus; change the value first to '
-            'test any other focus.<br><br>'
+            'test any other focus, or press "Use current focus" to expose '
+            'at the focus the telescope is at now. The FWHM of the latest '
+            'Single exposure is shown below.<br><br>'
+            '<b>Exposure settings</b> (Single, Grid, Auto) — show the '
+            "camera's current settings, including changes made from other "
+            'programs, and are the same on all three tabs. Choosing a speed '
+            'or binning changes the camera immediately; a new exposure time '
+            'turns light red until you press Enter, which sends it to the '
+            'camera.<br><br>'
             '<b>Grid</b> — step through an evenly spaced focus grid.<br>'
             '<b>Auto</b> — adaptively search for the best focus.<br>'
             '<b>Replay</b> — reprocess an existing set of exposures from disk.<br>'
-            '<b>Log</b> — live status and history.<br>'
-            '<b>Options</b> — app-wide preferences.<br><br>'
+            '<b>Log</b> — the log, as shown in the terminal.<br><br>'
             '<b>Source selection</b> — the brightest star is measured '
             "automatically by default (see the Log for its coordinates); "
             "hover over a different star in the image and press 'm' to "
-            'measure that one instead.<br><br>'
+            'measure that one instead. The marked star is used until you '
+            'start a move from the Slew tab (a slew started from another '
+            'program does not clear it). Press \'a\' over another star to '
+            'add it to the focus curve (or, on a star already there, to '
+            'match it again across the exposures), and \'d\' to remove one; '
+            'the curve is refit to every selected star. Pressing \'a\' and '
+            '\'d\' in turn on a star shows which points are its. Press '
+            '\'r\' over the image to fit the whole frame in view '
+            'again.<br><br>'
             '<b>Acquire / Load</b> — run the action configured in that '
             'tab.<br>'
             '<b>Interrupt</b> — stop a running Grid/Auto sequence between '
-            'steps (does not abort the current exposure).'
+            'steps (does not abort the current exposure).<br><br>'
+            '<b>Status bar</b> (above the image) — green is ready, yellow '
+            'needs attention, red is an error or unavailable (all red '
+            'without a telescope connection). Slew: telescope motion '
+            'allowed. Track: tracking on. On Target: on target (yellow while '
+            'moving). Focus: current focus value; green when the secondary '
+            'is locked. Exp: camera ready.'
         )
         label = QtWidgets.QLabel(text)
         label.setWordWrap(True)
@@ -760,8 +1087,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         that scrolling) stays put either way.  Help is excluded because it's a
         large block of static reference text that's taller than every other tab
         combined with the tab bar; sizing the *initial* height around it too
-        would waste space under the six shorter, interactive tabs every time the
-        window opens, for the sake of a tab that's fine to need a scrollbar
+        would waste space under the six shorter tabs every time the window
+        opens, for the sake of a tab that's fine to need a scrollbar
         immediately.
 
         Each candidate tab's *content widget*
@@ -769,10 +1096,10 @@ class FocusControlPanel(QtWidgets.QWidget):
         tab page's own (a :class:`PySide6.QtWidgets.QScrollArea`, whose
         :meth:`PySide6.QtWidgets.QWidget.sizeHint` reflects a generically
         "comfortable" size that can run well past what its content actually
-        needs -- e.g.  the Log tab's :class:`PySide6.QtWidgets.QPlainTextEdit`,
+        needs -- e.g.  the Log tab's :class:`LogView`,
         which is happy to be much shorter than its
-        :meth:`PySide6.QtWidgets.QWidget.sizeHint` and was otherwise the tallest
-        tab here, ahead of Replay).
+        :meth:`PySide6.QtWidgets.QWidget.sizeHint`, and would otherwise count
+        as the tallest tab here).
 
         Returns
         -------
@@ -782,7 +1109,7 @@ class FocusControlPanel(QtWidgets.QWidget):
         """
         other_tabs = [
             self.slew_tab, self.single_tab, self.grid_tab, self.auto_tab, self.replay_tab,
-            self.log_tab, self.options_tab
+            self.log_tab
         ]
         tallest_other = max(tab.widget().minimumSizeHint().height() for tab in other_tabs)
         tab_bar_height = self.tabs.tabBar().sizeHint().height()
@@ -796,8 +1123,8 @@ class FocusControlPanel(QtWidgets.QWidget):
     def get_focus_sequence_type(self):
         """
         The sequence type for the currently active tab, as ``'grid'``,
-        ``'automated'``, or ``'archive'`` -- or ``None`` if Single, Log, or Help
-        is active (in which case no button can have triggered
+        ``'automated'``, or ``'archive'`` -- or ``None`` for any other tab
+        (Slew, Single, Log, Help; none of which can have triggered
         :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.startRequested`
         in the first place).
         """
@@ -816,8 +1143,8 @@ class FocusControlPanel(QtWidgets.QWidget):
         includes keys relevant to that tab -- e.g.  a Grid config has no
         ``datadir``, an Auto config has ``maxsteps`` instead of ``nstep`` --
         matching the CLI arguments of
-        :class:`~nickel_focus.scripts.focus.NickelFocus`. Empty for
-        Single/Log/Help.
+        :class:`~nickel_focus.scripts.focus.NickelFocus`. Empty for any other
+        tab (Slew, Single, Log, Help).
         """
         tab = self.tabs.currentWidget()
         if tab is self.grid_tab:
@@ -844,107 +1171,81 @@ class FocusControlPanel(QtWidgets.QWidget):
             }
         return {}
 
+    def _exposure_widgets(self):
+        """The ``(exptime_spin, speed_choice, binning_choice)`` of Single, Grid, and Auto."""
+        return (
+            (self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice),
+            (self.grid_exptime_spin, self.grid_speed_choice, self.grid_binning_choice),
+            (self.auto_exptime_spin, self.auto_speed_choice, self.auto_binning_choice),
+        )
+
     def get_exposure_config(self):
         """
         Return the currently active tab's exposure settings as a :obj:`dict`
         with keys ``exptime`` (:obj:`float`), ``speed``, ``binning``
-        (:obj:`str`) -- passed to `ExposureConfig.configure` before a live
-        exposure.  Empty for Replay/Log/Help, which take no new exposures.
+        (:obj:`str`) -- passed to
+        :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure` before a live
+        exposure.  The exposure time is the committed one: an edit that hasn't
+        been entered is ignored.  Empty for any tab other than Single, Grid, or
+        Auto, since those are the only ones that take new exposures.
         """
         tab = self.tabs.currentWidget()
         if tab is self.single_tab:
             exptime, speed, binning = (
-                self.single_exptime_spin, self.single_speed_combo, self.single_binning_combo
+                self.single_exptime_spin, self.single_speed_choice, self.single_binning_choice
             )
         elif tab is self.grid_tab:
             exptime, speed, binning = (
-                self.grid_exptime_spin, self.grid_speed_combo, self.grid_binning_combo
+                self.grid_exptime_spin, self.grid_speed_choice, self.grid_binning_choice
             )
         elif tab is self.auto_tab:
             exptime, speed, binning = (
-                self.auto_exptime_spin, self.auto_speed_combo, self.auto_binning_combo
+                self.auto_exptime_spin, self.auto_speed_choice, self.auto_binning_choice
             )
         else:
             return {}
         return {
-            'exptime': exptime.value(), 'speed': speed.currentText(),
-            'binning': binning.currentText()
+            'exptime': exptime.committed_value(), 'speed': speed.current(),
+            'binning': binning.current()
         }
 
-    def get_settings_state(self):
+    def set_exposure_config(self, config):
         """
-        Return every persistable field's current value as a flat :obj:`dict`
-        keyed by ``'<tab>/<field>'`` (e.g.  ``'grid/start'``), suitable for a
-        settings store like :class:`PySide6.QtCore.QSettings`. The Single tab's
-        focus value is deliberately excluded -- it tracks the most recent fit
-        (see
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_best_focus`),
-        not a persisted default.
-        """
-        state = {}
-        for key, widget in self._settings_fields().items():
-            if isinstance(widget, QtWidgets.QComboBox):
-                state[key] = widget.currentText()
-            elif isinstance(widget, QtWidgets.QLineEdit):
-                state[key] = widget.text()
-            else:
-                state[key] = widget.value()
-        return state
+        Set the exposure fields on every tab that takes exposures (Single, Grid,
+        Auto) -- e.g. to the camera's current settings.  An exposure time set
+        this way is committed (see :class:`ExposureTimeSpinBox`), discarding
+        any uncommitted edit.  Nothing is emitted.
 
-    def set_settings_state(self, state):
-        """
-        Apply a settings :obj:`dict` from
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.get_settings_state`
-        (or any subset of it -- e.g.  an older saved state missing a field added
-        later). Keys not recognized, or missing entirely, are left at their
-        current value.
-        """
-        for key, widget in self._settings_fields().items():
-            if key not in state:
-                continue
-            value = state[key]
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.setCurrentText(value)
-            elif isinstance(widget, QtWidgets.QLineEdit):
-                widget.setText(value)
-            else:
-                widget.setValue(value)
+        Parameters
+        ----------
+        config : :obj:`dict`
+            Any subset of the keys returned by
+            :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.get_exposure_config`:
+            ``exptime`` (:obj:`float`), ``speed``, ``binning`` (:obj:`str`).
+            Missing keys are left unchanged.
 
-    def _settings_fields(self):
+        Returns
+        -------
+        :obj:`list`
+            The keys (``speed``/``binning``) whose value wasn't one of the
+            options, and so was added as a new button.  An ``exptime``
+            outside the field's range is clamped to it rather than reported.
         """
-        Map of persistable setting key to the widget holding it.  The single
-        source of truth for both
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.get_settings_state`
-        and
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.set_settings_state`,
-        so the two can't drift apart into covering different fields.
-        """
-        return {
-            'slew/file': self.slew_file_edit,
-            'slew/search': self.slew_search_edit,
-            'single/exptime': self.single_exptime_spin,
-            'single/speed': self.single_speed_combo,
-            'single/binning': self.single_binning_combo,
-            'grid/start': self.grid_start_spin,
-            'grid/step': self.grid_step_spin,
-            'grid/nstep': self.grid_nstep_spin,
-            'grid/exptime': self.grid_exptime_spin,
-            'grid/speed': self.grid_speed_combo,
-            'grid/binning': self.grid_binning_combo,
-            'auto/start': self.auto_start_spin,
-            'auto/step': self.auto_step_spin,
-            'auto/maxsteps': self.auto_maxsteps_spin,
-            'auto/exptime': self.auto_exptime_spin,
-            'auto/speed': self.auto_speed_combo,
-            'auto/binning': self.auto_binning_combo,
-            'replay/datadir': self.replay_datadir_edit,
-            'replay/prefix': self.replay_prefix_edit,
-            'replay/suffix': self.replay_suffix_edit,
-            'replay/obsnum': self.replay_obsnum_spin,
-            'replay/start': self.replay_start_spin,
-            'replay/step': self.replay_step_spin,
-            'replay/nstep': self.replay_nstep_spin,
-        }
+        exposure_widgets = self._exposure_widgets()
+        added = []
+        for key, index in (('speed', 1), ('binning', 2)):
+            if key in config and exposure_widgets[0][index].button(config[key]) is None:
+                added.append(key)
+                for widgets in exposure_widgets:
+                    widgets[index].add_option(config[key])
+        for exptime_spin, speed_choice, binning_choice in exposure_widgets:
+            if 'exptime' in config:
+                exptime_spin.set_committed_value(config['exptime'])
+            if 'speed' in config:
+                speed_choice.set_current(config['speed'])
+            if 'binning' in config:
+                binning_choice.set_current(config['binning'])
+        return added
 
     def set_hardware_tabs_enabled(self, enabled):
         """
@@ -974,38 +1275,48 @@ class FocusControlPanel(QtWidgets.QWidget):
 
     def set_running(self, running):
         """Toggle widget states for whether an action is currently running."""
+        self._running = running
         for widget in self._config_widgets:
             widget.setEnabled(not running)
         for button in self._acquire_buttons:
             button.setEnabled(not running)
         for button in self._interrupt_buttons:
             button.setEnabled(running)
+        self._update_offset_button()
 
-        if not running and self.status_label.text().startswith('Stopping'):
-            # Only clear a stale "Stopping..." message -- not a
-            # confirmation/failure the worker's finishing signal may have
-            # just set moments before this.
-            self.status_label.setText('')
+    def show_pointing_offset(self, text):
+        """
+        Show a pending pointing offset on the Slew tab's offset button, e.g.
+        ``'Offset by 12.3″ E, 4.5″ N'``, enabling it while nothing is running;
+        or, with ``text`` None, return it to
+        :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.NO_POINTING_OFFSET`
+        and disable it.
+
+        Parameters
+        ----------
+        text : :obj:`str` or None
+            The offset, already formatted (see
+            :meth:`~nickel_focus.pointing.PointingOffset.text`), or None if
+            no offset is pending.
+        """
+        self._offset_pending = text is not None
+        self.slew_offset_button.setText(
+            self.NO_POINTING_OFFSET if text is None else f'Offset by {text}'
+        )
+        self._update_offset_button()
+
+    def _update_offset_button(self):
+        """Enable the offset button only with an offset pending and nothing running."""
+        self.slew_offset_button.setEnabled(self._offset_pending and not self._running)
 
     def set_stopping(self):
-        """Reflect an Interrupt request that hasn't taken effect yet (§4.3)."""
+        """
+        Reflect an Interrupt request that hasn't taken effect yet (the running
+        sequence only stops once the current exposure finishes): disable the
+        Interrupt buttons until it does.
+        """
         for button in self._interrupt_buttons:
             button.setEnabled(False)
-        self.status_label.setText('Stopping — waiting for current exposure to finish...')
-
-    def update_step(self, result, total_expected=None):
-        """Update the live step/status display for one new
-        :class:`~nickel_focus.focus.StepResult`."""
-        text = f'Step {result.index + 1}'
-        if total_expected:
-            text += f'/{total_expected}'
-        text += (
-            f' — Focus {result.focus_value:.0f}, FWHM {result.fwhm:.2f}, '
-            f'Source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
-        )
-        if result.is_outlier:
-            text += '  [outlier]'
-        self.step_label.setText(text)
 
     def set_current_position(self, ra_text, dec_text):
         """
@@ -1023,67 +1334,89 @@ class FocusControlPanel(QtWidgets.QWidget):
         self.slew_current_ra_label.setText(ra_text)
         self.slew_current_dec_label.setText(dec_text)
 
-    def show_nearest_target(self, name, ra_text, dec_text):
+    def show_nearest_target(self, ra_text, dec_text, name):
         """
-        Populate the Slew tab's target RA/Dec fields with a found nearest
-        target, and report it (mirrors ``scripts/slew_to_nearest.py``'s printed
-        message).
+        Populate the Slew tab's target Name and RA/Dec fields with a found
+        nearest target.
 
         Parameters
         ----------
-        name : :obj:`str`
-            The nearest target's name.
         ra_text : :obj:`str`
             The nearest target's right ascension, already formatted for display.
         dec_text : :obj:`str`
             The nearest target's declination, already formatted for display.
+        name : :obj:`str`
+            The nearest target's name, from its catalog.
         """
+        self.slew_target_name_edit.setText(name)
         self.slew_target_ra_edit.setText(ra_text)
         self.slew_target_dec_edit.setText(dec_text)
-        self.status_label.setText(f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})')
 
-    def show_slew_result(self, message):
+    def get_target_name(self):
         """
-        Report a completed "Move to Target" slew (e.g., from
-        :attr:`~nickel_focus.gui.model.slew_worker.SlewWorker.slewFinished`).
+        The Slew tab's target name (filled in by "Find nearest ...", possibly
+        edited, and cleared when the target coordinates are typed in), or None
+        if it's empty.
         """
-        self.status_label.setText(message)
+        name = self.slew_target_name_edit.text().strip()
+        return name or None
 
-    def show_best_focus(self, best_focus, best_fwhm):
+    def get_target_coordinates(self):
+        """The Slew tab's target ``(ra_text, dec_text)``, as entered."""
+        return self.slew_target_ra_edit.text(), self.slew_target_dec_edit.text()
+
+    def set_single_focus(self, focus_value):
         """
-        Report a completed sequence's fitted result, and set it as the Single
-        tab's default focus value -- rounded, since a focus value is a
-        whole-unit telescope position even though the fit itself can land on a
-        fractional one.
+        Set the Single tab's focus value -- rounded, since it's a whole-unit
+        telescope position (and clamped to the field's range).
         """
-        self.status_label.setText(
-            f'Sequence finished: best focus {best_focus:.1f}, expected FWHM {best_fwhm:.2f}'
-        )
+        self.single_focus_spin.setValue(round(focus_value))
+
+    def set_single_fwhm(self, pixels, arcsec):
+        """
+        Show the latest Single exposure's FWHM below "Use current focus", e.g.
+        ``'FWHM: 3.21 (pix); 1.07 (arcsec)'``.  Either value may be None
+        (not measured, or the binning is unknown), shown as ``—``; with
+        both None (e.g. before any exposure) the label reads
+        ``'FWHM: — (pix); — (arcsec)'``.
+
+        Parameters
+        ----------
+        pixels : :obj:`float` or None
+            The FWHM in pixels.
+        arcsec : :obj:`float` or None
+            The FWHM in arcseconds.
+        """
+        def text(value):
+            return '—' if value is None else f'{value:.2f}'
+
+        self.single_fwhm_label.setText(f'FWHM: {text(pixels)} (pix); {text(arcsec)} (arcsec)')
+
+    def show_best_focus(self, best_focus):
+        """
+        Set a completed sequence's fitted best focus as the Single tab's
+        default focus value -- rounded, since a focus value is a whole-unit
+        telescope position even though the fit itself can land on a fractional
+        one.
+
+        Parameters
+        ----------
+        best_focus : :obj:`float`
+            The fitted best focus.
+        """
         self.single_focus_spin.setValue(round(best_focus))
 
-    def show_single_exposure_result(self, result):
-        """Report one exposure taken from the Single tab."""
-        self.status_label.setText(
-            f'Took exposure at focus {result.focus_value:.0f}: measured FWHM '
-            f'{result.fwhm:.2f}, source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
-        )
-
-    def show_failure(self, message):
-        """
-        Display a sequence failure (e.g., from
-        :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.focusSequenceFailed`).
-        """
-        self.status_label.setText(message)
-
     def append_log_line(self, text):
-        """Append one line of text to the Log tab's scrolling history."""
-        self.log_widget.appendPlainText(text)
+        """
+        Append one log record, as the console's formatter wrote it, to the Log
+        tab (see :meth:`LogView.append_text`).
 
-    def reset(self):
-        """Clear live status and log for a new run."""
-        self.step_label.setText('Step: —')
-        self.status_label.setText('')
-        self.log_widget.clear()
+        Parameters
+        ----------
+        text : :obj:`str`
+            The formatted record (possibly several lines, e.g. a traceback).
+        """
+        self.log_widget.append_text(text)
 
     # -- internals ----------------------------------------------------------
 

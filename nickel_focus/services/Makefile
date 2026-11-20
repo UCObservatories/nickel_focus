@@ -4,7 +4,7 @@ endif
 
 include $(LROOT)/etc/Make.defs
 
-LIBFILES = nickucam.toml nscicam.toml
-LIBSUB = nickel_focus/config/
+LIBFILES = $(wildcard *.py)
+LIBSUB = nickel_focus/services/
 
 include $(LROOT)/etc/Make.rules

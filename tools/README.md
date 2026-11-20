@@ -5,3 +5,5 @@ This directory contains tools used to update and deploy the package for use at t
 - `write_version.py`: maintains the automated versioning of the code.
 - `reflow_docstrings.py`: A development script used to reformat docstrings.
 
+- `telescope/`: short scripts for checking, at the telescope, behavior the code
+  assumes but that can only be confirmed there; see `telescope/README.md`.

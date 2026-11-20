@@ -5,20 +5,27 @@ panels) to the Model (:class:`~nickel_focus.focus.FocusSequence` subclasses, via
 :class:`~nickel_focus.slew.NickelTelescopePointing`, via
 :class:`~nickel_focus.gui.model.slew_worker.SlewWorker`).
 
-See GUI_DESIGN.md §4.3.
+Every hardware operation (an exposure, a focus move, a slew) blocks, so each
+runs on its own worker thread rather than the GUI thread, and only one may run
+at a time.
 """
 import logging
 
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import Angle, SkyCoord
 
 from nickel_focus import focus
 from nickel_focus import log
+from nickel_focus import pointing
+from nickel_focus.selection import StarSelection
 from nickel_focus import slew
+from nickel_focus.services import NickelPoco, NSciCam, ktl_available
+from nickel_focus.services.nscicam import ExposureConfig
+from nickel_focus.gui.ktl_bridge import KTLBridge
 from nickel_focus.gui.log_handler import QtLogHandler
 from nickel_focus.gui.model.focus_worker import FocusWorker
+from nickel_focus.gui.model.pointing_offset_worker import PointingOffsetWorker
 from nickel_focus.gui.model.slew_worker import SlewWorker
 from nickel_focus.gui.qt import QtCore
-from nickel_focus.pkg.logger import GuiFormatter
 
 
 class Controller(QtCore.QObject):
@@ -28,17 +35,23 @@ class Controller(QtCore.QObject):
     driving it, and mediates between it and a
     :class:`~nickel_focus.gui.views.main_window.MainWindow`.
 
-    Implements the "hardware exclusivity" state machine from §4.3: only one
-    operation can be active at a time, and interactive source selection
+    Implements "hardware exclusivity": only one operation can be active at a
+    time, and interactive source selection
     (:attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`) is
     only enabled while nothing is running.  All three sequence types (Grid,
-    Automated, Archive/ Replay), reanalysis, and the Single tab (which also
+    Automated, Archive/Replay), reanalysis, and the Single tab (which also
     serves as "move to best focus" -- see
     :class:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel`) are
     wired up.
 
-    Also owns the :class:`~nickel_focus.slew.NickelTelescopePointing` handle
-    used by the Slew tab:
+    Also owns the two KTL service objects shared by everything that talks to
+    the hardware -- :attr:`~nickel_focus.gui.controller.Controller.poco`
+    (:class:`~nickel_focus.services.nickelpoco.NickelPoco`, the telescope) and
+    :attr:`~nickel_focus.gui.controller.Controller.cam`
+    (:class:`~nickel_focus.services.nscicam.NSciCam`, the camera) -- which it
+    passes to each sequence it builds, and the
+    :class:`~nickel_focus.slew.NickelTelescopePointing` handle used by the
+    Slew tab:
     :meth:`~nickel_focus.gui.controller.Controller.move_to_target` (a slew, via
     :class:`~nickel_focus.gui.model.slew_worker.SlewWorker`) participates in the
     same hardware-exclusivity state as a focus sequence -- the telescope
@@ -46,9 +59,37 @@ class Controller(QtCore.QObject):
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_object`/
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_pointing`/
     :meth:`~nickel_focus.gui.controller.Controller.find_nearest_focus` (a single
-    fast ktl read plus a starlist search, not a move) do not.  A
-    :class:`PySide6.QtCore.QTimer` polls the telescope's current position for
-    the tab's live display regardless of what else is running.
+    fast ktl read plus a starlist search, not a move) do not.  Applying a
+    pointing offset
+    (:meth:`~nickel_focus.gui.controller.Controller.apply_pointing_offset`, via
+    :class:`~nickel_focus.gui.model.pointing_offset_worker.PointingOffsetWorker`)
+    moves the telescope too, so it takes part in the same way.
+
+    A pointing offset is measured by pressing 'p' over a star on the image
+    panel (see
+    :meth:`~nickel_focus.gui.controller.Controller._on_pointing_star_selected`):
+    the star should be at the image center.  It stays pending -- drawn on the
+    image and shown on the Slew tab's offset button -- until it's applied, or
+    replaced by a new one, or until a slew or new sequence clears it.
+
+    The :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicators and
+    the Slew tab's live position display follow the telescope's and camera's
+    keyword broadcasts, whatever else is running and whoever changed them
+    (e.g. another GUI): the Controller subscribes to those keywords (see
+    :meth:`~nickel_focus.services.base.KTLService.subscribe`), and a
+    :class:`~nickel_focus.gui.ktl_bridge.KTLBridge` hands each new value to the
+    GUI thread (see
+    :meth:`~nickel_focus.gui.controller.Controller._on_keyword_changed`).
+    Position updates are redrawn at most every
+    :attr:`~nickel_focus.gui.controller.Controller.POSITION_REDRAW_MS`
+    milliseconds.  The status bar's Quit button closes the window; like the
+    action buttons, it's disabled while anything is running.
+
+    The Single/Grid/Auto tabs' exposure fields follow the camera the same way
+    (``EXPOSURE``, ``AMPCONF``, ``BINNING``; see
+    :meth:`~nickel_focus.gui.controller.Controller._on_exposure_keyword`), and
+    a setting the user commits there is written to the camera at once (see
+    :meth:`~nickel_focus.gui.controller.Controller._on_exposure_setting_edited`).
 
     Without a live ``ktl`` connection, the Slew/Single/Grid/Auto tabs can't do
     anything but fail -- see
@@ -66,10 +107,23 @@ class Controller(QtCore.QObject):
         connection, so a developer can still see and click through them while
         working on the GUI. Every action on those tabs still fails exactly as it
         would otherwise (each checks
-        :attr:`~nickel_focus.gui.controller.Controller.telescope`/
-        :attr:`~nickel_focus.focus.ktl` itself) -- this only skips graying them
-        out.  Wired to the GUI script's suppressed ``--test`` flag; never set
+        :attr:`~nickel_focus.gui.controller.Controller.poco`/
+        :attr:`~nickel_focus.gui.controller.Controller.cam` itself) -- this only
+        skips graying them out.  Wired to the GUI script's suppressed ``--test`` flag; never set
         outside of that.
+    """
+
+    MAX_TARGET_OFFSET_ARCMIN = 2.
+    """
+    How far, in arcminutes, the telescope may be from the Slew tab's target for
+    its name to be recorded as the exposures' object (see
+    :meth:`~nickel_focus.gui.controller.Controller._name_object`).
+    """
+
+    POSITION_REDRAW_MS = 200
+    """
+    The shortest interval, in milliseconds, between redraws of the Slew tab's
+    current position, however often ``POCORAA``/``POCODECA`` broadcast.
     """
 
     def __init__(self, window, parent=None, force_enable_hardware_tabs=False):
@@ -83,8 +137,11 @@ class Controller(QtCore.QObject):
         # (re)constructed.
         log.remove_handlers_of_type(QtLogHandler)
         self._log_handler = QtLogHandler(self)
-        self._log_handler.setFormatter(GuiFormatter())
-        self._log_handler.setLevel(logging.INFO)
+        # The Log tab repeats the console: the same level (e.g. per the GUI
+        # script's --verbosity) and the same formatter, whose ANSI colors the
+        # Log tab renders.
+        self._log_handler.setFormatter(type(log.sh.formatter)())
+        self._log_handler.setLevel(log.sh.level)
         self._log_handler.record_logged.connect(window.control_panel.append_log_line)
         log.addHandler(self._log_handler)
 
@@ -92,32 +149,41 @@ class Controller(QtCore.QObject):
         self.focus_worker = None    # the FocusWorker currently running, or None
         self.method = 'brightest'   # the photometry method currently in effect
         self.slew_worker = None     # the SlewWorker currently running, or None
+        self.offset_worker = None   # the PointingOffsetWorker currently running, or None
+        self.pointing_offset = None  # the pending pointing.PointingOffset, or None
 
         # The throwaway `focus.FocusSequence` used only to take/reanalyze
         # a standalone Single-tab exposure (its hardware handles, not its
         # bookkeeping, matter -- see `take_single_exposure`). Seeded with
         # that one exposure's data so `reanalyze()` (via interactive
-        # source selection, §5.6) can run against it even though no real
+        # source selection) can run against it even though no real
         # sequence is loaded.
         self._standalone_focus_sequence = None
 
-        # The telescope-pointing handle backing the Slew tab. Like
-        # `focus.FocusSequence`'s `_focus`/`_exposure`, this is `None`
-        # when no ktl connection is available (`NickelTelescopePointing`
-        # raises `RuntimeError` in that case) -- every method below that
-        # uses it checks for `None` first and reports a clear failure
-        # instead.
-        try:
-            self.telescope = slew.NickelTelescopePointing()
-        except RuntimeError:
-            self.telescope = None
+        # The selected stars (see _on_star_added/_on_star_removed): for the
+        # loaded sequence, plotted and fit on the focus curve; and for the
+        # latest Single exposure, whose mean FWHM the Single tab shows.  None
+        # when there's no such data.
+        self._selection = None
+        self._single_selection = None
 
-        # `focus.ktl` and `slew.ktl` are the same object in normal
-        # operation (see `nickel_focus/pkg/ktl.py`), so checking one is
-        # enough to know whether any of the four ktl-driven tabs can do
-        # anything useful; `force_enable_hardware_tabs` overrides only
-        # the View-level graying-out below, not this flag itself.
-        self.ktl_available = focus.ktl is not None
+        # The telescope and camera services, shared by the status
+        # indicators, the Slew tab, and every sequence or single exposure.
+        # Each is `None` if it can't be used (no ktl, or the service didn't
+        # answer) -- every method below that needs one checks for `None`
+        # first and reports a clear failure instead.
+        self.poco = self._connect_service(NickelPoco)
+        self.cam = self._connect_service(NSciCam)
+
+        # The telescope-pointing handle backing the Slew tab; `None`
+        # without the telescope service.
+        self.telescope = (
+            None if self.poco is None else slew.NickelTelescopePointing(self.poco)
+        )
+
+        # Whether ktl itself is available; `force_enable_hardware_tabs`
+        # overrides only the View-level graying-out below, not this flag.
+        self.ktl_available = ktl_available()
         window.control_panel.set_hardware_tabs_enabled(
             self.ktl_available or force_enable_hardware_tabs)
 
@@ -138,19 +204,39 @@ class Controller(QtCore.QObject):
         window.control_panel.findNearestPointingRequested.connect(self.find_nearest_pointing)
         window.control_panel.findNearestFocusRequested.connect(self.find_nearest_focus)
         window.image_panel.sourceSelected.connect(self._on_source_selected)
+        window.image_panel.starAdded.connect(self._on_star_added)
+        window.image_panel.starRemoved.connect(self._on_star_removed)
+        window.image_panel.pointingStarSelected.connect(self._on_pointing_star_selected)
+        window.control_panel.applyPointingOffsetRequested.connect(self.apply_pointing_offset)
+        window.status_bar.quitRequested.connect(self.quit)
+        window.control_panel.exposureSettingEdited.connect(self._on_exposure_setting_edited)
+        window.control_panel.useCurrentFocusRequested.connect(self.use_current_focus)
 
-        # Milliseconds, not seconds: a `QTimer` interval is always in ms.
-        # Reading `telescope.current` is one quick ktl-cache read, not a
-        # move -- safe (and useful) to keep polling no matter what else,
-        # if anything, is running.
-        self._position_read_failed = False
+        # The status indicators and current position follow the keywords'
+        # broadcasts. ktl delivers each new value on its own callback
+        # thread; the bridge re-emits it as a Qt signal, and the queued
+        # connection runs `_on_keyword_changed` on the GUI thread.
+        self._latest = {}  # (service, keyword) -> the latest value received
+        # The exposure settings as the camera last reported them, and as the
+        # exposure fields show them (key -> value, in ExposureConfig's form).
+        self._camera_exposure = {}
+        self._shown_exposure = {}
+        self._bad_position_logged = False
+        # Position broadcasts may be frequent: redraw at most once per
+        # POSITION_REDRAW_MS (a QTimer interval is in ms, not seconds).
         self._position_timer = QtCore.QTimer(self)
-        self._position_timer.timeout.connect(self._update_current_position)
-        if self.telescope is None:
-            self.window.control_panel.set_current_position('—', '—')
-        else:
-            self._update_current_position()
-            self._position_timer.start(1000)
+        self._position_timer.setSingleShot(True)
+        self._position_timer.setInterval(self.POSITION_REDRAW_MS)
+        self._position_timer.timeout.connect(self._show_current_position)
+        self._ktl_bridge = KTLBridge(self)
+        self._ktl_bridge.keywordChanged.connect(
+            self._on_keyword_changed, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+        for key in _INDICATORS:
+            self._show_indicator(key)
+        self._show_current_position()
+        self._subscribe(self.poco, _POCO_DISPLAY_KEYWORDS)
+        self._subscribe(self.cam, _CAM_DISPLAY_KEYWORDS)
 
         self._set_running(False)
 
@@ -160,7 +246,7 @@ class Controller(QtCore.QObject):
         """
         Build a sequence from the control panel's configuration and run it.
         """
-        if self.focus_worker is not None or self.slew_worker is not None:
+        if self._busy():
             return  # hardware exclusivity: something is already running
 
         focus_sequence_type = self.window.control_panel.get_focus_sequence_type()
@@ -171,11 +257,13 @@ class Controller(QtCore.QObject):
                 focus_sequence = self._build_archive_focus_sequence(config)
             elif focus_sequence_type == 'grid':
                 focus_sequence = focus.GridFocusSequence(
-                    config['start'], config['step'], nstep=config['nstep']
+                    config['start'], config['step'], nstep=config['nstep'], poco=self.poco,
+                    cam=self.cam
                 )
             else:
                 focus_sequence = focus.AutomatedFocusSequence(
-                    config['start'], config['step'], maxsteps=config['maxsteps']
+                    config['start'], config['step'], maxsteps=config['maxsteps'],
+                    poco=self.poco, cam=self.cam
                 )
         except Exception as e:
             self._fail(f'Could not start sequence: {e}', e)
@@ -190,11 +278,14 @@ class Controller(QtCore.QObject):
             )
             return
 
+        self._name_object(focus_sequence)
         self.focus_sequence = focus_sequence
         self._standalone_focus_sequence = None
+        self._selection = StarSelection()
+        self._single_selection = None
+        self._clear_pointing_offset()
         self.window.image_panel.reset()
         self.window.curve_panel.reset()
-        self.window.control_panel.reset()
 
         exp_kwargs = (
             None if focus_sequence_type == 'archive'
@@ -209,11 +300,9 @@ class Controller(QtCore.QObject):
         """
         # GridFocusSequence is only used here for its focus-value
         # arithmetic (matches focus.py's own CLI archive-mode path), so
-        # it's built with connect=False to keep it from touching hardware
-        # even when ktl is available.
-        grid = focus.GridFocusSequence(
-            config['start'], config['step'], nstep=config['nstep'], connect=False
-        )
+        # it's built without the services, keeping it from touching
+        # hardware.
+        grid = focus.GridFocusSequence(config['start'], config['step'], nstep=config['nstep'])
         expected_files = [
             config['datadir'] / f"{config['prefix']}{config['obsnum'] + i}{config['suffix']}"
             for i in range(grid.nstep)
@@ -231,24 +320,26 @@ class Controller(QtCore.QObject):
         Re-run photometry on the already-collected exposures of whatever is
         currently loaded: the active
         :attr:`~nickel_focus.gui.controller.Controller.focus_sequence`, or -- if
-        none is loaded -- a standalone Single-tab exposure (§5.6's "no sequence
-        loaded yet" case).
+        none is loaded -- a standalone Single-tab exposure, so a source can be
+        marked on it before any sequence exists.
         """
         target = (
             self.focus_sequence if self.focus_sequence is not None
             else self._standalone_focus_sequence
         )
         if (
-            self.focus_worker is not None or self.slew_worker is not None or target is None
-            or not target.exposures
+            self._busy() or target is None or not target.exposures
         ):
             return
+        # Start again from the first star (the marked one), rebuilt as each
+        # remeasured result arrives; any added or removed stars are dropped.
+        # The curve is cleared at once rather than showing a mix of old and
+        # new measurements while the reanalysis runs.
         if target is self.focus_sequence:
-            # Clear the curve immediately rather than letting old points
-            # be replaced one at a time as each re-measured result
-            # streams in -- otherwise the plot would show a confusing
-            # mix of old and new measurements while reanalysis runs.
+            self._selection = StarSelection()
             self.window.curve_panel.reset()
+        else:
+            self._single_selection = StarSelection()
         self._start_focus_worker(target, mode='reanalyze')
 
     def take_single_exposure(self, focus_value):
@@ -258,16 +349,17 @@ class Controller(QtCore.QObject):
         ``focus_value`` is left at its default (the most recent fitted best
         focus; see
         :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_best_focus`).
-        Uses a throwaway :class:`~nickel_focus.focus.FocusSequence` for its
-        hardware handles, independent of any loaded
-        :attr:`~nickel_focus.gui.controller.Controller.focus_sequence`.
+        Uses a throwaway :class:`~nickel_focus.focus.FocusSequence` (built on
+        the shared services) for its hardware handles, independent of any
+        loaded :attr:`~nickel_focus.gui.controller.Controller.focus_sequence`.
         """
-        if self.focus_worker is not None or self.slew_worker is not None:
+        if self._busy():
             return  # hardware exclusivity: something is already running
-        standalone = focus.FocusSequence()
+        standalone = focus.FocusSequence(poco=self.poco, cam=self.cam)
         if standalone._focus is None or standalone._exposure is None:
             self._fail('Could not take single exposure: no ktl connection is available.')
             return
+        self._name_object(standalone)
         self._standalone_focus_sequence = standalone
         exp_kwargs = self.window.control_panel.get_exposure_config()
         self._start_focus_worker(
@@ -275,10 +367,15 @@ class Controller(QtCore.QObject):
         )
 
     def stop(self):
-        """Request that the running sequence stop between steps (§4.3)."""
+        """
+        Request that the running sequence stop between steps, never
+        mid-exposure; see
+        :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker.request_stop`.
+        """
         if self.focus_worker is None:
             return
         self.focus_worker.request_stop()
+        log.info('Stopping -- waiting for the current exposure to finish...')
         self.window.control_panel.set_stopping()
 
     def set_method(self, method):
@@ -286,14 +383,22 @@ class Controller(QtCore.QObject):
         Update the photometry method used for future steps/reanalysis.
         ``method`` is ``'brightest'`` (the default) or an ``(x, y)`` coordinate
         tuple (from
-        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`);
-        the coordinates actually measured are reported per-exposure on the Log
-        tab
-        (:meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.update_step`/
-        :meth:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.show_single_exposure_result`)
-        rather than tracked as a separate "current method" display.
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.sourceSelected`).
+        The coordinates actually measured are logged for each exposure.  A
+        marked source stays in effect, for every later sequence, single
+        exposure, and reanalysis, until a slew is started (see
+        :meth:`~nickel_focus.gui.controller.Controller.move_to_target`).
         """
         self.method = method
+
+    def _clear_marked_source(self):
+        """
+        Return to measuring the brightest source, logging it if a source had
+        been marked.
+        """
+        if self.method != 'brightest':
+            log.info('Cleared the marked star; measuring the brightest star.')
+        self.set_method('brightest')
 
     def move_to_target(self, ra_text, dec_text):
         """
@@ -309,8 +414,12 @@ class Controller(QtCore.QObject):
             (a bare sexagesimal string, e.g.  ``'05:30:00'``).
         dec_text : :obj:`str`
             Target declination, entered the same way (e.g.  ``'+20:15:00'``).
+
+        Starting a slew clears any marked source (see
+        :meth:`~nickel_focus.gui.controller.Controller.set_method`): the new
+        field's stars are unrelated to the old pixel position.
         """
-        if self.focus_worker is not None or self.slew_worker is not None:
+        if self._busy():
             return  # hardware exclusivity: something is already running
         if self.telescope is None:
             self._fail('Could not move to target: no ktl connection is available.')
@@ -321,12 +430,35 @@ class Controller(QtCore.QObject):
             self._fail(f'Could not parse target coordinates: {e}', e)
             return
 
+        self._clear_marked_source()
+        self._clear_pointing_offset()
         self.slew_worker = SlewWorker(self.telescope, target.ra, target.dec)
         self.slew_worker.slewFinished.connect(self._on_slew_finished)
         self.slew_worker.slewFailed.connect(self._fail)
         self.slew_worker.finished.connect(self._on_slew_worker_finished)
         self._set_running(True)
         self.slew_worker.start()
+
+    def apply_pointing_offset(self):
+        """
+        Apply the pending pointing offset -- the Slew tab's "Offset by ..."
+        button -- on a background thread
+        (:class:`~nickel_focus.gui.model.pointing_offset_worker.PointingOffsetWorker`),
+        then clear it, whether or not it succeeded (see
+        :meth:`~nickel_focus.slew.NickelTelescopePointing.apply_offset`).
+        """
+        if self._busy() or self.pointing_offset is None:
+            return
+        if self.telescope is None:
+            self._fail('Could not apply the pointing offset: no ktl connection is available.')
+            return
+        offset = self.pointing_offset
+        self.offset_worker = PointingOffsetWorker(self.telescope, offset.east, offset.north)
+        self.offset_worker.offsetFinished.connect(self._on_offset_finished)
+        self.offset_worker.offsetFailed.connect(self._fail)
+        self.offset_worker.finished.connect(self._on_offset_worker_finished)
+        self._set_running(True)
+        self.offset_worker.start()
 
     def find_nearest_object(self, file_text, search_text):
         """
@@ -372,16 +504,107 @@ class Controller(QtCore.QObject):
         """
         self._find_nearest('Focusing')
 
+    def use_current_focus(self):
+        """
+        Handle the Single tab's "Use current focus" button: set its focus value
+        to the telescope's current focus (the latest ``POCSECPA`` broadcast,
+        rounded to a whole unit), so Acquire exposes there.  Acquire still
+        asks to move the focus, which
+        :meth:`~nickel_focus.focus.Focus.set_to` skips if the commanded focus
+        is already that value.  Without a current focus value (e.g. no
+        telescope connection), a warning is logged and the field is left
+        unchanged.
+        """
+        value = self._latest.get(('nickelpoco', 'POCSECPA'))
+        try:
+            focus_value = float(value)
+        except (TypeError, ValueError):
+            log.warning('No current focus value is available; the Single tab is unchanged.')
+            return
+        self.window.control_panel.set_single_focus(focus_value)
+        log.info(f'Single tab focus set to the current focus ({focus_value:.1f}).')
+
+    def quit(self):
+        """
+        Handle the status bar's Quit button: close the window, exactly as its
+        own close button would (the application exits once its last window
+        closes).
+        """
+        self.window.close()
+
     # -- internals ------------------------------------------------------------
 
     def _fail(self, message, exc=None):
         """
-        Log ``message`` as an error and report it as a failure on the Log tab.
-        If ``exc`` (the :obj:`Exception` that caused the failure) is provided,
-        its full traceback is logged along with ``message``.
+        Log ``message`` as an error (which the Log tab shows, like the
+        console).  If ``exc`` (the :obj:`Exception` that caused the failure) is
+        provided, its full traceback is logged along with ``message``.
         """
         log.error(message, exc_info=exc)
-        self.window.control_panel.show_failure(message)
+
+    def _name_object(self, focus_sequence):
+        """
+        Set ``focus_sequence``'s
+        :attr:`~nickel_focus.focus.FocusSequence.object_name` -- recorded with
+        each exposure, with the focus, as the camera's ``OBJECT`` -- to the
+        Slew tab's target name, if the telescope is pointed at that target.
+
+        The name is used only if the Slew tab's target coordinates are within
+        :attr:`MAX_TARGET_OFFSET_ARCMIN` of the telescope's current position
+        (its latest ``POCORAA``/``POCODECA`` broadcast).  Otherwise -- or if
+        the two can't be compared -- the object stays ``'unknown'`` and a
+        warning is logged; the Slew tab's name is left as it is.  With no
+        target name, the object is ``'unknown'``.
+        """
+        name = self.window.control_panel.get_target_name()
+        if name is None:
+            return
+        offset = self._target_offset()
+        if offset is None:
+            log.warning(
+                f"Could not compare the Slew tab's target ({name}) with the telescope's "
+                "current position; recording the object as 'unknown'."
+            )
+            return
+        if offset > self.MAX_TARGET_OFFSET_ARCMIN:
+            log.warning(
+                f"The telescope is {offset:.1f} arcmin from the Slew tab's target ({name}), more "
+                f"than {self.MAX_TARGET_OFFSET_ARCMIN:g} arcmin; recording the object as "
+                "'unknown'."
+            )
+            return
+        focus_sequence.object_name = name
+
+    def _target_offset(self):
+        """
+        The separation, in arcminutes, between the Slew tab's target
+        coordinates and the telescope's current position, or None if either
+        is missing or can't be parsed.
+        """
+        ra_text, dec_text = self.window.control_panel.get_target_coordinates()
+        current = self._current_pointing()
+        if current is None:
+            return None
+        try:
+            target = SkyCoord(ra=ra_text, dec=dec_text, unit=('hourangle', 'deg'))
+        except ValueError:
+            return None
+        return target.separation(current).arcmin
+
+    def _current_pointing(self):
+        """
+        The telescope's current position from the latest ``POCORAA``/
+        ``POCODECA`` broadcasts, or None if there are none or they can't be
+        parsed.
+        """
+        ra = self._latest.get(('nickelpoco', 'POCORAA'))
+        dec = self._latest.get(('nickelpoco', 'POCODECA'))
+        if ra is None or dec is None:
+            return None
+        try:
+            return SkyCoord(ra=ra, dec=dec, unit=('hourangle', 'deg'))
+        except ValueError:
+            return None
 
     def _find_nearest(self, obj_search_str, file=None):
         """
@@ -414,8 +637,9 @@ class Controller(QtCore.QObject):
             return
         ra_text = ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
         dec_text = dec.to_string(unit='deg', sep=':', pad=True, alwayssign=True, precision=2)
-        log.info(f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})')
-        self.window.control_panel.show_nearest_target(name, ra_text, dec_text)
+        text = f'Nearest target: {name} (RA={ra_text}, Dec={dec_text})'
+        log.info(text)
+        self.window.control_panel.show_nearest_target(ra_text, dec_text, name)
 
     def _start_focus_worker(self, focus_sequence, mode, exp_kwargs=None, focus_value=None):
         """
@@ -440,40 +664,40 @@ class Controller(QtCore.QObject):
         """
         Handle one :class:`~nickel_focus.focus.StepResult` from the worker's
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.stepComplete`
-        signal: update the image/curve panels and the Log tab's step display.
+        signal: add it to the selection (as the first star), update the
+        image/curve panels, and log the step.
         """
         is_reanalyze = self.focus_worker is not None and self.focus_worker.mode == 'reanalyze'
         reanalyzing_standalone = (
             is_reanalyze and self._standalone_focus_sequence is not None
             and self.focus_worker.focus_sequence is self._standalone_focus_sequence
         )
+        if reanalyzing_standalone:
+            self._single_selection.append(result)
+        else:
+            if self._selection is None:
+                self._selection = StarSelection()
+            self._selection.append(result)
+        # The boxes first, so that showing the exposure draws them.
+        self._show_selection()
         if is_reanalyze:
             self.window.image_panel.update_result(result)
-            if not reanalyzing_standalone:
-                # The curve was already cleared in reanalyze(), so each
-                # re-measured result is simply added back in as it
-                # arrives, rather than replacing an old point in place --
-                # that would otherwise show a confusing mix of old and
-                # new measurements while reanalysis is still in progress.
-                # A standalone exposure never appears on the curve panel
-                # at all, so there's nothing to add for it.
-                self.window.curve_panel.add_result(result)
         else:
             self.window.image_panel.add_result(result)
-            self.window.curve_panel.add_result(result)
 
         total = self.focus_sequence.expected_steps if self.focus_sequence is not None else None
         step_text = f'Step {result.index + 1}'
         if total:
             step_text += f'/{total}'
         step_text += (
-            f' — Focus {result.focus_value:.0f}, FWHM {result.fwhm:.2f}, '
-            f'Source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
+            f' — Focus {result.focus_value:.0f}, '
+            f'FWHM {focus.fwhm_text(result.fwhm, result.binning)}'
         )
+        if result.measured:
+            step_text += f', Source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
         if result.is_outlier:
             step_text += '  [outlier]'
         log.info(step_text)
-        self.window.control_panel.update_step(result, total_expected=total)
 
     def _on_focus_sequence_finished(self, best_focus, best_fwhm):
         """
@@ -481,8 +705,13 @@ class Controller(QtCore.QObject):
         :attr:`~nickel_focus.gui.model.focus_worker.FocusWorker.focusSequenceFinished`:
         report the fitted result.
         """
-        log.info(f'Sequence finished: best focus {best_focus:.1f}, expected FWHM {best_fwhm:.2f}')
-        self.window.control_panel.show_best_focus(best_focus, best_fwhm)
+        binning = None if self.focus_sequence is None else self.focus_sequence.binning
+        text = (
+            f'Sequence finished: best focus {best_focus:.1f}, expected FWHM '
+            f'{focus.fwhm_text(best_fwhm, binning)}'
+        )
+        log.info(text)
+        self.window.control_panel.show_best_focus(best_focus)
 
     def _on_single_exposure_finished(self, result):
         """
@@ -492,21 +721,140 @@ class Controller(QtCore.QObject):
         :attr:`~nickel_focus.gui.controller.Controller._standalone_focus_sequence`'s
         bookkeeping with it (so
         :meth:`~nickel_focus.gui.controller.Controller.reanalyze` has something
-        to work with), and report it.
+        to work with), show its FWHM on the Single tab, and report it.  An
+        exposure that couldn't be measured is still displayed (the reason has
+        already been logged as a warning).
         """
+        self._single_selection = StarSelection([result])
+        self._show_selection()
         self.window.image_panel.add_result(result)
         seq = self._standalone_focus_sequence
         seq.observed_focus.append(result.focus_value)
         seq.exposures.append(result.exposure)
         seq.img_quality.append(result.fwhm)
-        seq.source_stamps.append(result.stamp)
+        seq.binnings.append(result.binning)
         seq.centroids.append(result.centroid)
         seq.step_iter = 1
+        if result.measured:
+            text = (
+                f'Took exposure at focus {result.focus_value:.0f}: measured FWHM '
+                f'{focus.fwhm_text(result.fwhm, result.binning)}, '
+                f'source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
+            )
+        else:
+            text = (
+                f'Took exposure at focus {result.focus_value:.0f}; its FWHM could not be '
+                'measured.'
+            )
+        log.info(text)
+
+    def _show_selection(self):
+        """
+        Show the selected stars: their boxes on the image panel, the loaded
+        sequence's pooled points on the focus curve, and the latest Single
+        exposure's mean FWHM on the Single tab (a Single exposure never
+        appears on the curve).
+        """
+        boxes = {}
+        for sel in (self._selection, self._single_selection):
+            if sel is not None:
+                boxes.update(
+                    {result.exposure: sel.stars_in(i) for i, result in enumerate(sel.results)}
+                )
+        self.window.image_panel.set_star_boxes(boxes)
+        if self._selection is not None:
+            points = self._selection.points()
+            self.window.curve_panel.set_points(
+                points, [self._selection.results[p.exposure].binning for p in points]
+            )
+        single = self._single_selection
+        if single is not None and single.results:
+            fwhm = single.mean_fwhm(0)
+            self.window.control_panel.set_single_fwhm(
+                fwhm, focus.fwhm_arcsec(fwhm, single.results[0].binning)
+            )
+
+    def _displayed_selection(self):
+        """
+        The selection covering the displayed exposure, and the exposure's
+        position in it, or ``(None, None)``.
+        """
+        current = self.window.image_panel.current_result
+        if current is None:
+            return None, None
+        for sel in (self._single_selection, self._selection):
+            if sel is None:
+                continue
+            for i, result in enumerate(sel.results):
+                if result.exposure == current.exposure:
+                    return sel, i
+        return None, None
+
+    def _on_star_added(self, x, y):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starAdded`: add
+        the star nearest ``(x, y)`` on the displayed exposure to the plotted
+        data (or match it again, if already there), then refit.
+        """
+        sel, index = self._displayed_selection()
+        if self._busy() or sel is None:
+            return
+        try:
+            action, (sx, sy), matched = sel.add(index, x, y)
+        except ValueError as e:
+            log.warning(f'{e}  The plotted data is unchanged.')
+            return
+        verb = 'Added' if action == 'added' else 'Re-matched'
         log.info(
-            f'Took exposure at focus {result.focus_value:.0f}: measured FWHM {result.fwhm:.2f}, '
-            f'source ({result.centroid[0]:.1f}, {result.centroid[1]:.1f})'
+            f'{verb} the star at ({sx:.1f}, {sy:.1f}): matched in {matched} of '
+            f'{len(sel.results)} exposures.'
         )
-        self.window.control_panel.show_single_exposure_result(result)
+        self._show_selection()
+        if sel is self._selection:
+            self._refit()
+
+    def _on_star_removed(self, x, y):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.starRemoved`:
+        remove the selected star nearest ``(x, y)`` on the displayed exposure
+        from the plotted data, then refit.
+        """
+        sel, index = self._displayed_selection()
+        if self._busy() or sel is None:
+            return
+        try:
+            sx, sy = sel.remove(index, x, y)
+        except ValueError as e:
+            log.warning(f'{e}  The plotted data is unchanged.')
+            return
+        log.info(f'Removed the star at ({sx:.1f}, {sy:.1f}).')
+        self._show_selection()
+        if sel is self._selection:
+            self._refit()
+
+    def _refit(self):
+        """
+        Fit the loaded sequence's selected stars' pooled data, log the best
+        focus, and make it the Single tab's default; or warn if there's too
+        little to fit.
+        """
+        try:
+            *_, best_focus, best_fwhm = self._selection.fit()
+        except ValueError as e:
+            if not self._selection.points():
+                log.warning("No data to fit; press 'a' on a star to add one.")
+            else:
+                log.warning(f'{e}.')
+            return
+        points = self._selection.points()
+        binning = focus.common_binning(self._selection.results[p.exposure].binning for p in points)
+        log.info(
+            f'Refit {len(points)} points from {len(self._selection.stars)} star(s): best focus {best_focus:.1f}, '
+            f'expected FWHM {focus.fwhm_text(best_fwhm, binning)}'
+        )
+        self.window.control_panel.show_best_focus(best_focus)
 
     def _on_focus_worker_finished(self):
         """
@@ -514,8 +862,19 @@ class Controller(QtCore.QObject):
         (a signal every :class:`PySide6.QtCore.QThread` provides automatically,
         emitted once
         :meth:`~nickel_focus.gui.model.focus_worker.FocusWorker.run` returns):
-        release the worker and restore hardware exclusivity.
+        release the worker and restore hardware exclusivity.  When a sequence
+        has been run or remeasured (however it ended), fix the focus curve's
+        limits (see :meth:`~nickel_focus.selection.StarSelection.plot_limits`),
+        so that adding and removing stars doesn't move them.
         """
+        worker = self.focus_worker
+        if (
+            worker is not None and worker.mode in ('step', 'reanalyze')
+            and worker.focus_sequence is self.focus_sequence and self._selection is not None
+        ):
+            limits = self._selection.plot_limits()
+            if limits is not None:
+                self.window.curve_panel.fix_limits(*limits)
         if self.focus_worker is not None:
             # QThread.wait() blocks (briefly) until the OS thread has
             # actually terminated. `finished` already means `run()` has
@@ -536,14 +895,83 @@ class Controller(QtCore.QObject):
         self.set_method((x, y))
         self.reanalyze()
 
+    def _on_pointing_star_selected(self, x, y):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.views.image_panel.ImagePanel.pointingStarSelected`:
+        find the detected star nearest ``(x, y)`` on the displayed exposure,
+        and make the offset that would move it to the image center the
+        pending one.  If there's no star close enough, or the offset can't be
+        determined or is too large, a warning is logged and any earlier
+        pending offset is kept.
+        """
+        result = self.window.image_panel.current_result
+        if result is None:
+            return
+        star = pointing.nearest_source(result.source_positions, x, y)
+        if star is None:
+            log.warning(
+                f'No star found within {pointing.SNAP_RADIUS:.0f} pixels of ({x:.1f}, {y:.1f}); '
+                'the pointing offset is unchanged.'
+            )
+            return
+        try:
+            offset = pointing.pointing_offset(
+                star, result.frame.shape, result.binning, exposure=result.exposure
+            )
+        except ValueError as e:
+            log.warning(f'No pointing offset: {e}.')
+            return
+        self.pointing_offset = offset
+        self.window.image_panel.show_pointing_offset(offset)
+        self.window.control_panel.show_pointing_offset(offset.text())
+        log.info(
+            f'Pointing offset to center the star at ({star[0]:.1f}, {star[1]:.1f}): '
+            f'{offset.text()}.  Press "Offset by ..." on the Slew tab to apply it.'
+        )
+
+    def _clear_pointing_offset(self):
+        """Discard the pending pointing offset, if any, and its display."""
+        self.pointing_offset = None
+        self.window.image_panel.clear_pointing_offset()
+        self.window.control_panel.show_pointing_offset(None)
+
+    def _on_offset_finished(self):
+        """
+        Handle
+        :attr:`~nickel_focus.gui.model.pointing_offset_worker.PointingOffsetWorker.offsetFinished`:
+        remind the observer to check the result.
+        """
+        log.info('Take a Single exposure to check the pointing.')
+
+    def _on_offset_worker_finished(self):
+        """
+        Handle the offset worker's ``finished`` signal: release the worker,
+        clear the (now applied, or failed) pending offset, and restore
+        hardware exclusivity.  See
+        :meth:`~nickel_focus.gui.controller.Controller._on_focus_worker_finished`.
+        """
+        if self.offset_worker is not None:
+            self.offset_worker.wait()
+        self.offset_worker = None
+        self._clear_pointing_offset()
+        self._set_running(False)
+
+    def _busy(self):
+        """Whether a sequence, exposure, slew, or offset is running."""
+        return (
+            self.focus_worker is not None or self.slew_worker is not None
+            or self.offset_worker is not None
+        )
+
     def _on_slew_finished(self):
         """
         Handle
         :attr:`~nickel_focus.gui.model.slew_worker.SlewWorker.slewFinished`:
         report that the telescope reached its target.
         """
-        log.info('Move to target complete.')
-        self.window.control_panel.show_slew_result('Move to target complete.')
+        text = 'Move to target complete.'
+        log.info(text)
 
     def _on_slew_worker_finished(self):
         """
@@ -559,37 +987,280 @@ class Controller(QtCore.QObject):
         self.slew_worker = None
         self._set_running(False)
 
-    def _update_current_position(self):
+    def _connect_service(self, service_class):
         """
-        Poll :attr:`~nickel_focus.slew.NickelTelescopePointing.current` and push
-        the formatted result to the Slew tab's live "current position" display.
-        A no-op if :attr:`~nickel_focus.gui.controller.Controller.telescope` is
-        ``None`` (see the class docstring); the :class:`PySide6.QtCore.QTimer`
-        driving this is never started in that case, but this also guards the one
-        direct call made from
-        :meth:`~nickel_focus.gui.controller.Controller.__init__` before that
-        timer's first tick.
+        Construct one of the shared KTL services
+        (:attr:`~nickel_focus.gui.controller.Controller.poco`/
+        :attr:`~nickel_focus.gui.controller.Controller.cam`), or return
+        ``None`` if that's not possible.
+
+        Without ``ktl``, this returns ``None`` silently.  Any other failure
+        (e.g., ``ktl`` is available but the service doesn't answer) is logged
+        as a warning rather than preventing the GUI from starting; the
+        hardware tabs then report the missing connection when used.
+
+        Parameters
+        ----------
+        service_class : :obj:`type`
+            :class:`~nickel_focus.services.nickelpoco.NickelPoco` or
+            :class:`~nickel_focus.services.nscicam.NSciCam`.
         """
-        if self.telescope is None:
+        if not ktl_available():
+            return None
+        try:
+            return service_class()
+        except Exception as e:
+            log.warning(
+                f'Could not connect to the {service_class.service} service: {e}', exc_info=e
+            )
+            return None
+
+    def _on_exposure_keyword(self, key, value):
+        """
+        Show a camera exposure setting (from its keyword's broadcast, or the
+        value delivered when subscribing) on the Single/Grid/Auto tabs.
+
+        Only a value that differs from what the fields already show is
+        applied and logged -- as the camera's initial setting the first time,
+        and as a change made elsewhere (e.g. another GUI, or the camera
+        adjusting a requested exposure time) after that.  The broadcast that
+        confirms the user's own edit therefore isn't logged.
+
+        Parameters
+        ----------
+        key : :obj:`str`
+            ``'exptime'``, ``'speed'``, or ``'binning'``.
+        value : :obj:`str`
+            The keyword's ascii value.
+        """
+        try:
+            setting = ExposureConfig.setting_value(key, value)
+        except ValueError as e:
+            log.warning(f'Could not read the camera exposure {key} ({value!r}): {e}', exc_info=e)
+            return
+        self._camera_exposure[key] = setting
+        previous = self._shown_exposure.get(key)
+        if setting == previous:
+            return
+        self._show_exposure_settings({key: setting})
+        if previous is None:
+            log.info(f'Exposure {key} from the camera: {setting}')
+        else:
+            log.info(f'Exposure {key} changed on the camera: {previous} -> {setting}')
+
+    def _on_exposure_setting_edited(self, key, value):
+        """
+        Slot for
+        :attr:`~nickel_focus.gui.views.focus_control_panel.FocusControlPanel.exposureSettingEdited`:
+        show the edited setting on all three exposure tabs, then write it to
+        the camera (see
+        :meth:`~nickel_focus.services.nscicam.ExposureConfig.configure`).
+
+        The write runs on the GUI thread and waits for the camera to finish
+        it, so a slow camera holds up the GUI meanwhile.  The camera's
+        broadcast of the new value then confirms it.  A rejected write is
+        reported as a failure, and the fields go back to the camera's
+        setting.  Without the camera service, the edit only syncs the tabs.
+        """
+        self._show_exposure_settings({key: value})
+        if self.cam is None:
             return
         try:
-            current = self.telescope.current
+            self.cam.cfg.configure(**{key: value})
         except Exception as e:
-            # This is polled every second, so only log the first failure in
-            # a row instead of flooding the log.
-            if not self._position_read_failed:
-                log.warning(f'Could not read the current telescope position: {e}', exc_info=e)
-            self._position_read_failed = True
+            self._fail(f'Could not set the exposure {key} to {value}: {e}', e)
+            if key in self._camera_exposure:
+                self._show_exposure_settings({key: self._camera_exposure[key]})
+            return
+        log.info(f'Exposure {key} set to {value}')
+
+    def _show_exposure_settings(self, config):
+        """
+        Show ``config`` (exposure ``key`` -> value) on the Single/Grid/Auto
+        tabs and remember it as shown.  A speed or binning that isn't one of
+        the options is added as a new button, with a warning.
+        """
+        added = self.window.control_panel.set_exposure_config(config)
+        self._shown_exposure.update(config)
+        for key in added:
+            log.warning(
+                f'Exposure {key} {config[key]!r} is not one of the GUI options; added it as a '
+                f'{key} option.'
+            )
+
+    def _subscribe(self, service, names):
+        """
+        Subscribe :attr:`_ktl_bridge` to ``names`` in ``service`` (see
+        :meth:`~nickel_focus.services.base.KTLService.subscribe`), unless
+        ``service`` is ``None``.  A failure is logged as a warning; the
+        affected indicators then stay red.
+        """
+        if service is None:
+            return
+        try:
+            service.subscribe(names, self._ktl_bridge.relay)
+        except Exception as e:
+            log.warning(
+                f'Could not subscribe to the {service.service} status keywords: {e}', exc_info=e
+            )
+
+    def _on_keyword_changed(self, service, keyword, value):
+        """
+        Slot for :attr:`~nickel_focus.gui.ktl_bridge.KTLBridge.keywordChanged`
+        (on the GUI thread): record ``value`` and update whatever shows it --
+        a status indicator, (rate-limited) the Slew tab's current position, or
+        the exposure fields.
+        """
+        self._latest[service, keyword] = value
+        if (service, keyword) in _EXPOSURE_KEYWORDS:
+            self._on_exposure_keyword(_EXPOSURE_KEYWORDS[service, keyword], value)
+            return
+        if (service, keyword) in _POSITION_KEYWORDS:
+            if not self._position_timer.isActive():
+                self._position_timer.start()
+            return
+        for key in _INDICATOR_KEYWORDS.get((service, keyword), ()):
+            self._show_indicator(key)
+
+    def _show_indicator(self, key):
+        """
+        Set one :class:`~nickel_focus.gui.views.status_bar.StatusBar` indicator
+        from the latest value of its keyword (see ``_INDICATORS`` for each
+        keyword and its mapping to a color):
+
+        - **Slew** -- ``nickelpoco.POCSTOP`` (telescope movement allowed).
+        - **Track** -- ``nickelpoco.POCTRCK``.
+        - **On Target** -- ``nickelpoco.POCOT``.
+        - **Focus** -- ``nickelpoco.POCSECLK`` (the secondary's lock) sets the
+          color; the text is the current focus value, ``nickelpoco.POCSECPA``.
+        - **Exp** -- ``nscicam.EXPSTATE``.
+
+        An indicator with no value yet (including when its service isn't
+        connected) is red with its default text.
+        """
+        service, keyword, state_function = _INDICATORS[key]
+        value = self._latest.get((service, keyword))
+        state = 'error' if value is None else state_function(value)
+        text = None
+        if key == 'focus':
+            text = _focus_text(self._latest.get(('nickelpoco', 'POCSECPA')))
+        self.window.status_bar.set_indicator(key, state, text)
+
+    def _show_current_position(self):
+        """
+        Show the latest ``POCORAA``/``POCODECA`` values on the Slew tab's live
+        "current position" display, or "—" if there are none yet (e.g. no
+        telescope connection) or they can't be parsed.  A value that can't be
+        parsed is logged as a warning, once per run of bad values.
+        """
+        ra = self._latest.get(('nickelpoco', 'POCORAA'))
+        dec = self._latest.get(('nickelpoco', 'POCODECA'))
+        if ra is None or dec is None:
             self.window.control_panel.set_current_position('—', '—')
             return
-        self._position_read_failed = False
-        ra_text = current.ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
-        dec_text = current.dec.to_string(
-            unit='deg', sep=':', pad=True, alwayssign=True, precision=2
-        )
+        try:
+            ra_text = Angle(ra, unit='hourangle').to_string(
+                unit='hourangle', sep=':', pad=True, precision=2
+            )
+            dec_text = Angle(dec, unit='deg').to_string(
+                unit='deg', sep=':', pad=True, alwayssign=True, precision=2
+            )
+        except ValueError as e:
+            if not self._bad_position_logged:
+                log.warning(
+                    f'Could not read the current telescope position (RA={ra!r}, Dec={dec!r}): '
+                    f'{e}', exc_info=e
+                )
+            self._bad_position_logged = True
+            self.window.control_panel.set_current_position('—', '—')
+            return
+        self._bad_position_logged = False
         self.window.control_panel.set_current_position(ra_text, dec_text)
 
     def _set_running(self, running):
-        """Propagate the hardware-exclusivity state to the View (§4.3)."""
+        """Propagate the hardware-exclusivity state to the View."""
         self.window.control_panel.set_running(running)
+        self.window.status_bar.set_running(running)
         self.window.image_panel.set_selection_enabled(not running)
+
+
+# -- status-indicator state mappings ------------------------------------------
+#
+# Each function maps one KTL keyword's (ascii) value to a StatusBar indicator
+# state: 'ok' (green), 'warn' (yellow), or 'error' (red).
+# String values are compared case-insensitively, ignoring surrounding
+# whitespace.
+
+def _normalize(value):
+    """Return ``value`` as a lowercase string with surrounding whitespace removed."""
+    return str(value).strip().lower()
+
+
+def _movement_state(value):
+    """``POCSTOP``: green if movement is ``allowed``, red otherwise."""
+    return 'ok' if _normalize(value) == 'allowed' else 'error'
+
+
+def _track_state(value):
+    """``POCTRCK``: green if tracking is ``on``, yellow otherwise."""
+    return 'ok' if _normalize(value) == 'on' else 'warn'
+
+
+def _target_state(value):
+    """
+    ``POCOT``: green if on target (``0``), yellow if off target (``1``), red for
+    an error (``-1``) or any value that isn't one of those three.
+    """
+    try:
+        code = int(_normalize(value))
+    except ValueError:
+        return 'error'
+    return {0: 'ok', 1: 'warn'}.get(code, 'error')
+
+
+def _seclk_state(value):
+    """``POCSECLK``: green if the secondary is locked (``on``), yellow otherwise."""
+    return 'ok' if _normalize(value) == 'on' else 'warn'
+
+
+def _expstate_state(value):
+    """``EXPSTATE``: green if the camera is ``Ready``, yellow otherwise."""
+    return 'ok' if _normalize(value) == 'ready' else 'warn'
+
+
+def _focus_text(value):
+    """``POCSECPA``: the Focus indicator's text, e.g. ``'345.2'``, or None if unknown."""
+    try:
+        return f'{float(value):.1f}'
+    except (TypeError, ValueError):
+        return None
+
+
+# Each status-bar indicator: (service, keyword, mapping of its value to a state).
+_INDICATORS = {
+    'movement': ('nickelpoco', 'POCSTOP', _movement_state),
+    'track': ('nickelpoco', 'POCTRCK', _track_state),
+    'target': ('nickelpoco', 'POCOT', _target_state),
+    'focus': ('nickelpoco', 'POCSECLK', _seclk_state),
+    'exp': ('nscicam', 'EXPSTATE', _expstate_state),
+}
+
+# The indicators each keyword affects; POCSECPA is the Focus indicator's text.
+_INDICATOR_KEYWORDS = {
+    (service, keyword): (key,) for key, (service, keyword, _) in _INDICATORS.items()
+}
+_INDICATOR_KEYWORDS['nickelpoco', 'POCSECPA'] = ('focus',)
+
+# The Slew tab's current position.
+_POSITION_KEYWORDS = {('nickelpoco', 'POCORAA'), ('nickelpoco', 'POCODECA')}
+
+# The exposure fields: keyword -> ExposureConfig setting key.
+_EXPOSURE_KEYWORDS = {
+    ('nscicam', keyword): key for key, keyword in ExposureConfig.keywords.items()
+}
+
+# Every keyword the Controller subscribes to (all of the above), by service.
+_POCO_DISPLAY_KEYWORDS = (
+    'POCSTOP', 'POCTRCK', 'POCOT', 'POCSECLK', 'POCSECPA', 'POCORAA', 'POCODECA',
+)
+_CAM_DISPLAY_KEYWORDS = ('EXPSTATE', 'EXPOSURE', 'AMPCONF', 'BINNING')

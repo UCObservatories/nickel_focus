@@ -2,9 +2,10 @@
 Tests for the ktl-free parts of :mod:`focus`: the
 :func:`focus.FocusSequence.step`/:func:`focus.FocusSequence.execute`
 sequence-stepping engine, exercised via :class:`focus.ArchiveFocusSequence`
-so no :class:`focus.Focus`/:class:`focus.Exposure` hardware objects are
+so no :class:`focus.Focus`/:class:`exposure.Exposure` hardware objects are
 ever constructed.
 """
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,7 @@ def test_step_yields_one_result_per_exposure(focus_sweep):
         assert result.exposure == focus_sweep['files'][i], 'wrong exposure file'
         assert result.fwhm > 0, 'measured FWHM should be positive'
         assert result.frame.shape == (101, 101), 'frame should match the written FITS shape'
-        assert result.stamp.size > 0, 'stamp cutout should not be empty'
+        assert result.stamp().size > 0, 'stamp cutout should not be empty'
         assert isinstance(result.is_outlier, (bool, np.bool_)), 'is_outlier should be boolean'
 
     # The sequence's own bookkeeping should match what step() yielded.
@@ -79,7 +80,7 @@ def test_execute_recovers_known_best_focus(focus_sweep):
     # taken nearest the true best focus, rather than against the analytic
     # input value.
     middle = focus_sweep['focus_values'].index(focus_sweep['best_focus'])
-    _, _, _, direct_fwhm, _, _ = image_quality(focus_sweep['files'][middle],
+    _, _, _, direct_fwhm, _ = image_quality(focus_sweep['files'][middle],
                                                 method='brightest')
     assert best_fwhm == pytest.approx(direct_fwhm, rel=0.3), \
         'fitted best FWHM should match a direct measurement at the true best focus'
@@ -98,7 +99,7 @@ def test_execute_with_plot_does_not_require_a_display(focus_sweep):
 
 def test_execute_with_goto_requires_hardware(focus_sweep):
     seq = _make_sequence(focus_sweep)
-    with pytest.raises(ValueError, match='ktl not connected'):
+    with pytest.raises(ValueError, match='No telescope focus/exposure control'):
         seq.execute(goto=True, plot=False)
 
 
@@ -161,3 +162,163 @@ def test_reanalyze_with_coordinate_method(focus_sweep):
     coord_results = list(seq.reanalyze(method=(50., 50.)))
     assert [r.fwhm for r in coord_results] == pytest.approx(brightest_fwhm), \
         'coordinate-based selection of the only source should match "brightest"'
+
+
+def test_exposure_object_name_reads_the_header(tmp_path):
+    from astropy.io import fits
+    import numpy as np
+    named = tmp_path / 'named.fits'
+    header = fits.Header()
+    header['OBJECT'] = 'Pointing12: focus=345.0'
+    fits.writeto(named, np.zeros((4, 4)), header=header)
+    unnamed = tmp_path / 'unnamed.fits'
+    fits.writeto(unnamed, np.zeros((4, 4)))
+
+    assert focus.exposure_object_name(named) == 'Pointing12: focus=345.0', \
+        "the OBJECT header value should be returned"
+    assert focus.exposure_object_name(unnamed) is None, 'a header without OBJECT gives None'
+    assert focus.exposure_object_name(tmp_path / 'missing.fits') is None, \
+        'an unreadable file gives None'
+
+
+def _fits_with(tmp_path, name, **cards):
+    from astropy.io import fits
+    import numpy as np
+    header = fits.Header()
+    for key, value in cards.items():
+        header[key] = value
+    path = tmp_path / name
+    fits.writeto(path, np.zeros((4, 4)), header=header)
+    return path
+
+
+@pytest.mark.parametrize('binning', [1, 2, 4])
+def test_exposure_binning_reads_the_ccd_pixel_wcs(tmp_path, binning):
+    path = _fits_with(tmp_path, 'binned.fits', CD1_1C=float(binning), CD2_2C=float(binning))
+    assert focus.exposure_binning(path) == binning, \
+        'the binning should come from CD1_1C/CD2_2C'
+
+
+def test_exposure_binning_is_none_without_the_wcs(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger='nickel_focus'):
+        assert focus.exposure_binning(_fits_with(tmp_path, 'plain.fits')) is None, \
+            'without CD1_1C/CD2_2C, the binning is unknown'
+        assert focus.exposure_binning(tmp_path / 'missing.fits') is None, \
+            'an unreadable file gives an unknown binning'
+    messages = [r.getMessage() for r in caplog.records]
+    assert any('plain.fits' in m and 'no CD1_1C/CD2_2C' in m for m in messages), \
+        'a header without the binning should be logged as a warning'
+    assert any('missing.fits' in m and 'Could not read the binning' in m for m in messages), \
+        'an unreadable file should be logged as a warning'
+
+
+@pytest.mark.parametrize('cards', [{'CD1_1C': 2., 'CD2_2C': 4.}, {'CD1_1C': 3., 'CD2_2C': 3.}])
+def test_unexpected_binning_is_unknown_and_logged(tmp_path, caplog, cards):
+    path = _fits_with(tmp_path, 'odd.fits', **cards)
+
+    with caplog.at_level(logging.WARNING, logger='nickel_focus'):
+        assert focus.exposure_binning(path) is None, \
+            'unequal values, or values other than 1, 2, or 4, should give an unknown binning'
+    assert any('Unexpected binning' in r.getMessage() for r in caplog.records), \
+        'an unexpected binning should be logged as a warning'
+
+
+@pytest.mark.parametrize('fwhm, binning, expected', [
+    (3.21, None, '3.21 pix'),
+    (3., 2, '3.00 pix (1.00 arcsec)'),
+    (6., 1, '6.00 pix (1.00 arcsec)'),
+    (1.5, 4, '1.50 pix (1.00 arcsec)'),
+])
+def test_fwhm_text(fwhm, binning, expected):
+    assert focus.fwhm_text(fwhm, binning) == expected, \
+        f'FWHM {fwhm} at binning {binning} should read {expected!r}'
+
+
+@pytest.mark.parametrize('binnings, expected', [
+    ([2, 2, 2], 2), ([2, 4], None), ([2, None], None), ([], None),
+])
+def test_common_binning(binnings, expected):
+    assert focus.common_binning(binnings) == expected, \
+        f'{binnings} should have common binning {expected}'
+
+
+# -- exposures that can't be measured -------------------------------------------
+
+def _write_blank(path):
+    """A frame with noise but no star, which can't be measured."""
+    from astropy.io import fits
+    data = np.random.default_rng(1).normal(1000., 10., (101, 101)).astype(np.uint16)
+    fits.writeto(path, data, overwrite=True)
+    return data
+
+
+def test_measure_exposure_keeps_the_image_when_photometry_fails(tmp_path, caplog):
+    path = tmp_path / 'blank.fits'
+    data = _write_blank(path)
+
+    with caplog.at_level(logging.WARNING, logger='nickel_focus'):
+        measurement = focus.measure_exposure(path)
+
+    assert measurement['fwhm'] is None, 'an unmeasurable exposure should have no FWHM'
+    assert measurement['centroid'] is None and measurement['source_index'] is None, \
+        'an unmeasurable exposure should have no source'
+    assert measurement['sources'] is None, 'there should be no detected sources'
+    assert (measurement['raw'] == data).all(), 'the raw image should still be returned'
+    assert measurement['frame'] == pytest.approx(data.astype(float) - np.median(data)), \
+        'the frame shown should be the image less its median'
+    assert 'No sources were detected' in measurement['photometry_error'], \
+        'the reason should be recorded'
+    assert any('Could not measure the image quality of blank.fits' in r.getMessage()
+               for r in caplog.records), 'the failure should be logged as a warning'
+
+
+def test_measure_exposure_still_fails_for_an_unreadable_file(tmp_path):
+    path = tmp_path / 'missing.fits'
+    with pytest.raises(OSError):
+        focus.measure_exposure(path)
+
+
+def test_step_yields_an_unmeasured_exposure_then_stops(focus_sweep):
+    files = list(focus_sweep['files'][:3])
+    _write_blank(files[1])
+    seq = focus.ArchiveFocusSequence(focus_sweep['focus_values'][:3], files)
+
+    results = []
+    with pytest.raises(ValueError, match='Could not measure n2001.fits'):
+        for result in seq.step():
+            results.append(result)
+
+    assert len(results) == 2, 'the unmeasured exposure should still be yielded, then stop'
+    assert results[0].measured and not results[1].measured, \
+        'only the blank exposure should be unmeasured'
+    assert results[1].raw is not None, 'the unmeasured exposure should still carry its image'
+
+
+def test_reanalyze_yields_an_unmeasured_exposure_then_stops(focus_sweep):
+    seq = focus.ArchiveFocusSequence(focus_sweep['focus_values'][:3], focus_sweep['files'][:3])
+    list(seq.step())
+    _write_blank(focus_sweep['files'][0])
+
+    results = []
+    with pytest.raises(ValueError, match='stopping the reanalysis'):
+        for result in seq.reanalyze():
+            results.append(result)
+    assert len(results) == 1 and not results[0].measured, \
+        'the unmeasured exposure should be yielded before the reanalysis stops'
+
+
+def test_fit_best_focus_ignores_unmeasured_exposures():
+    focus_values = [340., 345., 350., 355., 360.]
+    quality = [4., 3.25, 3., 3.25, 4.]
+    best, _ = focus.FocusSequence.fit_best_focus(focus_values + [365.], quality + [None])
+    assert best == pytest.approx(350.), 'an unmeasured exposure should be left out of the fit'
+    with pytest.raises(ValueError, match='Insufficient'):
+        focus.FocusSequence.fit_best_focus([340., 345., 350.], [4., None, 3.])
+
+
+def test_fwhm_helpers_handle_no_measurement():
+    assert focus.fwhm_text(None, 2) == 'not measured', 'no FWHM should read as not measured'
+    assert focus.fwhm_arcsec(None, 2) is None, 'no FWHM should have no arcsec value'
+    assert focus.fwhm_arcsec(3., None) is None, 'an unknown binning should have no arcsec value'
+    assert focus.fwhm_arcsec(3., 2) == pytest.approx(3. * 0.1665 * 2), \
+        'the arcsec value should use the binned plate scale'

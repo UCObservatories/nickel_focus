@@ -89,7 +89,10 @@ Three command-line scripts are installed. All three share a common set of
 logging options:
 
  - `-v`/`--verbosity`: Set the verbosity level: 0 = warnings/errors only, 1 =
-   default, adds informational messages, 2 = adds debug messages.
+   default, adds informational messages, 2 = adds debug messages, 3 = also
+   adds the KTL package's own debug messages.  Warnings and errors from KTL
+   are always included, and level 2 adds its notices.  In the GUI, the Log tab
+   shows the same messages as the console.
 
  - `--log_file`: All logging messages are also passed to a log file; set to
    `default` for an automatically generated file name.
@@ -122,7 +125,10 @@ nickel_slew_to_nearest --starlist my_targets.txt
 The main focus-finding driver. Given a starting focus value and a step size, it
 either follows an automated curve-fitting search or steps through a fixed grid,
 taking an exposure and measuring its image quality at each step, then fits a
-quadratic to focus-vs-FWHM to find the optimum.
+quadratic to focus-vs-FWHM to find the optimum.  The FWHM comes from the second
+moments of each star's light, converted as for a Gaussian (FWHM ≈ 2.35σ), not
+from a profile fit; stars' stronger-than-Gaussian wings may make it read
+somewhat high, but that doesn't bias the best focus.
 
 Examples:
 
@@ -157,7 +163,8 @@ and `--suffix` to locate the archived files.
 ### `nickel_focus_gui`
 
 Launch a Qt-based GUI to perform the same focusing functionality — slewing,
-single exposures, grid sequences, and automated sequences — with live plots of
+pointing corrections, single exposures, grid sequences, and automated
+sequences — with live plots of
 the current frame, per-exposure source stamps, and the evolving focus curve.
 Requires the `gui` extra dependencies (PySide6). Takes no arguments beyond the
 shared logging options above.
@@ -197,10 +204,22 @@ or via `tox` (see `tox.ini` for the versions that are tested)
 tox -e 3.12-test-qt
 ```
 
-> **IMPORTANT**: None of the tests actually exercise the `ktl` connections
-> established to manipulate the telescope hardware.  All tests wire in fake
-> hardware for this purpose, but it represents a gap in actual, real-world
-> testing.
+> **IMPORTANT**: The normal test suite never connects to the telescope or
+> camera, whether or not `ktl` is installed.  It runs the real code on a fake
+> `ktl` (`nickel_focus/tests/fake_ktl.py`) with a simulated telescope and
+> camera, which checks our logic but not the real services' behavior.
+
+At the telescope, a small set of **live tests** checks the real `ktl`
+services.  They run only when requested with `--ktl-live`:
+
+```console
+pytest nickel_focus/tests --ktl-live               # normal suite plus the live tests
+pytest nickel_focus/tests --ktl-live -m ktl_live   # live tests only
+```
+
+They need a live `ktl` connection, and fail (rather than skip) without one.
+They **never change a keyword value**: every service they use is read-only,
+so any attempted write raises an error before it reaches `ktl`.
 
 ### Deployment
 

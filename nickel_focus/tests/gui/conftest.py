@@ -6,6 +6,7 @@ rest of the test suite (Qt-free) is unaffected either way. Also forces
 the offscreen Qt platform plugin, so these tests never need a real
 display.
 """
+import gc
 import os
 
 import pytest
@@ -14,15 +15,47 @@ pytest.importorskip('PySide6')
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
+# Bound once here, not imported at teardown: a test may hide PySide6 from
+# imports (see test_qt_shim.py) until its own teardown.
+from PySide6 import QtCore, QtWidgets
+
 from nickel_focus import log
 from nickel_focus.gui.log_handler import QtLogHandler
 
 
 @pytest.fixture(scope='session')
 def qapp():
-    """The (session-wide, singleton) QApplication needed to create any Qt widget."""
-    from nickel_focus.gui.qt import QtWidgets
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    """
+    The (session-wide, singleton) QApplication needed to create any Qt widget,
+    built the same way the GUI builds it (including its widget style).
+    """
+    from nickel_focus.gui import launcher
+    return launcher.build_app()
+
+
+@pytest.fixture(autouse=True)
+def _settle_qt():
+    """
+    Once a test finishes, run any Qt events it left pending, then free its
+    widgets.
+
+    A test's windows usually sit in reference cycles (e.g. a Controller and
+    its window's signals), so Python would otherwise free them at some
+    unpredictable later point -- often during a later test.  Any redraw a
+    window had scheduled (matplotlib's ``draw_idle`` is a zero-delay Qt
+    timer) would then fire on an already-deleted canvas, raising
+    "Internal C++ object already deleted" or crashing.  Running the pending
+    events first, while the widgets still exist, and then collecting them
+    immediately keeps each test's widgets from outliving it.
+    """
+    yield
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    app.processEvents()
+    gc.collect()
+    app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    app.processEvents()
 
 
 @pytest.fixture(autouse=True)
@@ -35,19 +68,3 @@ def _remove_qt_log_handlers():
     yield
     log.remove_handlers_of_type(QtLogHandler)
 
-
-@pytest.fixture(autouse=True)
-def isolate_qsettings(monkeypatch, tmp_path):
-    """
-    Redirect `MainWindow`'s settings persistence (GUI_DESIGN.md §9 phase
-    5) to an isolated, per-test ini file instead of the real application
-    preferences store. Without this, every test that constructs --  and
-    especially every test that closes -- a `MainWindow` would read from
-    and write to the developer's actual saved GUI settings on disk.
-    """
-    from nickel_focus.gui.qt import QtCore
-    from nickel_focus.gui.views.main_window import MainWindow
-    settings_path = str(tmp_path / 'test_settings.ini')
-    monkeypatch.setattr(
-        MainWindow, '_settings',
-        lambda self: QtCore.QSettings(settings_path, QtCore.QSettings.Format.IniFormat))

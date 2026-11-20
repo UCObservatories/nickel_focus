@@ -1,6 +1,6 @@
 """
-Interface to the Nickel telescope's pointing/tracking hardware via KTL, plus a
-helper to locate the nearest known target in a starlist.
+Pointing the Nickel telescope (:class:`NickelTelescopePointing`), plus a helper
+to locate the nearest known target in a starlist.
 """
 
 from pathlib import Path
@@ -8,54 +8,35 @@ from pathlib import Path
 from astropy.coordinates import Angle, SkyCoord
 import numpy as np
 
-from nickel_focus import ktl
 from nickel_focus import log
 from nickel_focus import starlist
+from nickel_focus.services.base import require
 
 
 class NickelTelescopePointing:
     """
-    KTL object used to manipulate the telescope pointing.
+    Read and command the telescope's pointing.
 
-    Raises
-    ------
-    RuntimeError
-        Raised if the :mod:`ktl` package is not available.
+    Parameters
+    ----------
+    poco : :class:`~nickel_focus.services.nickelpoco.NickelPoco`
+        The telescope service.
     """
-    def __init__(self):
-        if ktl is None:
-            raise RuntimeError(
-                'The ktl package is not available.  Controlling the telescope pointing requires a '
-                'kpython environment with ktl installed.'
-            )
-
-        # Controls overall movement of mechanisms
-        self.pocstop = ktl.cache('nickelpoco', 'POCSTOP')
-        # Indicates whether or not the telescope is tracking
-        self.track = ktl.cache('nickelpoco', 'POCTRCK')
-        # Indicates whether or not the telescope is ready to move to a target
-        self.target = ktl.cache('nickelpoco', 'POCOT')
-        # Provides the actual RA of the telescope pointing
-        self.raa = ktl.cache('nickelpoco', 'POCORAA')
-        # Sets the desired RA of the telescope pointing
-        self.rad = ktl.cache('nickelpoco', 'POCORAD')
-        # Provides the actual Dec of the telescope pointing
-        self.deca = ktl.cache('nickelpoco', 'POCODECA')
-        # Sets the desired Dec of the telescope pointing
-        self.decd = ktl.cache('nickelpoco', 'POCODECD')
+    def __init__(self, poco):
+        self.poco = poco
 
     @property
     def current(self):
         """
-        The telescope's current pointing, read live from the KTL
-        ``POCORAA``/``POCODECA`` keywords.
+        The telescope's current pointing (see
+        :meth:`~nickel_focus.services.nickelpoco.NickelPoco.pointing`).
 
         Returns
         -------
         astropy.coordinates.SkyCoord
             The current RA/Dec.
         """
-        return SkyCoord(ra=self.raa.read(), dec=self.deca.read(), unit=('hourangle', 'deg'))
+        return self.poco.pointing()
 
     def slew_to(self, ra, dec):
         """
@@ -79,28 +60,96 @@ class NickelTelescopePointing:
             Raised if telescope movement is disabled, tracking is disabled, the
             telescope is not ready to move to a new target, or the telescope
             fails to reach the target within 5 minutes.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the telescope service doesn't reply to one of these
+            checks.
         """
-        if not self.pocstop.waitFor('== allowed', timeout=0.5):
-            raise ValueError('Telescope movement is disabled!')
-
-        if not self.track.waitFor('== on', timeout=0.5):
-            raise ValueError('Tracking is disabled!')
-
-        if not self.target.waitFor('== 0', timeout=0.5):
-            raise ValueError('Telescope is not ready to move to a new target!')
+        require(
+            self.poco.movement_allowed(timeout=0.5), 'Telescope movement is disabled!',
+            'No reply from nickelpoco.POCSTOP; cannot tell whether telescope movement is allowed.'
+        )
+        require(
+            self.poco.tracking(timeout=0.5), 'Tracking is disabled!',
+            'No reply from nickelpoco.POCTRCK; cannot tell whether the telescope is tracking.'
+        )
+        require(
+            self.poco.on_target(timeout=0.5), 'Telescope is not ready to move to a new target!',
+            'No reply from nickelpoco.POCOT; cannot tell whether the telescope is ready to move.'
+        )
 
         # TODO: Need to add checks that the request is within the pointing
         # limits.
-        log.info(f'Moving to RA={ra}, Dec={dec}')
         target_coo = SkyCoord(ra=ra, dec=dec, unit=('hourangle', 'deg'))
-        self.rad.write(target_coo.ra.to('hourangle').value)
-        self.decd.write(target_coo.dec.to('deg').value)
+        ra_text = target_coo.ra.to_string(unit='hourangle', sep=':', pad=True, precision=2)
+        dec_text = target_coo.dec.to_string(
+            unit='deg', sep=':', pad=True, alwayssign=True, precision=2
+        )
+        log.info(f'Moving to RA={ra_text}, Dec={dec_text}')
+        # Written in binary radians (see NickelPoco.set_pointing_demand).
+        self.poco.set_pointing_demand(target_coo.ra, target_coo.dec)
 
         # TODO: Need a better way to determine if the move fails!  Timeout
         # currently set at 5 min.
-        if not self.target.waitFor('== 0', timeout=300):
-            # TODO: Is there a way to appropriately handle this?
-            raise ValueError('Telescope failed to make it to target within 5 min.')
+        # TODO: Is there a way to appropriately handle a failed move?
+        require(
+            self.poco.on_target(timeout=300),
+            'Telescope failed to make it to target within 5 min.',
+            'No reply from nickelpoco.POCOT; cannot tell whether the telescope reached the target.'
+        )
+
+    def apply_offset(self, east, north):
+        """
+        Offset the telescope's pointing, then mark the new position as on
+        target, after checking that the telescope may move.
+
+        The offset goes through the guider offsets (see
+        :meth:`~nickel_focus.services.nickelpoco.NickelPoco.apply_guider_offset`),
+        and then ``POCGDOT`` marks the telescope on target (see
+        :meth:`~nickel_focus.services.nickelpoco.NickelPoco.mark_guider_on_target`).
+        If the telescope doesn't then report being on target, a warning is
+        logged, but the offset itself succeeded, so nothing is raised.
+
+        Parameters
+        ----------
+        east, north : :obj:`float`
+            The offset, in arcseconds on the sky: positive points the
+            telescope further East and North.
+
+        Raises
+        ------
+        ValueError
+            Raised if telescope movement is disabled, tracking is disabled, or
+            the offset doesn't finish or fails.
+        ~nickel_focus.services.base.KTLTimeoutError
+            Raised if the telescope service doesn't reply.
+        """
+        # Imported here, not at the top, so that pointing (and the plotting
+        # it imports through focus) isn't loaded just to slew.
+        from nickel_focus.pointing import offset_text
+
+        require(
+            self.poco.movement_allowed(timeout=0.5), 'Telescope movement is disabled!',
+            'No reply from nickelpoco.POCSTOP; cannot tell whether telescope movement is allowed.'
+        )
+        require(
+            self.poco.tracking(timeout=0.5), 'Tracking is disabled!',
+            'No reply from nickelpoco.POCTRCK; cannot tell whether the telescope is tracking.'
+        )
+        log.info(f'Applying pointing offset: {offset_text(east, north)}')
+        self.poco.apply_guider_offset(east, north)
+        on_target = self.poco.mark_guider_on_target()
+        if on_target:
+            log.info('Pointing offset applied; marked on target.')
+        elif on_target is None:
+            log.warning(
+                'Pointing offset applied, but nickelpoco.POCOT did not reply, so whether the '
+                'telescope is marked on target is unknown.'
+            )
+        else:
+            log.warning(
+                'Pointing offset applied, but the telescope did not report being on target '
+                '(nickelpoco.POCOT) after it was marked on target.'
+            )
 
 
 def find_nearest_target(telescope_coo, obj_search_str=None, file=None):

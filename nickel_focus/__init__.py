@@ -13,6 +13,3 @@ __version__ = version
 import logging
 from .pkg.logger import get_logger
 log = get_logger(level=logging.INFO)
-
-# Do a global import of ktl so that it is only done once.
-from .pkg.ktl import ktl

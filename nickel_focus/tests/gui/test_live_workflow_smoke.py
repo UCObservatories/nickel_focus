@@ -1,13 +1,11 @@
 """
-End-to-end fake-hardware smoke test for the full live-mode feature set
-(Phase 3, plus the Phase 4 tabbed redesign).
+End-to-end fake-hardware smoke test for the full live-mode feature set.
 
 Unlike `test_controller.py`, which tests each live-mode action in
 isolation, this drives one `Controller` through the full feature set
-against `fake_hardware`, in the order an observer would actually use it
-(GUI_DESIGN.md §5.5's own "typical use" narrative, adapted for the
-Single tab): take a standalone exposure to confirm the field and mark a
-star via a click, start a real sequence that measures that marked star,
+against `fake_hardware`, in the order an observer would actually use it:
+take a standalone exposure to confirm the field and mark a star on it
+(the 'm' key), start a real sequence that measures that marked star,
 move to its best focus via the Single tab's auto-populated default, mark
 a *different* source (now that a sequence is loaded, this should
 reanalyze the loaded sequence instead of a standalone exposure), take
@@ -22,6 +20,7 @@ from nickel_focus import focus
 from nickel_focus.gui.qt import QtCore
 from nickel_focus.gui.views.main_window import MainWindow
 from nickel_focus.gui.controller import Controller
+from nickel_focus.tests.gui.keyboard import type_and_enter
 
 
 def _wait_for_focus_worker(controller, timeout_ms=5000):
@@ -34,7 +33,7 @@ def _wait_for_focus_worker(controller, timeout_ms=5000):
     loop.exec()
 
 
-def test_phase3_full_live_workflow(qapp, fake_hardware):
+def test_full_live_workflow(qapp, fake_hardware):
     window = MainWindow()
     controller = Controller(window)
     panel = window.control_panel
@@ -52,12 +51,13 @@ def test_phase3_full_live_workflow(qapp, fake_hardware):
     assert len(window.image_panel._results) == 1, 'the standalone exposure should be displayed'
     assert len(window.curve_panel._results) == 0, 'not sequence data'
 
-    # 2. Mark a star on it via a click -- with no sequence loaded, this
-    #    should reanalyze that one standalone exposure in place (§5.6).
+    # 2. Mark a star on it (as if by the 'm' key) -- with no sequence
+    #    loaded, this should reanalyze that one standalone exposure in
+    #    place.
     controller._on_source_selected(50., 50.)
     _wait_for_focus_worker(controller)
 
-    assert controller.method == (50., 50.), 'clicking a source should update the active method'
+    assert controller.method == (50., 50.), 'selecting a source should update the active method'
     assert len(window.image_panel._results) == 1, 'reanalysis should update in place, not duplicate'
     assert len(window.curve_panel._results) == 0, 'still not sequence data'
 
@@ -67,7 +67,7 @@ def test_phase3_full_live_workflow(qapp, fake_hardware):
     panel.grid_start_spin.setValue(340)
     panel.grid_step_spin.setValue(5)
     panel.grid_nstep_spin.setValue(5)
-    panel.grid_exptime_spin.setValue(5.0)
+    type_and_enter(panel.grid_exptime_spin, '5')
     panel.grid_acquire_button.click()
     _wait_for_focus_worker(controller)
 
@@ -91,21 +91,21 @@ def test_phase3_full_live_workflow(qapp, fake_hardware):
     panel.single_acquire_button.click()
     _wait_for_focus_worker(controller)
 
-    assert fake_hardware['focus'].current == best_focus, \
-        'the fake Focus should have been commanded to the (rounded) fitted best focus'
+    assert fake_hardware['sim'].focus == best_focus, \
+        'the simulated focus should have been commanded to the (rounded) fitted best focus'
     assert len(window.image_panel._results) == 6, 'the confirmation exposure should be displayed'
     assert len(window.curve_panel._results) == 5, 'a confirmation exposure is not sequence data'
-    assert f'{best_focus:.0f}' in panel.status_label.text(), \
-        'the result should be reported in the status'
+    assert f'{best_focus:.0f}' in panel.log_widget.toPlainText(), \
+        'the result should be logged, and so shown on the Log tab'
 
-    # 5. Mark a different source via a click. A sequence is loaded now,
+    # 5. Mark a different source. A sequence is loaded now,
     #    so this reanalyzes *it*, not the by-then-secondary standalone
     #    exposure from step 4 (whichever is "loaded" takes priority --
     #    see `Controller.reanalyze`).
     controller._on_source_selected(55., 55.)
     _wait_for_focus_worker(controller)
 
-    assert controller.method == (55., 55.)
+    assert controller.method == (55., 55.), 'selecting a source should update the active method'
     assert len(controller.focus_sequence.exposures) == 5, \
         "reanalysis updates in place, doesn't add"
     assert len(window.curve_panel._results) == 5, 'the loaded sequence was reanalyzed, not added to'

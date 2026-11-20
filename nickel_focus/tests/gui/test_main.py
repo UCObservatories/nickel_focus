@@ -1,6 +1,4 @@
 """Smoke tests for :mod:`nickel_focus.gui.launcher`'s scaffolding."""
-import os
-
 import pytest
 
 from nickel_focus.gui import launcher
@@ -102,7 +100,7 @@ def test_control_panel_gets_a_typical_tab_sized_initial_share(qapp):
     assert right.sizes()[1] == pytest.approx(panel.preferred_height_excluding_help(), abs=5), \
         "the control panel's initial height share should match its preferred height"
     for tab_name in ('slew_tab', 'single_tab', 'grid_tab', 'auto_tab', 'replay_tab',
-                      'log_tab', 'options_tab'):
+                      'log_tab'):
         tab = getattr(panel, tab_name)
         assert right.sizes()[1] >= tab.widget().minimumSizeHint().height(), \
             f'{tab_name} should fit within the initial share without scrolling'
@@ -110,90 +108,42 @@ def test_control_panel_gets_a_typical_tab_sized_initial_share(qapp):
     window.close()
 
 
-def test_settings_default_unchecked_and_nothing_is_ever_written(qapp):
-    # The `isolate_qsettings` autouse fixture (see conftest.py) points
-    # MainWindow._settings() at a per-test ini file, but doesn't create
-    # it -- so this also verifies that merely opening/closing a window
-    # without opting in creates no settings file at all, not just that
-    # values don't come back.
+def test_status_bar_sits_directly_above_the_image_panel(qapp):
     window = launcher.build_window()
-    settings_path = window._settings().fileName()
-    assert not window.control_panel.remember_settings_checkbox.isChecked(), \
-        'persistence should default to opted out'
+    window.show()
+    qapp.processEvents()
 
-    window.control_panel.grid_start_spin.setValue(311)
+    assert window.status_bar.parentWidget() is window.image_panel.parentWidget(), \
+        'the status bar should share the left column with the image panel'
+    assert window.status_bar.geometry().bottom() < window.image_panel.geometry().top(), \
+        'the status bar should be above the image panel'
     window.close()
 
-    assert not os.path.exists(settings_path), \
-        'closing without opting in should never create a settings file'
 
-    window2 = launcher.build_window()
-    assert not window2.control_panel.remember_settings_checkbox.isChecked(), \
-        'still opted out -- there is nothing to have detected'
-    assert window2.control_panel.grid_start_spin.value() != 311, \
-        'nothing should have been restored'
-    window2.close()
-
-
-def test_settings_are_saved_on_close_and_restored_on_open_once_opted_in(qapp):
-    # Both windows here share the same isolated settings file, since
-    # `isolate_qsettings` fixes it for the life of one test.
+def test_status_bar_lines_up_with_and_sits_close_to_the_image_panel_rows(qapp):
     window = launcher.build_window()
-    window.control_panel.remember_settings_checkbox.setChecked(True)
-    window.control_panel.grid_start_spin.setValue(311)
-    window.control_panel.tabs.setCurrentWidget(window.control_panel.replay_tab)
-    window.control_panel.replay_datadir_edit.setText('/persisted/dir')
-    window.image_panel.stretch_combo.setCurrentText('Min/Max')
+    window.show()
+    qapp.processEvents()
+    status_bar, image_panel = window.status_bar, window.image_panel
 
-    window.close()
-    window2 = launcher.build_window()
+    def window_rect(widget):
+        return QtCore.QRect(widget.mapTo(window, QtCore.QPoint(0, 0)), widget.size())
 
-    assert window2.control_panel.remember_settings_checkbox.isChecked(), \
-        'opting in should itself be detected and restored'
-    assert window2.control_panel.grid_start_spin.value() == 311, \
-        'the Grid start focus should have been restored'
-    assert window2.control_panel.replay_datadir_edit.text() == '/persisted/dir', \
-        'the Replay data directory should have been restored'
-    assert window2.image_panel._stretch_name == 'Min/Max', \
-        'the stretch preference should have been restored'
+    quit_rect = window_rect(status_bar.quit_button)
+    exp_rect = window_rect(status_bar.indicators['exp'])
+    combo_row = image_panel.layout().itemAt(0).layout()
+    label_rect = window_rect(combo_row.itemAt(0).widget())
+    stretch_rect = window_rect(image_panel.stretch_combo)
 
-    window2.close()
-
-
-def test_settings_do_not_restore_a_stale_single_tab_focus_value(qapp):
-    window = launcher.build_window()
-    window.control_panel.remember_settings_checkbox.setChecked(True)
-    window.control_panel.single_focus_spin.setValue(499)
+    assert quit_rect.left() == label_rect.left(), 'left edges should line up'
+    assert exp_rect.right() == stretch_rect.right(), 'right edges should line up'
+    gap = window_rect(image_panel.exposure_combo).top() - quit_rect.bottom()
+    assert gap <= 4, f'the status bar should sit tight against the Exposure row (gap {gap}px)'
     window.close()
 
-    window2 = launcher.build_window()
 
-    assert window2.control_panel.single_focus_spin.value() != 499, \
-        "the Single tab's focus default should not be restored from a previous session"
-    window2.close()
-
-
-def test_unchecking_settings_erases_previously_saved_configuration(qapp):
-    window = launcher.build_window()
-    window.control_panel.remember_settings_checkbox.setChecked(True)
-    window.control_panel.grid_start_spin.setValue(311)
-    window.close()
-
-    window2 = launcher.build_window()
-    assert window2.control_panel.grid_start_spin.value() == 311, 'setup: opting in should persist'
-    window2.control_panel.remember_settings_checkbox.setChecked(False)
-    window2.close()
-
-    settings_path = window2._settings().fileName()
-    assert os.path.exists(settings_path), \
-        'the file itself may still exist (Qt does not delete an emptied ini file), but...'
-    settings = QtCore.QSettings(settings_path, QtCore.QSettings.Format.IniFormat)
-    assert 'control_panel' not in settings.childGroups(), \
-        'its contents should be erased once the user opts back out'
-
-    window3 = launcher.build_window()
-    assert not window3.control_panel.remember_settings_checkbox.isChecked(), \
-        'opting back out should itself be detected on the next launch'
-    assert window3.control_panel.grid_start_spin.value() != 311, \
-        'the erased configuration should not come back'
-    window3.close()
+def test_build_app_uses_the_fusion_style(qapp):
+    # Fusion is the default on Linux (where the GUI is deployed); forcing it
+    # everywhere keeps the layout the same on other platforms, e.g. macOS.
+    assert launcher.build_app().style().name().lower() == 'fusion', \
+        'the app should use the Fusion style'

@@ -28,7 +28,8 @@ def test_cli_archive_mode_runs_end_to_end(focus_sweep, caplog):
 
     messages = [r.getMessage() for r in caplog.records if r.name == 'nickel_focus']
     assert any('Best focus:' in m for m in messages), 'CLI should log the fitted best focus'
-    assert any('Expected sigma:' in m for m in messages), 'CLI should log the expected sigma'
+    assert any(m.startswith('Expected FWHM:') and m.endswith(' pix') for m in messages), \
+        'CLI should log the expected FWHM (in pixels only: these files record no binning)'
     assert not any('Wrote focus data' in m for m in messages), \
         'no output file was requested, so nothing should be written'
 
@@ -78,3 +79,23 @@ def test_cli_verbosity_flag_controls_console_level():
 
     NickelFocus.init_log(NickelFocus.parse_args(['300', '5', '-v', '2']))
     assert log.sh.level == logging.DEBUG, '-v 2 should set the console handler to debug'
+
+
+def test_cli_live_grid_runs_on_its_own_services(fake_hardware, caplog):
+    argv = ['340', '5', '-n', '5', '-t', '7.5', '--no-plot']
+
+    with caplog.at_level(logging.INFO, logger='nickel_focus'):
+        NickelFocus.main(NickelFocus.parse_args(argv))
+
+    sim = fake_hardware['sim']
+    assert sim.exposure_count == 5, 'one exposure per step'
+    assert sim.focus == 360., 'the focus should have been stepped to the last grid value'
+    assert sim.keyword('nscicam', 'EXPOSURE').writes == [7.5], 'the exposure time is applied once'
+    messages = [r.getMessage() for r in caplog.records if r.name == 'nickel_focus']
+    assert any('Best focus:' in m for m in messages), 'the CLI should log the best focus'
+
+
+def test_cli_live_mode_without_ktl_fails_clearly():
+    from nickel_focus.services import KTLUnavailableError
+    with pytest.raises(KTLUnavailableError, match='ktl package is not available'):
+        NickelFocus.main(NickelFocus.parse_args(['340', '5', '-n', '5', '--no-plot']))
